@@ -1,0 +1,31 @@
+# Test Makefile with fixed, pattern, and pseudo rules
+
+CC = gcc
+CFLAGS = -Wall -O2
+
+.PHONY: all clean test
+
+.PRECIOUS: %.o
+
+# Fixed rules
+all: program
+
+program: main.o utils.o helper.o
+	$(CC) $(CFLAGS) -o program main.o utils.o helper.o
+
+main.o: main.c
+	$(CC) $(CFLAGS) -c main.c
+
+# Pattern rules
+%.o: %.c
+	$(CC) $(CFLAGS) -c $<
+
+%.d: %.c
+	$(CC) -MM $< > $@
+
+# More fixed rules
+clean:
+	rm -f *.o *.d program
+
+test: program
+	./program --test

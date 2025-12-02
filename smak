@@ -27,13 +27,36 @@ my $echo = 0;  # Echo command lines (including prompt)
 my $makefile = 'Makefile';
 my $debug = 0;
 my $help = 0;
+my $script_file = '';
 
-# Parse command-line options
+# Parse environment variable options first
+if (defined $ENV{USR_SMAK_OPT}) {
+    # Split the environment variable into arguments
+    my @env_args = split(/\s+/, $ENV{USR_SMAK_OPT});
+    # Save original @ARGV
+    my @saved_argv = @ARGV;
+    # Process environment options
+    @ARGV = @env_args;
+    GetOptions(
+        'f|file|makefile=s' => \$makefile,
+        'Kd|Kdebug' => \$debug,
+        'Kh|Khelp' => \$help,
+        'Ks|Kscript=s' => \$script_file,
+    );
+    # Restore and append remaining command line args
+    @ARGV = @saved_argv;
+}
+
+# Parse command-line options (override environment)
 GetOptions(
     'f|file|makefile=s' => \$makefile,
     'Kd|Kdebug' => \$debug,
     'Kh|Khelp' => \$help,
+    'Ks|Kscript=s' => \$script_file,
 ) or die "Error in command line arguments\n";
+
+# Remaining arguments are targets to build
+my @targets = @ARGV;
 
 if ($help) {
     print_help();
@@ -42,12 +65,20 @@ if ($help) {
 
 sub print_help {
     print <<'HELP';
-Usage: smak [options]
+Usage: smak [options] [targets...]
 
 Options:
-  -Kf, -Kfile, -Kmakefile FILE   Use FILE as a makefile (default: Makefile)
-  -Kd, -Kdebug                   Enter interactive debug mode
-  -Kh, -Khelp                    Display this help message
+  -f, -file, -makefile FILE   Use FILE as a makefile (default: Makefile)
+  -Kd, -Kdebug                Enter interactive debug mode
+  -Ks, -Kscript FILE          Load and execute smak commands from FILE
+  -Kh, -Khelp                 Display this help message
+
+Environment Variables:
+  USR_SMAK_OPT                Options to prepend (e.g., "USR_SMAK_OPT=-Kd")
+
+Examples:
+  smak -Ks fixes.smak all     Load fixes, then build target 'all'
+  USR_SMAK_OPT='-Ks fixes.smak' smak target
 
 HELP
 }
@@ -468,6 +499,22 @@ save_current_rule();
 
 close($fh);
 
+# Execute script file if specified
+if ($script_file) {
+    execute_script($script_file);
+}
+
+# If targets specified but not in debug mode, run dry-run
+if (@targets && !$debug) {
+    foreach my $target (@targets) {
+        print "Building target '$target':\n";
+        print "=" x 60 . "\n";
+        dry_run_target($target);
+        print "\n";
+    }
+    exit 0;
+}
+
 # Debug mode or normal output
 if ($debug) {
     interactive_debug();
@@ -579,6 +626,90 @@ sub dry_run_target {
         my $expanded = expand_vars($converted);
         print $expanded;
     }
+}
+
+sub execute_script {
+    my ($filename) = @_;
+
+    open(my $script_fh, '<', $filename) or die "Cannot open script file '$filename': $!\n";
+
+    while (my $line = <$script_fh>) {
+        chomp $line;
+
+        # Skip empty lines and comments
+        next if $line =~ /^\s*$/ || $line =~ /^\s*#/;
+
+        # Process commands (simplified version of interactive_debug command processing)
+        if ($line =~ /^\s*add-rule\s+(.+?)\s*:\s*(.+?)\s*:\s*(.+)$/i) {
+            my ($target, $deps_str, $rule_text) = ($1, $2, $3);
+            $target =~ s/^\s+|\s+$//g;
+            $deps_str =~ s/^\s+|\s+$//g;
+            $rule_text =~ s/\\n/\n/g;
+            $rule_text =~ s/\\t/\t/g;
+            $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+
+            my @deps = split(/\s+/, $deps_str);
+            my $key = "$makefile\t$target";
+            my $type = classify_target($target);
+
+            if ($type eq 'fixed') {
+                $fixed_rule{$key} = $rule_text;
+                $fixed_deps{$key} = \@deps;
+            } elsif ($type eq 'pattern') {
+                $pattern_rule{$key} = $rule_text;
+                $pattern_deps{$key} = \@deps;
+            } else {
+                $pseudo_rule{$key} = $rule_text;
+                $pseudo_deps{$key} = \@deps;
+            }
+        }
+        elsif ($line =~ /^\s*mod-rule\s+(.+?)\s*:\s*(.+)$/i) {
+            my ($target, $rule_text) = ($1, $2);
+            $target =~ s/^\s+|\s+$//g;
+            $rule_text =~ s/\\n/\n/g;
+            $rule_text =~ s/\\t/\t/g;
+            $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+
+            my $key = "$makefile\t$target";
+
+            if (exists $fixed_rule{$key}) {
+                $fixed_rule{$key} = $rule_text;
+            } elsif (exists $pattern_rule{$key}) {
+                $pattern_rule{$key} = $rule_text;
+            } elsif (exists $pseudo_rule{$key}) {
+                $pseudo_rule{$key} = $rule_text;
+            }
+        }
+        elsif ($line =~ /^\s*mod-deps\s+(.+?)\s*:\s*(.+)$/i) {
+            my ($target, $deps_str) = ($1, $2);
+            $target =~ s/^\s+|\s+$//g;
+            $deps_str =~ s/^\s+|\s+$//g;
+            my @deps = split(/\s+/, $deps_str);
+
+            my $key = "$makefile\t$target";
+
+            if (exists $fixed_deps{$key}) {
+                $fixed_deps{$key} = \@deps;
+            } elsif (exists $pattern_deps{$key}) {
+                $pattern_deps{$key} = \@deps;
+            } elsif (exists $pseudo_deps{$key}) {
+                $pseudo_deps{$key} = \@deps;
+            }
+        }
+        elsif ($line =~ /^\s*del-rule\s+(\S+)\s*$/i) {
+            my $target = $1;
+            my $key = "$makefile\t$target";
+
+            delete $fixed_rule{$key};
+            delete $fixed_deps{$key};
+            delete $pattern_rule{$key};
+            delete $pattern_deps{$key};
+            delete $pseudo_rule{$key};
+            delete $pseudo_deps{$key};
+        }
+    }
+
+    close($script_fh);
 }
 
 sub print_debug_help {

@@ -1,0 +1,9 @@
+# Test script for -Ks option
+# Add a new rule
+add-rule mytest : foo.o bar.o : \tgcc -o mytest foo.o bar.o\n\techo Built mytest
+
+# Modify dependencies for all
+mod-deps all : test.o mytest
+
+# Delete the clean rule
+del-rule clean

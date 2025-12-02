@@ -4,7 +4,7 @@
 echo "Testing nested variable expansion..."
 echo ""
 
-cat <<'EOF' | ./smak -Kf Makefile.nested -Kd
+cat <<'EOF' | ./smak -f Makefile.nested -Kd
 print "CC = $(CC)"
 print "CFLAGS = $(CFLAGS)"
 print "COMPILE = $(COMPILE)"

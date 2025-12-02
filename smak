@@ -171,8 +171,7 @@ sub print_rules {
     }
 }
 
-sub interactive_debug {
-    print "Interactive debug mode - parsed $makefile\n";
+sub print_debug_help {
     print "Commands:\n";
     print "  list [fixed|pattern|pseudo] - List targets (optionally by type)\n";
     print "  rule <target>               - Show rule for target\n";
@@ -182,7 +181,14 @@ sub interactive_debug {
     print "  fixed                       - Show only fixed rules\n";
     print "  pattern                     - Show only pattern rules\n";
     print "  pseudo                      - Show only pseudo rules\n";
+    print "  print <expr>                - Evaluate and print Perl expression\n";
+    print "  help                        - Show this help message\n";
     print "  quit                        - Exit debug mode\n";
+}
+
+sub interactive_debug {
+    print "Interactive debug mode - parsed $makefile\n";
+    print_debug_help();
     print "\n";
 
     while (1) {
@@ -303,11 +309,23 @@ sub interactive_debug {
         elsif ($input =~ /^\s*pseudo\s*$/i) {
             print_category('pseudo');
         }
+        elsif ($input =~ /^\s*help\s*$/i) {
+            print_debug_help();
+        }
+        elsif ($input =~ /^\s*print\s+(.+)$/i) {
+            my $expr = $1;
+            my $result = eval $expr;
+            if ($@) {
+                print "Error evaluating expression: $@";
+            } else {
+                print "$result\n";
+            }
+        }
         elsif ($input =~ /^\s*$/i) {
             # Ignore empty lines
         }
         else {
-            print "Unknown command. Type 'quit' to exit.\n";
+            print "Unknown command. Type 'help' for available commands.\n";
         }
     }
 

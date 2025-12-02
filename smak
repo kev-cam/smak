@@ -30,7 +30,7 @@ my $help = 0;
 
 # Parse command-line options
 GetOptions(
-    'Kf|Kfile|Kmakefile=s' => \$makefile,
+    'f|file|makefile=s' => \$makefile,
     'Kd|Kdebug' => \$debug,
     'Kh|Khelp' => \$help,
 ) or die "Error in command line arguments\n";

@@ -4,7 +4,7 @@
 echo "Testing eval and set commands..."
 echo ""
 
-cat <<'EOF' | ./smak -Kf Makefile.nested -Kd
+cat <<'EOF' | ./smak -f Makefile.nested -Kd
 set
 eval $timeout = 10
 set

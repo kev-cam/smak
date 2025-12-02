@@ -28,9 +28,26 @@ my $makefile = 'Makefile';
 my $debug = 0;
 my $help = 0;
 
-# Parse command-line options
+# Parse environment variable options first
+if (defined $ENV{USR_SMAK_OPT}) {
+    # Split the environment variable into arguments
+    my @env_args = split(/\s+/, $ENV{USR_SMAK_OPT});
+    # Save original @ARGV
+    my @saved_argv = @ARGV;
+    # Process environment options
+    @ARGV = @env_args;
+    GetOptions(
+        'f|file|makefile=s' => \$makefile,
+        'Kd|Kdebug' => \$debug,
+        'Kh|Khelp' => \$help,
+    );
+    # Restore and append remaining command line args
+    @ARGV = @saved_argv;
+}
+
+# Parse command-line options (override environment)
 GetOptions(
-    'Kf|Kfile|Kmakefile=s' => \$makefile,
+    'f|file|makefile=s' => \$makefile,
     'Kd|Kdebug' => \$debug,
     'Kh|Khelp' => \$help,
 ) or die "Error in command line arguments\n";
@@ -45,9 +62,12 @@ sub print_help {
 Usage: smak [options]
 
 Options:
-  -Kf, -Kfile, -Kmakefile FILE   Use FILE as a makefile (default: Makefile)
-  -Kd, -Kdebug                   Enter interactive debug mode
-  -Kh, -Khelp                    Display this help message
+  -f, -file, -makefile FILE   Use FILE as a makefile (default: Makefile)
+  -Kd, -Kdebug                Enter interactive debug mode
+  -Kh, -Khelp                 Display this help message
+
+Environment Variables:
+  USR_SMAK_OPT                Options to prepend (e.g., "USR_SMAK_OPT=-Kd")
 
 HELP
 }

@@ -18,6 +18,8 @@ my %MV;
 
 # Control variables
 my $timeout = 5;  # Timeout for print command evaluation in seconds
+my $prompt = "smak> ";  # Prompt string for interactive mode
+my $echo = 0;  # Echo command lines (including prompt)
 
 my $makefile = 'Makefile';
 my $debug = 0;
@@ -69,13 +71,53 @@ sub expand_vars {
     $depth ||= 0;
     return $text if $depth > 10;  # Prevent infinite recursion
 
-    # Expand $(VAR) references
+    # Expand $(function args) and $(VAR) references
     while ($text =~ /\$\(([^)]+)\)/) {
-        my $var = $1;
-        my $value = $MV{$var} || "";
-        $text =~ s/\$\($var\)/$value/g;
-        # Recursively expand the result
-        $text = expand_vars($text, $depth + 1) if $value =~ /\$/;
+        my $content = $1;
+        my $replacement;
+
+        # Check if it's a function call (contains space or comma)
+        if ($content =~ /^(\w+)\s+(.+)$/ || $content =~ /^(\w+),(.+)$/) {
+            my $func = $1;
+            my $args_str = $2;
+
+            # Split arguments by comma, but not within nested $()
+            my @args;
+            my $depth = 0;
+            my $current = '';
+            for my $char (split //, $args_str) {
+                if ($char eq ',' && $depth == 0) {
+                    push @args, $current;
+                    $current = '';
+                } else {
+                    $current .= $char;
+                    $depth++ if $char eq '(';
+                    $depth-- if $char eq ')';
+                }
+            }
+            push @args, $current if $current ne '';
+
+            # Trim and expand each argument
+            @args = map { expand_vars($_, $depth + 1) } map { s/^\s+|\s+$//gr } @args;
+
+            # Call the gmake function
+            my $func_name = "gmake_$func";
+            if (defined &$func_name) {
+                no strict 'refs';
+                $replacement = &$func_name(@args);
+            } else {
+                $replacement = '';  # Unknown function
+            }
+        } else {
+            # It's a variable reference
+            $replacement = $MV{$content} || "";
+        }
+
+        # Replace the first occurrence
+        $text =~ s/\$\(\Q$content\E\)/$replacement/;
+
+        # Recursively expand if result contains $
+        $text = expand_vars($text, $depth + 1) if $replacement =~ /\$/;
     }
 
     return $text;
@@ -86,6 +128,276 @@ sub format_output {
     # Convert $MV{VAR} back to $(VAR) for display
     $text =~ s/\$MV\{([^}]+)\}/\$($1)/g;
     return $text;
+}
+
+# Gmake function implementations
+sub gmake_subst {
+    my ($from, $to, $text) = @_;
+    $text =~ s/\Q$from\E/$to/g;
+    return $text;
+}
+
+sub gmake_patsubst {
+    my ($pattern, $replacement, $text) = @_;
+    my @words = split(/\s+/, $text);
+
+    # Convert % pattern to regex by escaping everything except %
+    my @parts = split(/(%+)/, $pattern);
+    my $pat = '';
+    for my $part (@parts) {
+        if ($part eq '%') {
+            $pat .= '(.+?)';  # Non-greedy match
+        } elsif ($part ne '') {
+            $pat .= quotemeta($part);
+        }
+    }
+
+    my @result;
+    for my $word (@words) {
+        if ($word =~ /^$pat$/) {
+            my $stem = $1;
+            my $rep = $replacement;
+            $rep =~ s/%/$stem/g;
+            push @result, $rep;
+        } else {
+            push @result, $word;
+        }
+    }
+    return join(' ', @result);
+}
+
+sub gmake_strip {
+    my ($text) = @_;
+    $text =~ s/^\s+//;
+    $text =~ s/\s+$//;
+    $text =~ s/\s+/ /g;
+    return $text;
+}
+
+sub gmake_findstring {
+    my ($find, $text) = @_;
+    return index($text, $find) >= 0 ? $find : '';
+}
+
+sub gmake_filter {
+    my ($patterns, $text) = @_;
+    my @patterns = split(/\s+/, $patterns);
+    my @words = split(/\s+/, $text);
+    my @result;
+
+    for my $word (@words) {
+        for my $pattern (@patterns) {
+            my @parts = split(/(%+)/, $pattern);
+            my $regex = '';
+            for my $part (@parts) {
+                if ($part eq '%') {
+                    $regex .= '(.+?)';
+                } elsif ($part ne '') {
+                    $regex .= quotemeta($part);
+                }
+            }
+            if ($word =~ /^$regex$/) {
+                push @result, $word;
+                last;
+            }
+        }
+    }
+    return join(' ', @result);
+}
+
+sub gmake_filter_out {
+    my ($patterns, $text) = @_;
+    my @patterns = split(/\s+/, $patterns);
+    my @words = split(/\s+/, $text);
+    my @result;
+
+    for my $word (@words) {
+        my $matched = 0;
+        for my $pattern (@patterns) {
+            my @parts = split(/(%+)/, $pattern);
+            my $regex = '';
+            for my $part (@parts) {
+                if ($part eq '%') {
+                    $regex .= '(.+?)';
+                } elsif ($part ne '') {
+                    $regex .= quotemeta($part);
+                }
+            }
+            if ($word =~ /^$regex$/) {
+                $matched = 1;
+                last;
+            }
+        }
+        push @result, $word unless $matched;
+    }
+    return join(' ', @result);
+}
+
+sub gmake_sort {
+    my ($text) = @_;
+    my @words = split(/\s+/, $text);
+    my %seen;
+    @words = grep { !$seen{$_}++ } @words;
+    return join(' ', sort @words);
+}
+
+sub gmake_word {
+    my ($n, $text) = @_;
+    my @words = split(/\s+/, $text);
+    return $words[$n - 1] || '';
+}
+
+sub gmake_wordlist {
+    my ($s, $e, $text) = @_;
+    my @words = split(/\s+/, $text);
+    return join(' ', @words[$s - 1 .. $e - 1]);
+}
+
+sub gmake_words {
+    my ($text) = @_;
+    my @words = split(/\s+/, $text);
+    return scalar(@words);
+}
+
+sub gmake_firstword {
+    my ($text) = @_;
+    my @words = split(/\s+/, $text);
+    return $words[0] || '';
+}
+
+sub gmake_lastword {
+    my ($text) = @_;
+    my @words = split(/\s+/, $text);
+    return $words[-1] || '';
+}
+
+sub gmake_dir {
+    my ($names) = @_;
+    my @names = split(/\s+/, $names);
+    my @result;
+    for my $name (@names) {
+        if ($name =~ m{^(.*/)[^/]*$}) {
+            push @result, $1;
+        } else {
+            push @result, './';
+        }
+    }
+    return join(' ', @result);
+}
+
+sub gmake_notdir {
+    my ($names) = @_;
+    my @names = split(/\s+/, $names);
+    my @result;
+    for my $name (@names) {
+        if ($name =~ m{^.*/([^/]*)$}) {
+            push @result, $1;
+        } else {
+            push @result, $name;
+        }
+    }
+    return join(' ', @result);
+}
+
+sub gmake_suffix {
+    my ($names) = @_;
+    my @names = split(/\s+/, $names);
+    my @result;
+    for my $name (@names) {
+        if ($name =~ /(\.[^.\/]*)$/) {
+            push @result, $1;
+        }
+    }
+    return join(' ', @result);
+}
+
+sub gmake_basename {
+    my ($names) = @_;
+    my @names = split(/\s+/, $names);
+    my @result;
+    for my $name (@names) {
+        my $base = $name;
+        $base =~ s/\.[^.\/]*$//;
+        push @result, $base;
+    }
+    return join(' ', @result);
+}
+
+sub gmake_addsuffix {
+    my ($suffix, $names) = @_;
+    my @names = split(/\s+/, $names);
+    return join(' ', map { $_ . $suffix } @names);
+}
+
+sub gmake_addprefix {
+    my ($prefix, $names) = @_;
+    my @names = split(/\s+/, $names);
+    return join(' ', map { $prefix . $_ } @names);
+}
+
+sub gmake_join {
+    my ($list1, $list2) = @_;
+    my @list1 = split(/\s+/, $list1);
+    my @list2 = split(/\s+/, $list2);
+    my @result;
+    for (my $i = 0; $i < @list1 || $i < @list2; $i++) {
+        push @result, ($list1[$i] || '') . ($list2[$i] || '');
+    }
+    return join(' ', @result);
+}
+
+sub gmake_wildcard {
+    my ($pattern) = @_;
+    my @files = glob($pattern);
+    return join(' ', @files);
+}
+
+sub gmake_realpath {
+    my ($names) = @_;
+    require Cwd;
+    my @names = split(/\s+/, $names);
+    my @result;
+    for my $name (@names) {
+        my $real = Cwd::realpath($name);
+        push @result, $real if $real;
+    }
+    return join(' ', @result);
+}
+
+sub gmake_abspath {
+    my ($names) = @_;
+    require Cwd;
+    my @names = split(/\s+/, $names);
+    my @result;
+    for my $name (@names) {
+        my $abs = Cwd::abs_path($name);
+        push @result, $abs || $name;
+    }
+    return join(' ', @result);
+}
+
+sub gmake_if {
+    my ($condition, $then_part, $else_part) = @_;
+    $else_part ||= '';
+    return $condition ? $then_part : $else_part;
+}
+
+sub gmake_or {
+    my @conditions = @_;
+    for my $cond (@conditions) {
+        return $cond if $cond;
+    }
+    return '';
+}
+
+sub gmake_and {
+    my @conditions = @_;
+    my $last = '';
+    for my $cond (@conditions) {
+        return '' unless $cond;
+        $last = $cond;
+    }
+    return $last;
 }
 
 sub save_current_rule {
@@ -292,26 +604,34 @@ sub interactive_debug {
     print "\n";
 
     my $term = Term::ReadLine->new('smak');
-    my $prompt = "smak> ";
     my $OUT = $term->OUT || \*STDOUT;
+    my $is_interactive = -t STDIN;
 
     while (1) {
         my $input;
-        if (-t STDIN) {
-            # Interactive mode - use readline
+        if ($is_interactive) {
+            # Interactive mode - use readline with prompt
             $input = $term->readline($prompt);
             last unless defined $input;
         } else {
-            # Non-interactive mode - use plain STDIN
-            print $OUT $prompt;
+            # Non-interactive mode - use plain STDIN without prompt
             $input = <STDIN>;
             last unless defined $input;
         }
 
         chomp $input;
 
-        # Add non-empty input to history
-        $term->addhistory($input) if $input =~ /\S/ && -t STDIN;
+        # Echo command line if echo is enabled
+        if ($echo && $input =~ /\S/) {
+            if ($is_interactive) {
+                print "$prompt$input\n";
+            } else {
+                print "$input\n";
+            }
+        }
+
+        # Add non-empty input to history (interactive mode only)
+        $term->addhistory($input) if $input =~ /\S/ && $is_interactive;
 
         last if $input =~ /^\s*(quit|exit|q)\s*$/i;
 
@@ -431,6 +751,8 @@ sub interactive_debug {
         elsif ($input =~ /^\s*set\s*$/i) {
             print "Control Variables:\n";
             print "  \$timeout = $timeout (seconds for print/eval timeout)\n";
+            print "  \$prompt = \"$prompt\" (prompt string for interactive mode)\n";
+            print "  \$echo = $echo (echo command lines including prompt)\n";
         }
         elsif ($input =~ /^\s*eval\s+(.+)$/i) {
             my $expr = $1;
@@ -481,40 +803,49 @@ sub interactive_debug {
         }
         elsif ($input =~ /^\s*print\s+(.+)$/i) {
             my $expr = $1;
-            # Transform $(VAR) to $MV{VAR} before evaluation
-            $expr =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
 
-            # Fork to evaluate with timeout
-            my $pid = fork();
-            if (!defined $pid) {
-                print "Error: Cannot fork: $!\n";
-                next;
-            }
+            # Check if this looks like a pure gmake expression (contains $(function ...))
+            my $is_gmake_expr = ($expr =~ /\$\([a-z-]+\s+[^)]+\)/);
 
-            if ($pid == 0) {
-                # Child process - evaluate expression
-                $| = 1;  # Flush output immediately
-                $SIG{ALRM} = sub { die "timeout\n" };
-                alarm($timeout);  # Timeout from control variable
-                my $result = eval $expr;
-                alarm(0);  # Cancel alarm
-                if ($@) {
-                    if ($@ =~ /timeout/) {
-                        print "Error: Expression evaluation timed out\n";
-                    } else {
-                        print "Error evaluating expression: $@";
-                    }
-                    STDOUT->flush();
-                    POSIX::_exit(1);
-                }
-                # Expand nested variables in result
-                $result = expand_vars($result) if defined $result && $result =~ /\$/;
-                # Format output to show $(VAR) instead of $MV{VAR}
-                $result = format_output($result) if defined $result;
+            if ($is_gmake_expr) {
+                # Expand as gmake expression directly
+                my $result = expand_vars($expr);
                 print "$result\n";
-                STDOUT->flush();
-                POSIX::_exit(0);
-            }
+            } else {
+                # Transform $(VAR) to $MV{VAR} for Perl evaluation
+                $expr =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+
+                # Fork to evaluate with timeout
+                my $pid = fork();
+                if (!defined $pid) {
+                    print "Error: Cannot fork: $!\n";
+                    next;
+                }
+
+                if ($pid == 0) {
+                    # Child process - evaluate expression
+                    $| = 1;  # Flush output immediately
+                    $SIG{ALRM} = sub { die "timeout\n" };
+                    alarm($timeout);  # Timeout from control variable
+                    my $result = eval $expr;
+                    alarm(0);  # Cancel alarm
+                    if ($@) {
+                        if ($@ =~ /timeout/) {
+                            print "Error: Expression evaluation timed out\n";
+                        } else {
+                            print "Error evaluating expression: $@";
+                        }
+                        STDOUT->flush();
+                        POSIX::_exit(1);
+                    }
+                    # Expand nested variables in result
+                    $result = expand_vars($result) if defined $result && $result =~ /\$/;
+                    # Format output to show $(VAR) instead of $MV{VAR}
+                    $result = format_output($result) if defined $result;
+                    print "$result\n";
+                    STDOUT->flush();
+                    POSIX::_exit(0);
+                }
 
             # Parent process - wait for child
             # Child has its own alarm timeout
@@ -537,6 +868,7 @@ sub interactive_debug {
                 kill('KILL', $pid);
                 waitpid($pid, 0);
                 print "Error: Expression evaluation forcefully terminated\n";
+            }
             }
         }
         elsif ($input =~ /^\s*$/i) {

@@ -210,6 +210,62 @@ sub print_rules {
     }
 }
 
+sub dry_run_target {
+    my ($target, $visited, $depth) = @_;
+    $visited ||= {};
+    $depth ||= 0;
+
+    return if $visited->{$target};
+    $visited->{$target} = 1;
+
+    my $key = "$makefile\t$target";
+    my @deps;
+    my $rule = '';
+
+    # Find target in fixed, pattern, or pseudo rules
+    if (exists $fixed_deps{$key}) {
+        @deps = @{$fixed_deps{$key} || []};
+        $rule = $fixed_rule{$key} || '';
+    } elsif (exists $pattern_deps{$key}) {
+        @deps = @{$pattern_deps{$key} || []};
+        $rule = $pattern_rule{$key} || '';
+    } elsif (exists $pseudo_deps{$key}) {
+        @deps = @{$pseudo_deps{$key} || []};
+        $rule = $pseudo_rule{$key} || '';
+    } else {
+        # Try to find pattern rule match
+        for my $pkey (keys %pattern_rule) {
+            if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                my $pattern = $1;
+                my $pattern_re = $pattern;
+                $pattern_re =~ s/%/(.+)/g;
+                if ($target =~ /^$pattern_re$/) {
+                    @deps = @{$pattern_deps{$pkey} || []};
+                    $rule = $pattern_rule{$pkey} || '';
+                    # Expand % in dependencies
+                    my $stem = $1;
+                    @deps = map { s/%/$stem/g; $_ } @deps;
+                    last;
+                }
+            }
+        }
+    }
+
+    # Recursively process dependencies
+    for my $dep (@deps) {
+        dry_run_target($dep, $visited, $depth + 1);
+    }
+
+    # Print rule if it exists
+    if ($rule && $rule =~ /\S/) {
+        # Convert $MV{VAR} to $(VAR) for expansion
+        my $converted = format_output($rule);
+        # Expand variables
+        my $expanded = expand_vars($converted);
+        print $expanded;
+    }
+}
+
 sub print_debug_help {
     print "Commands:\n";
     print "  list [fixed|pattern|pseudo] - List targets (optionally by type)\n";
@@ -220,9 +276,12 @@ sub print_debug_help {
     print "  fixed                       - Show only fixed rules\n";
     print "  pattern                     - Show only pattern rules\n";
     print "  pseudo                      - Show only pseudo rules\n";
+    print "  dry-run <target>            - Simulate building target\n";
+    print "  make-cmp <target>           - Compare dry-run with gmake\n";
     print "  print <expr>                - Evaluate and print Perl expression\n";
     print "  eval <expr>                 - Evaluate raw Perl expression\n";
     print "  set                         - Show control variables\n";
+    print "  ! <command>                 - Execute shell command\n";
     print "  help                        - Show this help message\n";
     print "  quit                        - Exit debug mode\n";
 }
@@ -382,6 +441,43 @@ sub interactive_debug {
             } else {
                 print "$result\n" if defined $result;
             }
+        }
+        elsif ($input =~ /^\s*dry-run\s+(\S+)\s*$/i) {
+            my $target = $1;
+            print "Dry-run for target '$target':\n";
+            dry_run_target($target);
+        }
+        elsif ($input =~ /^\s*make-cmp\s+(\S+)\s*$/i) {
+            my $target = $1;
+            # Capture our dry-run output
+            my $our_output = '';
+            {
+                local *STDOUT;
+                open(STDOUT, '>', \$our_output) or die "Can't redirect STDOUT: $!";
+                dry_run_target($target);
+            }
+
+            # Get gmake's dry-run output
+            my $gmake_output = `make -n -f $makefile $target 2>&1`;
+
+            print "Our dry-run:\n";
+            print "-" x 60 . "\n";
+            print $our_output;
+            print "\n";
+            print "gmake -n output:\n";
+            print "-" x 60 . "\n";
+            print $gmake_output;
+            print "\n";
+
+            if ($our_output eq $gmake_output) {
+                print "Output matches!\n";
+            } else {
+                print "Output differs.\n";
+            }
+        }
+        elsif ($input =~ /^\s*!\s*(.+)$/i) {
+            my $cmd = $1;
+            system($cmd);
         }
         elsif ($input =~ /^\s*print\s+(.+)$/i) {
             my $expr = $1;

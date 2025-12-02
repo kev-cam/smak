@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use Getopt::Long;
 use Term::ReadLine;
+use POSIX ":sys_wait_h";
 
 # Separate hashes for different rule types
 my %fixed_rule;
@@ -367,15 +368,60 @@ sub interactive_debug {
             my $expr = $1;
             # Transform $(VAR) to $MV{VAR} before evaluation
             $expr =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
-            my $result = eval $expr;
-            if ($@) {
-                print "Error evaluating expression: $@";
-            } else {
+
+            # Fork to evaluate with timeout
+            my $pid = fork();
+            if (!defined $pid) {
+                print "Error: Cannot fork: $!\n";
+                next;
+            }
+
+            if ($pid == 0) {
+                # Child process - evaluate expression
+                $| = 1;  # Flush output immediately
+                $SIG{ALRM} = sub { die "timeout\n" };
+                alarm(5);  # 5 second timeout
+                my $result = eval $expr;
+                alarm(0);  # Cancel alarm
+                if ($@) {
+                    if ($@ =~ /timeout/) {
+                        print "Error: Expression evaluation timed out\n";
+                    } else {
+                        print "Error evaluating expression: $@";
+                    }
+                    STDOUT->flush();
+                    POSIX::_exit(1);
+                }
                 # Expand nested variables in result
                 $result = expand_vars($result) if defined $result && $result =~ /\$/;
                 # Format output to show $(VAR) instead of $MV{VAR}
                 $result = format_output($result) if defined $result;
                 print "$result\n";
+                STDOUT->flush();
+                POSIX::_exit(0);
+            }
+
+            # Parent process - wait for child
+            # Child has its own 5-second alarm timeout
+            # Parent waits up to 6 seconds as backup
+            my $timeout = 6;
+            my $elapsed = 0;
+            my $kid = 0;
+            while ($elapsed < $timeout) {
+                $kid = waitpid($pid, WNOHANG);
+                if ($kid > 0) {
+                    # Child finished
+                    last;
+                }
+                select(undef, undef, undef, 0.1);  # Sleep 100ms
+                $elapsed += 0.1;
+            }
+
+            # Backup: if child somehow still running, force kill
+            if ($kid == 0) {
+                kill('KILL', $pid);
+                waitpid($pid, 0);
+                print "Error: Expression evaluation forcefully terminated\n";
             }
         }
         elsif ($input =~ /^\s*$/i) {

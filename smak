@@ -3,8 +3,14 @@ use strict;
 use warnings;
 use Getopt::Long;
 
-my %rule;
-my %deps;
+# Separate hashes for different rule types
+my %fixed_rule;
+my %fixed_deps;
+my %pattern_rule;
+my %pattern_deps;
+my %pseudo_rule;
+my %pseudo_deps;
+
 my $makefile = 'Makefile';
 my $debug = 0;
 my $help = 0;
@@ -37,6 +43,31 @@ open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
 my $current_target;
 my $current_rule = '';
+my $current_type;  # 'fixed', 'pattern', or 'pseudo'
+
+sub classify_target {
+    my ($target) = @_;
+    if ($target =~ /^\./) {
+        return 'pseudo';
+    } elsif ($target =~ /%/) {
+        return 'pattern';
+    } else {
+        return 'fixed';
+    }
+}
+
+sub save_current_rule {
+    return unless $current_target;
+
+    my $key = "$makefile\t$current_target";
+    if ($current_type eq 'pseudo') {
+        $pseudo_rule{$key} = $current_rule;
+    } elsif ($current_type eq 'pattern') {
+        $pattern_rule{$key} = $current_rule;
+    } else {
+        $fixed_rule{$key} = $current_rule;
+    }
+}
 
 while (my $line = <$fh>) {
     chomp $line;
@@ -50,19 +81,24 @@ while (my $line = <$fh>) {
         my $dependencies = $2;
 
         # Save previous rule if exists
-        if ($current_target) {
-            my $key = "$makefile\t$current_target";
-            $rule{$key} = $current_rule;
-        }
+        save_current_rule();
 
-        # Start new target
+        # Classify and start new target
         $current_target = $target;
+        $current_type = classify_target($target);
         $current_rule = '';
 
-        # Store dependencies
+        # Store dependencies in appropriate hash
         my $key = "$makefile\t$target";
         my @dep_list = grep { $_ ne '' } split(/\s+/, $dependencies);
-        $deps{$key} = \@dep_list;
+
+        if ($current_type eq 'pseudo') {
+            $pseudo_deps{$key} = \@dep_list;
+        } elsif ($current_type eq 'pattern') {
+            $pattern_deps{$key} = \@dep_list;
+        } else {
+            $fixed_deps{$key} = \@dep_list;
+        }
     }
     # Check if this is a rule line (starts with tab)
     elsif ($line =~ /^\t(.*)$/) {
@@ -74,10 +110,7 @@ while (my $line = <$fh>) {
 }
 
 # Save last rule
-if ($current_target) {
-    my $key = "$makefile\t$current_target";
-    $rule{$key} = $current_rule;
-}
+save_current_rule();
 
 close($fh);
 
@@ -92,23 +125,64 @@ sub print_rules {
     print "Rules parsed from $makefile:\n";
     print "=" x 60 . "\n\n";
 
-    for my $key (sort keys %rule) {
-        print "Key: $key\n";
-        print "Dependencies: ", join(', ', @{$deps{$key} || []}), "\n";
-        print "Rule:\n$rule{$key}";
-        print "-" x 60 . "\n\n";
+    # Print pseudo rules
+    if (keys %pseudo_rule || keys %pseudo_deps) {
+        print "PSEUDO RULES (.PHONY, .PRECIOUS, etc.):\n";
+        print "-" x 60 . "\n";
+        my %seen;
+        for my $key (sort keys %pseudo_rule, keys %pseudo_deps) {
+            next if $seen{$key}++;
+            print "Key: $key\n";
+            print "Dependencies: ", join(', ', @{$pseudo_deps{$key} || []}), "\n";
+            print "Rule:\n", ($pseudo_rule{$key} || "(none)\n");
+            print "-" x 60 . "\n";
+        }
+        print "\n";
+    }
+
+    # Print pattern rules
+    if (keys %pattern_rule || keys %pattern_deps) {
+        print "PATTERN RULES (with %):\n";
+        print "-" x 60 . "\n";
+        my %seen;
+        for my $key (sort keys %pattern_rule, keys %pattern_deps) {
+            next if $seen{$key}++;
+            print "Key: $key\n";
+            print "Dependencies: ", join(', ', @{$pattern_deps{$key} || []}), "\n";
+            print "Rule:\n", ($pattern_rule{$key} || "(none)\n");
+            print "-" x 60 . "\n";
+        }
+        print "\n";
+    }
+
+    # Print fixed rules
+    if (keys %fixed_rule || keys %fixed_deps) {
+        print "FIXED RULES:\n";
+        print "-" x 60 . "\n";
+        my %seen;
+        for my $key (sort keys %fixed_rule, keys %fixed_deps) {
+            next if $seen{$key}++;
+            print "Key: $key\n";
+            print "Dependencies: ", join(', ', @{$fixed_deps{$key} || []}), "\n";
+            print "Rule:\n", ($fixed_rule{$key} || "(none)\n");
+            print "-" x 60 . "\n";
+        }
+        print "\n";
     }
 }
 
 sub interactive_debug {
     print "Interactive debug mode - parsed $makefile\n";
     print "Commands:\n";
-    print "  list                - List all targets\n";
-    print "  rule <target>       - Show rule for target\n";
-    print "  deps <target>       - Show dependencies for target\n";
-    print "  show <target>       - Show both rule and dependencies\n";
-    print "  all                 - Show all rules and dependencies\n";
-    print "  quit                - Exit debug mode\n";
+    print "  list [fixed|pattern|pseudo] - List targets (optionally by type)\n";
+    print "  rule <target>               - Show rule for target\n";
+    print "  deps <target>               - Show dependencies for target\n";
+    print "  show <target>               - Show both rule and dependencies\n";
+    print "  all                         - Show all rules and dependencies\n";
+    print "  fixed                       - Show only fixed rules\n";
+    print "  pattern                     - Show only pattern rules\n";
+    print "  pseudo                      - Show only pseudo rules\n";
+    print "  quit                        - Exit debug mode\n";
     print "\n";
 
     while (1) {
@@ -121,45 +195,113 @@ sub interactive_debug {
 
         if ($input =~ /^\s*list\s*$/i) {
             my @targets;
-            for my $key (keys %rule) {
+            for my $key (keys %fixed_rule, keys %fixed_deps) {
                 if ($key =~ /^[^\t]+\t(.+)$/) {
                     push @targets, $1;
                 }
             }
-            print "Targets: ", join(', ', sort @targets), "\n";
+            for my $key (keys %pattern_rule, keys %pattern_deps) {
+                if ($key =~ /^[^\t]+\t(.+)$/) {
+                    push @targets, $1;
+                }
+            }
+            for my $key (keys %pseudo_rule, keys %pseudo_deps) {
+                if ($key =~ /^[^\t]+\t(.+)$/) {
+                    push @targets, $1;
+                }
+            }
+            my %seen;
+            @targets = grep { !$seen{$_}++ } @targets;
+            print "All targets: ", join(', ', sort @targets), "\n";
+        }
+        elsif ($input =~ /^\s*list\s+(fixed|pattern|pseudo)\s*$/i) {
+            my $type = lc($1);
+            my @targets;
+            my %rule_hash = $type eq 'fixed' ? %fixed_rule :
+                           $type eq 'pattern' ? %pattern_rule : %pseudo_rule;
+            my %deps_hash = $type eq 'fixed' ? %fixed_deps :
+                           $type eq 'pattern' ? %pattern_deps : %pseudo_deps;
+
+            for my $key (keys %rule_hash, keys %deps_hash) {
+                if ($key =~ /^[^\t]+\t(.+)$/) {
+                    push @targets, $1;
+                }
+            }
+            my %seen;
+            @targets = grep { !$seen{$_}++ } @targets;
+            print ucfirst($type) . " targets: ", join(', ', sort @targets), "\n";
         }
         elsif ($input =~ /^\s*rule\s+(\S+)\s*$/i) {
             my $target = $1;
             my $key = "$makefile\t$target";
-            if (exists $rule{$key}) {
-                print "Rule for '$target':\n$rule{$key}";
-            } else {
-                print "No rule found for target '$target'\n";
+            my $found = 0;
+
+            if (exists $fixed_rule{$key}) {
+                print "Rule for '$target' (fixed):\n$fixed_rule{$key}";
+                $found = 1;
+            } elsif (exists $pattern_rule{$key}) {
+                print "Rule for '$target' (pattern):\n$pattern_rule{$key}";
+                $found = 1;
+            } elsif (exists $pseudo_rule{$key}) {
+                print "Rule for '$target' (pseudo):\n$pseudo_rule{$key}";
+                $found = 1;
             }
+
+            print "No rule found for target '$target'\n" unless $found;
         }
         elsif ($input =~ /^\s*deps\s+(\S+)\s*$/i) {
             my $target = $1;
             my $key = "$makefile\t$target";
-            if (exists $deps{$key}) {
-                print "Dependencies for '$target': ", join(', ', @{$deps{$key}}), "\n";
-            } else {
-                print "No dependencies found for target '$target'\n";
+            my $found = 0;
+
+            if (exists $fixed_deps{$key}) {
+                print "Dependencies for '$target' (fixed): ", join(', ', @{$fixed_deps{$key}}), "\n";
+                $found = 1;
+            } elsif (exists $pattern_deps{$key}) {
+                print "Dependencies for '$target' (pattern): ", join(', ', @{$pattern_deps{$key}}), "\n";
+                $found = 1;
+            } elsif (exists $pseudo_deps{$key}) {
+                print "Dependencies for '$target' (pseudo): ", join(', ', @{$pseudo_deps{$key}}), "\n";
+                $found = 1;
             }
+
+            print "No dependencies found for target '$target'\n" unless $found;
         }
         elsif ($input =~ /^\s*show\s+(\S+)\s*$/i) {
             my $target = $1;
             my $key = "$makefile\t$target";
-            if (exists $rule{$key} || exists $deps{$key}) {
-                print "Target: $target\n";
-                print "Dependencies: ", join(', ', @{$deps{$key} || []}), "\n";
-                print "Rule:\n", ($rule{$key} || "(none)\n");
-                print "\n";
-            } else {
-                print "No information found for target '$target'\n";
+            my $found = 0;
+
+            if (exists $fixed_rule{$key} || exists $fixed_deps{$key}) {
+                print "Target: $target (fixed)\n";
+                print "Dependencies: ", join(', ', @{$fixed_deps{$key} || []}), "\n";
+                print "Rule:\n", ($fixed_rule{$key} || "(none)\n");
+                $found = 1;
+            } elsif (exists $pattern_rule{$key} || exists $pattern_deps{$key}) {
+                print "Target: $target (pattern)\n";
+                print "Dependencies: ", join(', ', @{$pattern_deps{$key} || []}), "\n";
+                print "Rule:\n", ($pattern_rule{$key} || "(none)\n");
+                $found = 1;
+            } elsif (exists $pseudo_rule{$key} || exists $pseudo_deps{$key}) {
+                print "Target: $target (pseudo)\n";
+                print "Dependencies: ", join(', ', @{$pseudo_deps{$key} || []}), "\n";
+                print "Rule:\n", ($pseudo_rule{$key} || "(none)\n");
+                $found = 1;
             }
+
+            print "No information found for target '$target'\n" unless $found;
         }
         elsif ($input =~ /^\s*all\s*$/i) {
             print_rules();
+        }
+        elsif ($input =~ /^\s*fixed\s*$/i) {
+            print_category('fixed');
+        }
+        elsif ($input =~ /^\s*pattern\s*$/i) {
+            print_category('pattern');
+        }
+        elsif ($input =~ /^\s*pseudo\s*$/i) {
+            print_category('pseudo');
         }
         elsif ($input =~ /^\s*$/i) {
             # Ignore empty lines
@@ -170,4 +312,24 @@ sub interactive_debug {
     }
 
     print "Exiting debug mode.\n";
+}
+
+sub print_category {
+    my ($type) = @_;
+    my %rule_hash = $type eq 'fixed' ? %fixed_rule :
+                   $type eq 'pattern' ? %pattern_rule : %pseudo_rule;
+    my %deps_hash = $type eq 'fixed' ? %fixed_deps :
+                   $type eq 'pattern' ? %pattern_deps : %pseudo_deps;
+
+    print uc($type) . " RULES:\n";
+    print "-" x 60 . "\n";
+
+    my %seen;
+    for my $key (sort keys %rule_hash, keys %deps_hash) {
+        next if $seen{$key}++;
+        print "Key: $key\n";
+        print "Dependencies: ", join(', ', @{$deps_hash{$key} || []}), "\n";
+        print "Rule:\n", ($rule_hash{$key} || "(none)\n");
+        print "-" x 60 . "\n";
+    }
 }

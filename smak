@@ -1,10 +1,37 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
+use Getopt::Long;
 
 my %rule;
 my %deps;
-my $makefile = $ARGV[0] || 'Makefile';
+my $makefile = 'Makefile';
+my $debug = 0;
+my $help = 0;
+
+# Parse command-line options
+GetOptions(
+    'f|file|makefile=s' => \$makefile,
+    'd|debug' => \$debug,
+    'h|help' => \$help,
+) or die "Error in command line arguments\n";
+
+if ($help) {
+    print_help();
+    exit 0;
+}
+
+sub print_help {
+    print <<'HELP';
+Usage: smak [options]
+
+Options:
+  -f, --file, --makefile FILE   Use FILE as a makefile (default: Makefile)
+  -d, --debug                   Enter interactive debug mode
+  -h, --help                    Display this help message
+
+HELP
+}
 
 open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
@@ -54,13 +81,93 @@ if ($current_target) {
 
 close($fh);
 
-# Print results for verification
-print "Rules parsed from $makefile:\n";
-print "=" x 60 . "\n\n";
+# Debug mode or normal output
+if ($debug) {
+    interactive_debug();
+} else {
+    print_rules();
+}
 
-for my $key (sort keys %rule) {
-    print "Key: $key\n";
-    print "Dependencies: ", join(', ', @{$deps{$key} || []}), "\n";
-    print "Rule:\n$rule{$key}";
-    print "-" x 60 . "\n\n";
+sub print_rules {
+    print "Rules parsed from $makefile:\n";
+    print "=" x 60 . "\n\n";
+
+    for my $key (sort keys %rule) {
+        print "Key: $key\n";
+        print "Dependencies: ", join(', ', @{$deps{$key} || []}), "\n";
+        print "Rule:\n$rule{$key}";
+        print "-" x 60 . "\n\n";
+    }
+}
+
+sub interactive_debug {
+    print "Interactive debug mode - parsed $makefile\n";
+    print "Commands:\n";
+    print "  list                - List all targets\n";
+    print "  rule <target>       - Show rule for target\n";
+    print "  deps <target>       - Show dependencies for target\n";
+    print "  show <target>       - Show both rule and dependencies\n";
+    print "  all                 - Show all rules and dependencies\n";
+    print "  quit                - Exit debug mode\n";
+    print "\n";
+
+    while (1) {
+        print "smak> ";
+        my $input = <STDIN>;
+        last unless defined $input;
+        chomp $input;
+
+        last if $input =~ /^\s*(quit|exit|q)\s*$/i;
+
+        if ($input =~ /^\s*list\s*$/i) {
+            my @targets;
+            for my $key (keys %rule) {
+                if ($key =~ /^[^\t]+\t(.+)$/) {
+                    push @targets, $1;
+                }
+            }
+            print "Targets: ", join(', ', sort @targets), "\n";
+        }
+        elsif ($input =~ /^\s*rule\s+(\S+)\s*$/i) {
+            my $target = $1;
+            my $key = "$makefile\t$target";
+            if (exists $rule{$key}) {
+                print "Rule for '$target':\n$rule{$key}";
+            } else {
+                print "No rule found for target '$target'\n";
+            }
+        }
+        elsif ($input =~ /^\s*deps\s+(\S+)\s*$/i) {
+            my $target = $1;
+            my $key = "$makefile\t$target";
+            if (exists $deps{$key}) {
+                print "Dependencies for '$target': ", join(', ', @{$deps{$key}}), "\n";
+            } else {
+                print "No dependencies found for target '$target'\n";
+            }
+        }
+        elsif ($input =~ /^\s*show\s+(\S+)\s*$/i) {
+            my $target = $1;
+            my $key = "$makefile\t$target";
+            if (exists $rule{$key} || exists $deps{$key}) {
+                print "Target: $target\n";
+                print "Dependencies: ", join(', ', @{$deps{$key} || []}), "\n";
+                print "Rule:\n", ($rule{$key} || "(none)\n");
+                print "\n";
+            } else {
+                print "No information found for target '$target'\n";
+            }
+        }
+        elsif ($input =~ /^\s*all\s*$/i) {
+            print_rules();
+        }
+        elsif ($input =~ /^\s*$/i) {
+            # Ignore empty lines
+        }
+        else {
+            print "Unknown command. Type 'quit' to exit.\n";
+        }
+    }
+
+    print "Exiting debug mode.\n";
 }

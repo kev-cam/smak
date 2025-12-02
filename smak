@@ -18,6 +18,7 @@ my %MV;
 
 # Control variables
 my $timeout = 5;  # Timeout for print command evaluation in seconds
+my $prompt = "smak> ";  # Prompt string for interactive mode
 
 my $makefile = 'Makefile';
 my $debug = 0;
@@ -602,26 +603,25 @@ sub interactive_debug {
     print "\n";
 
     my $term = Term::ReadLine->new('smak');
-    my $prompt = "smak> ";
     my $OUT = $term->OUT || \*STDOUT;
+    my $is_interactive = -t STDIN;
 
     while (1) {
         my $input;
-        if (-t STDIN) {
-            # Interactive mode - use readline
+        if ($is_interactive) {
+            # Interactive mode - use readline with prompt
             $input = $term->readline($prompt);
             last unless defined $input;
         } else {
-            # Non-interactive mode - use plain STDIN
-            print $OUT $prompt;
+            # Non-interactive mode - use plain STDIN without prompt
             $input = <STDIN>;
             last unless defined $input;
         }
 
         chomp $input;
 
-        # Add non-empty input to history
-        $term->addhistory($input) if $input =~ /\S/ && -t STDIN;
+        # Add non-empty input to history (interactive mode only)
+        $term->addhistory($input) if $input =~ /\S/ && $is_interactive;
 
         last if $input =~ /^\s*(quit|exit|q)\s*$/i;
 
@@ -741,6 +741,7 @@ sub interactive_debug {
         elsif ($input =~ /^\s*set\s*$/i) {
             print "Control Variables:\n";
             print "  \$timeout = $timeout (seconds for print/eval timeout)\n";
+            print "  \$prompt = \"$prompt\" (prompt string for interactive mode)\n";
         }
         elsif ($input =~ /^\s*eval\s+(.+)$/i) {
             my $expr = $1;

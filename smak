@@ -1,0 +1,66 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+
+my %rule;
+my %deps;
+my $makefile = $ARGV[0] || 'Makefile';
+
+open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
+
+my $current_target;
+my $current_rule = '';
+
+while (my $line = <$fh>) {
+    chomp $line;
+
+    # Skip comments and empty lines
+    next if $line =~ /^\s*#/ || $line =~ /^\s*$/;
+
+    # Check if this is a target line (contains : and doesn't start with tab)
+    if ($line =~ /^([^:\s]+)\s*:\s*(.*)$/ && $line !~ /^\t/) {
+        my $target = $1;
+        my $dependencies = $2;
+
+        # Save previous rule if exists
+        if ($current_target) {
+            my $key = "$makefile\t$current_target";
+            $rule{$key} = $current_rule;
+        }
+
+        # Start new target
+        $current_target = $target;
+        $current_rule = '';
+
+        # Store dependencies
+        my $key = "$makefile\t$target";
+        my @dep_list = grep { $_ ne '' } split(/\s+/, $dependencies);
+        $deps{$key} = \@dep_list;
+    }
+    # Check if this is a rule line (starts with tab)
+    elsif ($line =~ /^\t(.*)$/) {
+        my $command = $1;
+        # Transform $(VAR) to $MV{VAR}
+        $command =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+        $current_rule .= $command . "\n";
+    }
+}
+
+# Save last rule
+if ($current_target) {
+    my $key = "$makefile\t$current_target";
+    $rule{$key} = $current_rule;
+}
+
+close($fh);
+
+# Print results for verification
+print "Rules parsed from $makefile:\n";
+print "=" x 60 . "\n\n";
+
+for my $key (sort keys %rule) {
+    print "Key: $key\n";
+    print "Dependencies: ", join(', ', @{$deps{$key} || []}), "\n";
+    print "Rule:\n$rule{$key}";
+    print "-" x 60 . "\n\n";
+}

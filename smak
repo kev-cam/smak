@@ -19,6 +19,7 @@ my %MV;
 # Control variables
 my $timeout = 5;  # Timeout for print command evaluation in seconds
 my $prompt = "smak> ";  # Prompt string for interactive mode
+my $echo = 0;  # Echo command lines (including prompt)
 
 my $makefile = 'Makefile';
 my $debug = 0;
@@ -620,6 +621,15 @@ sub interactive_debug {
 
         chomp $input;
 
+        # Echo command line if echo is enabled
+        if ($echo && $input =~ /\S/) {
+            if ($is_interactive) {
+                print "$prompt$input\n";
+            } else {
+                print "$input\n";
+            }
+        }
+
         # Add non-empty input to history (interactive mode only)
         $term->addhistory($input) if $input =~ /\S/ && $is_interactive;
 
@@ -742,6 +752,7 @@ sub interactive_debug {
             print "Control Variables:\n";
             print "  \$timeout = $timeout (seconds for print/eval timeout)\n";
             print "  \$prompt = \"$prompt\" (prompt string for interactive mode)\n";
+            print "  \$echo = $echo (echo command lines including prompt)\n";
         }
         elsif ($input =~ /^\s*eval\s+(.+)$/i) {
             my $expr = $1;

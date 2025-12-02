@@ -4,7 +4,7 @@
 echo "Testing print command with variable translation..."
 echo ""
 
-cat <<'EOF' | ./smak -f Makefile.test -d
+cat <<'EOF' | ./smak -Kf Makefile.test -Kd
 print "Makefile variables:"
 print "CC = $(CC)"
 print "CFLAGS = $(CFLAGS)"

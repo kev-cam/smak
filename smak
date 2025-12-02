@@ -30,9 +30,9 @@ my $help = 0;
 
 # Parse command-line options
 GetOptions(
-    'f|file|makefile=s' => \$makefile,
-    'd|debug' => \$debug,
-    'h|help' => \$help,
+    'Kf|Kfile|Kmakefile=s' => \$makefile,
+    'Kd|Kdebug' => \$debug,
+    'Kh|Khelp' => \$help,
 ) or die "Error in command line arguments\n";
 
 if ($help) {
@@ -45,9 +45,9 @@ sub print_help {
 Usage: smak [options]
 
 Options:
-  -f, --file, --makefile FILE   Use FILE as a makefile (default: Makefile)
-  -d, --debug                   Enter interactive debug mode
-  -h, --help                    Display this help message
+  -Kf, -Kfile, -Kmakefile FILE   Use FILE as a makefile (default: Makefile)
+  -Kd, -Kdebug                   Enter interactive debug mode
+  -Kh, -Khelp                    Display this help message
 
 HELP
 }

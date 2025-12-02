@@ -4,7 +4,7 @@
 echo "Testing make-cmp command..."
 echo ""
 
-cat <<'EOF' | ./smak -f Makefile.nested -d
+cat <<'EOF' | ./smak -Kf Makefile.nested -Kd
 make-cmp test.o
 quit
 EOF

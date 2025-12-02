@@ -4,7 +4,7 @@
 echo "Testing help and print commands..."
 echo ""
 
-cat <<'EOF' | ./smak -f Makefile.test -d
+cat <<'EOF' | ./smak -Kf Makefile.test -Kd
 help
 print 2 + 2
 print scalar(keys %fixed_rule)

@@ -769,10 +769,10 @@ sub interactive_debug {
             }
         }
 
+        last if $input =~ /^\s*(quit|exit|q)\s*$/i;
+
         # Add non-empty input to history (interactive mode only)
         $term->addhistory($input) if $input =~ /\S/ && $is_interactive;
-
-        last if $input =~ /^\s*(quit|exit|q)\s*$/i;
 
         if ($input =~ /^\s*list\s*$/i) {
             my @targets;
@@ -1140,7 +1140,6 @@ sub interactive_debug {
             foreach my $mod (@modifications) {
                 print $save_fh "$mod\n";
             }
-            print $save_fh "quit\n";
             close($save_fh);
 
             print "Saved " . scalar(@modifications) . " modification(s) to '$save_file'\n";

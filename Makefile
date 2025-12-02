@@ -14,3 +14,6 @@ utils.o: utils.c
 
 clean:
 	rm -f *.o program
+
+VERILOG_FILES = $(wildcard *.v)
+GATE_NETLISTS = $(patsubst %.v,work/%_syn.v,$(VERILOG_FILES))

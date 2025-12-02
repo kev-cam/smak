@@ -60,6 +60,30 @@ sub classify_target {
     }
 }
 
+sub expand_vars {
+    my ($text, $depth) = @_;
+    $depth ||= 0;
+    return $text if $depth > 10;  # Prevent infinite recursion
+
+    # Expand $(VAR) references
+    while ($text =~ /\$\(([^)]+)\)/) {
+        my $var = $1;
+        my $value = $MV{$var} || "";
+        $text =~ s/\$\($var\)/$value/g;
+        # Recursively expand the result
+        $text = expand_vars($text, $depth + 1) if $value =~ /\$/;
+    }
+
+    return $text;
+}
+
+sub format_output {
+    my ($text) = @_;
+    # Convert $MV{VAR} back to $(VAR) for display
+    $text =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+    return $text;
+}
+
 sub save_current_rule {
     return unless $current_target;
 
@@ -145,7 +169,7 @@ sub print_rules {
             next if $seen{$key}++;
             print "Key: $key\n";
             print "Dependencies: ", join(', ', @{$pseudo_deps{$key} || []}), "\n";
-            print "Rule:\n", ($pseudo_rule{$key} || "(none)\n");
+            print "Rule:\n", format_output($pseudo_rule{$key} || "(none)\n");
             print "-" x 60 . "\n";
         }
         print "\n";
@@ -160,7 +184,7 @@ sub print_rules {
             next if $seen{$key}++;
             print "Key: $key\n";
             print "Dependencies: ", join(', ', @{$pattern_deps{$key} || []}), "\n";
-            print "Rule:\n", ($pattern_rule{$key} || "(none)\n");
+            print "Rule:\n", format_output($pattern_rule{$key} || "(none)\n");
             print "-" x 60 . "\n";
         }
         print "\n";
@@ -175,7 +199,7 @@ sub print_rules {
             next if $seen{$key}++;
             print "Key: $key\n";
             print "Dependencies: ", join(', ', @{$fixed_deps{$key} || []}), "\n";
-            print "Rule:\n", ($fixed_rule{$key} || "(none)\n");
+            print "Rule:\n", format_output($fixed_rule{$key} || "(none)\n");
             print "-" x 60 . "\n";
         }
         print "\n";
@@ -270,13 +294,13 @@ sub interactive_debug {
             my $found = 0;
 
             if (exists $fixed_rule{$key}) {
-                print "Rule for '$target' (fixed):\n$fixed_rule{$key}";
+                print "Rule for '$target' (fixed):\n", format_output($fixed_rule{$key});
                 $found = 1;
             } elsif (exists $pattern_rule{$key}) {
-                print "Rule for '$target' (pattern):\n$pattern_rule{$key}";
+                print "Rule for '$target' (pattern):\n", format_output($pattern_rule{$key});
                 $found = 1;
             } elsif (exists $pseudo_rule{$key}) {
-                print "Rule for '$target' (pseudo):\n$pseudo_rule{$key}";
+                print "Rule for '$target' (pseudo):\n", format_output($pseudo_rule{$key});
                 $found = 1;
             }
 
@@ -308,17 +332,17 @@ sub interactive_debug {
             if (exists $fixed_rule{$key} || exists $fixed_deps{$key}) {
                 print "Target: $target (fixed)\n";
                 print "Dependencies: ", join(', ', @{$fixed_deps{$key} || []}), "\n";
-                print "Rule:\n", ($fixed_rule{$key} || "(none)\n");
+                print "Rule:\n", format_output($fixed_rule{$key} || "(none)\n");
                 $found = 1;
             } elsif (exists $pattern_rule{$key} || exists $pattern_deps{$key}) {
                 print "Target: $target (pattern)\n";
                 print "Dependencies: ", join(', ', @{$pattern_deps{$key} || []}), "\n";
-                print "Rule:\n", ($pattern_rule{$key} || "(none)\n");
+                print "Rule:\n", format_output($pattern_rule{$key} || "(none)\n");
                 $found = 1;
             } elsif (exists $pseudo_rule{$key} || exists $pseudo_deps{$key}) {
                 print "Target: $target (pseudo)\n";
                 print "Dependencies: ", join(', ', @{$pseudo_deps{$key} || []}), "\n";
-                print "Rule:\n", ($pseudo_rule{$key} || "(none)\n");
+                print "Rule:\n", format_output($pseudo_rule{$key} || "(none)\n");
                 $found = 1;
             }
 
@@ -347,6 +371,10 @@ sub interactive_debug {
             if ($@) {
                 print "Error evaluating expression: $@";
             } else {
+                # Expand nested variables in result
+                $result = expand_vars($result) if defined $result && $result =~ /\$/;
+                # Format output to show $(VAR) instead of $MV{VAR}
+                $result = format_output($result) if defined $result;
                 print "$result\n";
             }
         }
@@ -376,7 +404,7 @@ sub print_category {
         next if $seen{$key}++;
         print "Key: $key\n";
         print "Dependencies: ", join(', ', @{$deps_hash{$key} || []}), "\n";
-        print "Rule:\n", ($rule_hash{$key} || "(none)\n");
+        print "Rule:\n", format_output($rule_hash{$key} || "(none)\n");
         print "-" x 60 . "\n";
     }
 }

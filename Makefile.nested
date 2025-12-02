@@ -1,0 +1,14 @@
+# Test Makefile with nested variables
+
+CC = gcc
+CFLAGS = -Wall -O2
+COMPILE = $(CC) $(CFLAGS)
+CMD = $(COMPILE) -c
+
+all: test.o
+
+test.o: test.c
+	$(CMD) $<
+
+clean:
+	rm -f *.o

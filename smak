@@ -504,13 +504,10 @@ if ($script_file) {
     execute_script($script_file);
 }
 
-# If targets specified but not in debug mode, run dry-run
+# If targets specified but not in debug mode, build them
 if (@targets && !$debug) {
     foreach my $target (@targets) {
-        print "Building target '$target':\n";
-        print "=" x 60 . "\n";
-        dry_run_target($target);
-        print "\n";
+        build_target($target);
     }
     exit 0;
 }
@@ -625,6 +622,83 @@ sub dry_run_target {
         # Expand variables
         my $expanded = expand_vars($converted);
         print $expanded;
+    }
+}
+
+sub build_target {
+    my ($target, $visited, $depth) = @_;
+    $visited ||= {};
+    $depth ||= 0;
+
+    return if $visited->{$target};
+    $visited->{$target} = 1;
+
+    my $key = "$makefile\t$target";
+    my @deps;
+    my $rule = '';
+
+    # Find target in fixed, pattern, or pseudo rules
+    if (exists $fixed_deps{$key}) {
+        @deps = @{$fixed_deps{$key} || []};
+        $rule = $fixed_rule{$key} || '';
+    } elsif (exists $pattern_deps{$key}) {
+        @deps = @{$pattern_deps{$key} || []};
+        $rule = $pattern_rule{$key} || '';
+    } elsif (exists $pseudo_deps{$key}) {
+        @deps = @{$pseudo_deps{$key} || []};
+        $rule = $pseudo_rule{$key} || '';
+    } else {
+        # Try to find pattern rule match
+        for my $pkey (keys %pattern_rule) {
+            if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                my $pattern = $1;
+                my $pattern_re = $pattern;
+                $pattern_re =~ s/%/(.+)/g;
+                if ($target =~ /^$pattern_re$/) {
+                    @deps = @{$pattern_deps{$pkey} || []};
+                    $rule = $pattern_rule{$pkey} || '';
+                    # Expand % in dependencies
+                    my $stem = $1;
+                    @deps = map { s/%/$stem/g; $_ } @deps;
+                    last;
+                }
+            }
+        }
+    }
+
+    # Recursively build dependencies
+    for my $dep (@deps) {
+        build_target($dep, $visited, $depth + 1);
+    }
+
+    # Execute rule if it exists
+    if ($rule && $rule =~ /\S/) {
+        # Convert $MV{VAR} to $(VAR) for expansion
+        my $converted = format_output($rule);
+        # Expand variables
+        my $expanded = expand_vars($converted);
+
+        # Expand automatic variables
+        $expanded =~ s/\$@/$target/g;                     # $@ = target name
+        $expanded =~ s/\$</$deps[0] || ''/ge;            # $< = first prerequisite
+        $expanded =~ s/\$\^/join(' ', @deps)/ge;         # $^ = all prerequisites
+
+        # Execute each command line
+        for my $cmd_line (split /\n/, $expanded) {
+            next unless $cmd_line =~ /\S/;  # Skip empty lines
+
+            # Check if command starts with @ (silent mode)
+            my $silent = ($cmd_line =~ s/^\s*@//);
+
+            # Echo command unless silent (like make)
+            print "$cmd_line\n" unless $silent;
+
+            # Execute the command
+            my $exit_code = system($cmd_line);
+            if ($exit_code != 0) {
+                die "smak: *** [$target] Error $exit_code\n";
+            }
+        }
     }
 }
 

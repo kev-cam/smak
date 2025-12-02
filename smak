@@ -16,6 +16,9 @@ my %pseudo_deps;
 # Hash for Makefile variables
 my %MV;
 
+# Track modifications for saving
+my @modifications;
+
 # Control variables
 my $timeout = 5;  # Timeout for print command evaluation in seconds
 my $prompt = "smak> ";  # Prompt string for interactive mode
@@ -593,6 +596,11 @@ sub print_debug_help {
     print "  print <expr>                - Evaluate and print Perl expression\n";
     print "  eval <expr>                 - Evaluate raw Perl expression\n";
     print "  set                         - Show control variables\n";
+    print "  add-rule <target> : <deps> : <rule>  - Add a new rule\n";
+    print "  mod-rule <target> : <rule>  - Modify rule for target\n";
+    print "  mod-deps <target> : <deps>  - Modify dependencies for target\n";
+    print "  del-rule <target>           - Delete rule for target\n";
+    print "  save [file]                 - Save modifications (default: <makefile>-smak)\n";
     print "  ! <command>                 - Execute shell command\n";
     print "  help                        - Show this help message\n";
     print "  quit                        - Exit debug mode\n";
@@ -870,6 +878,141 @@ sub interactive_debug {
                 print "Error: Expression evaluation forcefully terminated\n";
             }
             }
+        }
+        elsif ($input =~ /^\s*add-rule\s+(.+?)\s*:\s*(.+?)\s*:\s*(.+)$/i) {
+            my ($target, $deps_str, $rule_text) = ($1, $2, $3);
+            $target =~ s/^\s+|\s+$//g;
+            $deps_str =~ s/^\s+|\s+$//g;
+            # Convert \n and \t in rule text to actual newlines and tabs
+            $rule_text =~ s/\\n/\n/g;
+            $rule_text =~ s/\\t/\t/g;
+            # Transform $(VAR) to $MV{VAR} in rule
+            $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+
+            my @deps = split(/\s+/, $deps_str);
+            my $key = "$makefile\t$target";
+            my $type = classify_target($target);
+
+            if ($type eq 'fixed') {
+                $fixed_rule{$key} = $rule_text;
+                $fixed_deps{$key} = \@deps;
+            } elsif ($type eq 'pattern') {
+                $pattern_rule{$key} = $rule_text;
+                $pattern_deps{$key} = \@deps;
+            } else {
+                $pseudo_rule{$key} = $rule_text;
+                $pseudo_deps{$key} = \@deps;
+            }
+
+            # Track modification
+            my $save_text = $rule_text;
+            $save_text =~ s/\n/\\n/g;
+            $save_text =~ s/\t/\\t/g;
+            push @modifications, "add-rule $target : $deps_str : $save_text";
+            print "Added rule for '$target'\n";
+        }
+        elsif ($input =~ /^\s*mod-rule\s+(.+?)\s*:\s*(.+)$/i) {
+            my ($target, $rule_text) = ($1, $2);
+            $target =~ s/^\s+|\s+$//g;
+            # Convert \n and \t in rule text to actual newlines and tabs
+            $rule_text =~ s/\\n/\n/g;
+            $rule_text =~ s/\\t/\t/g;
+            # Transform $(VAR) to $MV{VAR} in rule
+            $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+
+            my $key = "$makefile\t$target";
+            my $found = 0;
+
+            if (exists $fixed_rule{$key}) {
+                $fixed_rule{$key} = $rule_text;
+                $found = 1;
+            } elsif (exists $pattern_rule{$key}) {
+                $pattern_rule{$key} = $rule_text;
+                $found = 1;
+            } elsif (exists $pseudo_rule{$key}) {
+                $pseudo_rule{$key} = $rule_text;
+                $found = 1;
+            }
+
+            if ($found) {
+                my $save_text = $rule_text;
+                $save_text =~ s/\n/\\n/g;
+                $save_text =~ s/\t/\\t/g;
+                push @modifications, "mod-rule $target : $save_text";
+                print "Modified rule for '$target'\n";
+            } else {
+                print "No rule found for target '$target'\n";
+            }
+        }
+        elsif ($input =~ /^\s*mod-deps\s+(.+?)\s*:\s*(.+)$/i) {
+            my ($target, $deps_str) = ($1, $2);
+            $target =~ s/^\s+|\s+$//g;
+            $deps_str =~ s/^\s+|\s+$//g;
+            my @deps = split(/\s+/, $deps_str);
+
+            my $key = "$makefile\t$target";
+            my $found = 0;
+
+            if (exists $fixed_deps{$key}) {
+                $fixed_deps{$key} = \@deps;
+                $found = 1;
+            } elsif (exists $pattern_deps{$key}) {
+                $pattern_deps{$key} = \@deps;
+                $found = 1;
+            } elsif (exists $pseudo_deps{$key}) {
+                $pseudo_deps{$key} = \@deps;
+                $found = 1;
+            }
+
+            if ($found) {
+                push @modifications, "mod-deps $target : $deps_str";
+                print "Modified dependencies for '$target'\n";
+            } else {
+                print "No rule found for target '$target'\n";
+            }
+        }
+        elsif ($input =~ /^\s*del-rule\s+(\S+)\s*$/i) {
+            my $target = $1;
+            my $key = "$makefile\t$target";
+            my $found = 0;
+
+            if (exists $fixed_rule{$key} || exists $fixed_deps{$key}) {
+                delete $fixed_rule{$key};
+                delete $fixed_deps{$key};
+                $found = 1;
+            } elsif (exists $pattern_rule{$key} || exists $pattern_deps{$key}) {
+                delete $pattern_rule{$key};
+                delete $pattern_deps{$key};
+                $found = 1;
+            } elsif (exists $pseudo_rule{$key} || exists $pseudo_deps{$key}) {
+                delete $pseudo_rule{$key};
+                delete $pseudo_deps{$key};
+                $found = 1;
+            }
+
+            if ($found) {
+                push @modifications, "del-rule $target";
+                print "Deleted rule for '$target'\n";
+            } else {
+                print "No rule found for target '$target'\n";
+            }
+        }
+        elsif ($input =~ /^\s*save(?:\s+(.+))?\s*$/i) {
+            my $save_file = $1 || "$makefile-smak";
+            $save_file =~ s/^\s+|\s+$//g if defined $save_file;
+
+            open(my $save_fh, '>', $save_file) or do {
+                print "Error: Cannot open '$save_file' for writing: $!\n";
+                next;
+            };
+
+            foreach my $mod (@modifications) {
+                print $save_fh "$mod\n";
+            }
+            print $save_fh "quit\n";
+            close($save_fh);
+
+            print "Saved " . scalar(@modifications) . " modification(s) to '$save_file'\n";
         }
         elsif ($input =~ /^\s*$/i) {
             # Ignore empty lines

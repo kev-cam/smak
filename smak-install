@@ -1,0 +1,16 @@
+#!/bin/bash
+# Smak Installer
+
+installer=$0
+
+case $installer in
+    /*) ;; #ok
+    *)  installer=$PWD/$installer ;;
+esac
+
+if [ -d ${1:-/none} ] ; then
+    cd $1
+    ln -s $(dirname $installer/smak) .
+else
+    echo Usage $(basename $installer) "<directory>"
+fi

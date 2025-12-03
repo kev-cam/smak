@@ -1,0 +1,176 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use File::Basename;
+
+# Script to analyze build failures from smak bug reports
+
+if (@ARGV != 1 || !-d $ARGV[0]) {
+    print STDERR "Usage: smak-debug <bug-report-directory>\n";
+    print STDERR "Example: smak-debug bugs/20231203-181951\n";
+    exit 1;
+}
+
+my $bug_dir = $ARGV[0];
+my $build_log = "$bug_dir/build.log";
+my $makecmp_log = "$bug_dir/make-cmp.txt";
+
+unless (-f $build_log) {
+    die "Error: Cannot find build.log in $bug_dir\n";
+}
+
+print "=" x 70 . "\n";
+print "SMAK DEBUG REPORT ANALYZER\n";
+print "=" x 70 . "\n";
+print "Report directory: $bug_dir\n";
+print "Build log: $build_log\n";
+print "\n";
+
+# Read the entire build log
+open(my $fh, '<', $build_log) or die "Cannot open $build_log: $!\n";
+my @log_lines = <$fh>;
+close($fh);
+
+# Extract report metadata
+my ($timestamp, $makefile);
+for my $line (@log_lines) {
+    if ($line =~ /^Timestamp:\s+(.+)$/) {
+        $timestamp = $1;
+    }
+    elsif ($line =~ /^Makefile:\s+(.+)$/) {
+        $makefile = $1;
+    }
+}
+
+print "Timestamp: $timestamp\n" if $timestamp;
+print "Makefile: $makefile\n" if $makefile;
+print "\n";
+
+# Look for errors
+my @errors;
+my @error_contexts;
+for (my $i = 0; $i < @log_lines; $i++) {
+    my $line = $log_lines[$i];
+
+    # Look for smak error messages
+    if ($line =~ /smak: \*\*\* \[(.+?)\] Error (\d+)/) {
+        push @errors, {
+            target => $1,
+            code => $2,
+            line_num => $i + 1,
+        };
+
+        # Capture context (previous 10 lines)
+        my $start = $i - 10 > 0 ? $i - 10 : 0;
+        my @context = @log_lines[$start..$i];
+        push @error_contexts, {
+            error => $errors[-1],
+            context => \@context,
+        };
+    }
+    # Look for other error indicators
+    elsif ($line =~ /error:/i && $line !~ /warnings being treated as errors/i) {
+        # Compiler/linker errors
+        push @errors, {
+            type => 'compiler',
+            message => $line,
+            line_num => $i + 1,
+        };
+    }
+}
+
+# Report findings
+if (@errors) {
+    print "=" x 70 . "\n";
+    print "ERRORS FOUND: " . scalar(@errors) . "\n";
+    print "=" x 70 . "\n\n";
+
+    for my $err_ctx (@error_contexts) {
+        my $err = $err_ctx->{error};
+        print "-" x 70 . "\n";
+        print "ERROR: Target [$err->{target}] failed with exit code $err->{code}\n";
+        print "-" x 70 . "\n";
+        print "Context (last 10 lines before error):\n\n";
+        print @{$err_ctx->{context}};
+        print "\n";
+    }
+
+    # Show compiler errors separately
+    my @compiler_errors = grep { $_->{type} && $_->{type} eq 'compiler' } @errors;
+    if (@compiler_errors) {
+        print "-" x 70 . "\n";
+        print "COMPILER/LINKER ERRORS:\n";
+        print "-" x 70 . "\n";
+        for my $err (@compiler_errors) {
+            print "Line $err->{line_num}: $err->{message}";
+        }
+        print "\n";
+    }
+} else {
+    print "=" x 70 . "\n";
+    print "NO ERRORS DETECTED\n";
+    print "=" x 70 . "\n";
+    print "Build appears to have completed successfully.\n\n";
+}
+
+# Analyze make-cmp output if available
+if (-f $makecmp_log && -s $makecmp_log) {
+    print "=" x 70 . "\n";
+    print "MAKE-CMP OUTPUT\n";
+    print "=" x 70 . "\n";
+    open(my $mc_fh, '<', $makecmp_log) or die "Cannot open $makecmp_log: $!\n";
+    while (my $line = <$mc_fh>) {
+        print $line;
+    }
+    close($mc_fh);
+    print "\n";
+} else {
+    print "=" x 70 . "\n";
+    print "MAKE-CMP OUTPUT\n";
+    print "=" x 70 . "\n";
+    print "(No make-cmp output available)\n\n";
+}
+
+# Show command summary
+print "=" x 70 . "\n";
+print "COMMAND SUMMARY\n";
+print "=" x 70 . "\n";
+
+my @commands;
+for my $line (@log_lines) {
+    # Skip header/footer lines
+    next if $line =~ /^==+/;
+    next if $line =~ /^SMAK BUILD REPORT/;
+    next if $line =~ /^Timestamp:/;
+    next if $line =~ /^Makefile:/;
+    next if $line =~ /^Report directory:/;
+    next if $line =~ /^Running make-cmp/;
+    next if $line =~ /^BUILD REPORT COMPLETE/;
+    next if $line =~ /^Log saved to:/;
+    next if $line =~ /^make-cmp output:/;
+    next if $line =~ /^\s*$/;
+    next if $line =~ /^\(make-cmp/;
+
+    # Commands typically don't start with whitespace in our log
+    # and are often longer, identifiable patterns
+    if ($line =~ /^(cc|gcc|g\+\+|clang|ld|ar|ranlib|make|cmake)/i) {
+        push @commands, $line;
+    }
+}
+
+if (@commands) {
+    print "Detected commands executed:\n\n";
+    my $cmd_num = 1;
+    for my $cmd (@commands) {
+        print "$cmd_num. $cmd";
+        $cmd_num++;
+    }
+} else {
+    print "No commands detected in log.\n";
+}
+
+print "\n";
+print "=" x 70 . "\n";
+print "END OF DEBUG REPORT\n";
+print "=" x 70 . "\n";
+print "\nFor full details, see: $build_log\n";

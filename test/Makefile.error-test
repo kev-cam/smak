@@ -1,0 +1,12 @@
+# Test Makefile that will fail
+
+all: test
+	echo "All targets complete"
+
+test:
+	echo "Building test..."
+	gcc nonexistent-file.c -o test
+	echo "This should not print"
+
+clean:
+	rm -f test

@@ -4,6 +4,7 @@ bugs/
 *.d
 *.a
 *.so
+*.old
 test/*.txt
 test/file1
 test/file2

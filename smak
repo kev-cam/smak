@@ -3,8 +3,19 @@
 # Smak - Makefile parser and build tool
 # Bash wrapper script
 
+export SMAK_LAUNCHER=$0
+
+script=$(basename $0)
+exe=$0
+link=$(readlink $exe)
+
 # Find the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+while [ $link != $exe ]  ; do
+    exe=$link
+    link=$(readlink $exe)
+done
+
+SCRIPT_DIR="$(dirname $exe)"
 
 # Execute the Perl script with all arguments passed through
-exec perl "$SCRIPT_DIR/smak.pl" "$@"
+exec perl "$SCRIPT_DIR/$script.pl" "$@"

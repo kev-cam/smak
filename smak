@@ -88,6 +88,7 @@ open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 my $current_target;
 my $current_rule = '';
 my $current_type;  # 'fixed', 'pattern', or 'pseudo'
+my $default_target;  # First non-pseudo target (gmake default)
 
 sub classify_target {
     my ($target) = @_;
@@ -473,6 +474,11 @@ while (my $line = <$fh>) {
         $current_type = classify_target($target);
         $current_rule = '';
 
+        # Set default target to first non-pseudo target (like gmake)
+        if (!defined $default_target && $current_type ne 'pseudo') {
+            $default_target = $target;
+        }
+
         # Store dependencies in appropriate hash
         my $key = "$makefile\t$target";
         my @dep_list = grep { $_ ne '' } split(/\s+/, $dependencies);
@@ -504,20 +510,26 @@ if ($script_file) {
     execute_script($script_file);
 }
 
-# If targets specified but not in debug mode, build them
-if (@targets && !$debug) {
-    foreach my $target (@targets) {
-        build_target($target);
+# If not in debug mode, build targets
+if (!$debug) {
+    # If no targets specified, build default target (like gmake)
+    if (!@targets) {
+        if (defined $default_target) {
+            build_target($default_target);
+        } else {
+            die "smak: *** No targets. Stop.\n";
+        }
+    } else {
+        # Build specified targets
+        foreach my $target (@targets) {
+            build_target($target);
+        }
     }
     exit 0;
 }
 
-# Debug mode or normal output
-if ($debug) {
-    interactive_debug();
-} else {
-    print_rules();
-}
+# Debug mode - enter interactive debugger
+interactive_debug();
 
 sub print_rules {
     print "Rules parsed from $makefile:\n";

@@ -1,0 +1,15 @@
+# Simple test Makefile for default target testing
+
+.PHONY: clean
+
+default: file1 file2
+	@echo "Built default target"
+
+file1:
+	@echo "Building file1" > file1
+
+file2:
+	@echo "Building file2" > file2
+
+clean:
+	rm -f file1 file2

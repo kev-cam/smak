@@ -67,6 +67,13 @@ if ($report) {
     # Enable report mode in the module
     set_report_mode(1, $log_fh);
 
+    # Copy Makefile(s) to bug directory for analysis
+    use File::Copy;
+    if (-f $makefile) {
+        my $makefile_copy = "$report_dir/" . (split(/\//, $makefile))[-1];
+        copy($makefile, $makefile_copy) or warn "Could not copy $makefile: $!\n";
+    }
+
     # Print header to both terminal and log
     my $header = "=== SMAK BUILD REPORT ===\n" .
                  "Timestamp: $timestamp\n" .

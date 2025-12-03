@@ -2,6 +2,9 @@
 use strict;
 use warnings;
 use File::Basename;
+use FindBin qw($RealBin);
+use lib $RealBin;
+use Smak qw(:all);
 
 # Script to analyze build failures from smak bug reports
 
@@ -32,33 +35,58 @@ my @log_lines = <$fh>;
 close($fh);
 
 # Extract report metadata
-my ($timestamp, $makefile);
+my ($timestamp, $makefile_name);
 for my $line (@log_lines) {
     if ($line =~ /^Timestamp:\s+(.+)$/) {
         $timestamp = $1;
     }
     elsif ($line =~ /^Makefile:\s+(.+)$/) {
-        $makefile = $1;
+        $makefile_name = $1;
     }
 }
 
 print "Timestamp: $timestamp\n" if $timestamp;
-print "Makefile: $makefile\n" if $makefile;
+print "Original Makefile: $makefile_name\n" if $makefile_name;
+
+# Try to find and parse the copied Makefile in the bug directory
+my $makefile_copy;
+if ($makefile_name) {
+    my $basename = (split(/\//, $makefile_name))[-1];
+    $makefile_copy = "$bug_dir/$basename";
+}
+
+my $parsed_makefile = 0;
+if ($makefile_copy && -f $makefile_copy) {
+    print "Parsed Makefile: $makefile_copy\n";
+    eval {
+        parse_makefile($makefile_copy);
+        $parsed_makefile = 1;
+    };
+    if ($@) {
+        warn "Warning: Could not parse Makefile: $@\n";
+    }
+} else {
+    print "Note: Makefile copy not found in bug directory\n";
+}
 print "\n";
 
 # Look for errors
 my @errors;
 my @error_contexts;
+my @failed_targets;
+
 for (my $i = 0; $i < @log_lines; $i++) {
     my $line = $log_lines[$i];
 
     # Look for smak error messages
     if ($line =~ /smak: \*\*\* \[(.+?)\] Error (\d+)/) {
+        my $target = $1;
         push @errors, {
-            target => $1,
+            target => $target,
             code => $2,
             line_num => $i + 1,
         };
+        push @failed_targets, $target unless grep { $_ eq $target } @failed_targets;
 
         # Capture context (previous 10 lines)
         my $start = $i - 10 > 0 ? $i - 10 : 0;
@@ -113,6 +141,83 @@ if (@errors) {
     print "Build appears to have completed successfully.\n\n";
 }
 
+# If we parsed the Makefile and have failed targets, show dependency analysis
+if ($parsed_makefile && @failed_targets) {
+    print "=" x 70 . "\n";
+    print "MAKEFILE ANALYSIS FOR FAILED TARGETS\n";
+    print "=" x 70 . "\n\n";
+
+    my $rules = get_rules();
+    my $makefile_key_base = $makefile_copy . "\t";
+
+    for my $target (@failed_targets) {
+        print "-" x 70 . "\n";
+        print "Target: $target\n";
+        print "-" x 70 . "\n";
+
+        my $key = $makefile_key_base . $target;
+        my @deps;
+        my $rule_text = '';
+
+        # Find the target in the rules
+        if (exists $rules->{fixed_deps}{$key}) {
+            @deps = @{$rules->{fixed_deps}{$key} || []};
+            $rule_text = $rules->{fixed_rule}{$key} || '';
+            print "Type: Fixed rule\n";
+        } elsif (exists $rules->{pattern_deps}{$key}) {
+            @deps = @{$rules->{pattern_deps}{$key} || []};
+            $rule_text = $rules->{pattern_rule}{$key} || '';
+            print "Type: Pattern rule\n";
+        } elsif (exists $rules->{pseudo_deps}{$key}) {
+            @deps = @{$rules->{pseudo_deps}{$key} || []};
+            $rule_text = $rules->{pseudo_rule}{$key} || '';
+            print "Type: Pseudo rule\n";
+        } else {
+            # Try pattern matching
+            my $found = 0;
+            for my $pkey (keys %{$rules->{pattern_rule}}) {
+                if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                    my $pattern = $1;
+                    my $pattern_re = $pattern;
+                    $pattern_re =~ s/%/(.+)/g;
+                    if ($target =~ /^$pattern_re$/) {
+                        @deps = @{$rules->{pattern_deps}{$pkey} || []};
+                        $rule_text = $rules->{pattern_rule}{$pkey} || '';
+                        my $stem = $1;
+                        @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                        print "Type: Matched pattern rule ($pattern)\n";
+                        $found = 1;
+                        last;
+                    }
+                }
+            }
+            if (!$found) {
+                print "Type: Target not found in Makefile\n";
+            }
+        }
+
+        if (@deps) {
+            print "Dependencies: " . join(', ', @deps) . "\n";
+        } else {
+            print "Dependencies: (none)\n";
+        }
+
+        if ($rule_text) {
+            print "\nRule commands:\n";
+            # Format the rule text
+            my $formatted = $rule_text;
+            $formatted =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+            print $formatted;
+            if ($formatted !~ /\n$/) {
+                print "\n";
+            }
+        } else {
+            print "Rule: (no commands defined)\n";
+        }
+        print "\n";
+    }
+}
+
 # Analyze make-cmp output if available
 if (-f $makecmp_log && -s $makecmp_log) {
     print "=" x 70 . "\n";
@@ -153,7 +258,7 @@ for my $line (@log_lines) {
 
     # Commands typically don't start with whitespace in our log
     # and are often longer, identifiable patterns
-    if ($line =~ /^(cc|gcc|g\+\+|clang|ld|ar|ranlib|make|cmake)/i) {
+    if ($line =~ /^(cc|gcc|g\+\+|clang|clang\+\+|ld|ar|ranlib|make|cmake)/i) {
         push @commands, $line;
     }
 }
@@ -167,6 +272,26 @@ if (@commands) {
     }
 } else {
     print "No commands detected in log.\n";
+}
+
+# Show variable summary if Makefile was parsed
+if ($parsed_makefile) {
+    my $rules = get_rules();
+    my %vars = %{$rules->{variables}};
+
+    if (keys %vars) {
+        print "\n";
+        print "=" x 70 . "\n";
+        print "MAKEFILE VARIABLES\n";
+        print "=" x 70 . "\n";
+
+        for my $var (sort keys %vars) {
+            my $value = $vars{$var};
+            # Convert $MV{VAR} back to $(VAR) for display
+            $value =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+            print "$var = $value\n";
+        }
+    }
 }
 
 print "\n";

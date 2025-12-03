@@ -1,21 +1,11 @@
-#!/usr/bin/perl
-use strict;
-use warnings;
-use Getopt::Long;
-use Term::ReadLine;
-use POSIX ":sys_wait_h";
-use FindBin qw($RealBin);
-use File::Path qw(make_path);
-use POSIX qw(strftime);
+#!/bin/bash
+# Smak - Makefile parser and build tool
+# Bash wrapper script
 
-# Separate hashes for different rule types
-my %fixed_rule;
-my %fixed_deps;
-my %pattern_rule;
-my %pattern_deps;
-my %pseudo_rule;
-my %pseudo_deps;
+# Find the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+<<<<<<< HEAD
 # Hash for Makefile variables
 my %MV;
 
@@ -1350,3 +1340,7 @@ sub print_category {
         print "-" x 60 . "\n";
     }
 }
+=======
+# Execute the Perl script with all arguments passed through
+exec perl "$SCRIPT_DIR/smak.pl" "$@"
+>>>>>>> origin/claude/perl-makefile-parser-01BcbgZjEt7o8QcdNMWXtMSt

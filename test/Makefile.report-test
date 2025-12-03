@@ -1,0 +1,15 @@
+# Test Makefile for -Kreport functionality
+
+all: test1 test2
+	echo "All targets complete"
+
+test1:
+	echo "Building test1"
+	echo "This is test1 output" > test1.txt
+
+test2:
+	echo "Building test2"
+	echo "This is test2 output" > test2.txt
+
+clean:
+	rm -f test1.txt test2.txt

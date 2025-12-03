@@ -1,0 +1,13 @@
+# Build artifacts and test outputs
+bugs/
+*.o
+*.d
+*.a
+*.so
+test/*.txt
+test/file1
+test/file2
+test/test
+test/program
+test/test-debug
+test/example-debug

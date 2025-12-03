@@ -4,7 +4,7 @@
 echo "Testing gmake functions..."
 echo ""
 
-cat <<'EOF' | ./smak -f Makefile.nested -Kd
+cat <<'EOF' | ../smak -f Makefile.nested -Kd
 print $(patsubst %.c,%.o,foo.c bar.c baz.c)
 print $(subst .c,.o,test.c main.c)
 print $(strip   foo   bar   baz  )

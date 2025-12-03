@@ -1,0 +1,14 @@
+CC = gcc
+CFLAGS = -Wall
+
+test: test.txt hello.txt
+	@echo "Build complete"
+
+test.txt:
+	echo "Creating test.txt" > test.txt
+
+hello.txt:
+	echo "Creating hello.txt" > hello.txt
+
+clean:
+	rm -f test.txt hello.txt

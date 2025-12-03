@@ -720,6 +720,8 @@ sub execute_script {
             $deps_str =~ s/^\s+|\s+$//g;
             $rule_text =~ s/\\n/\n/g;
             $rule_text =~ s/\\t/\t/g;
+            # Ensure each line starts with a tab (Makefile requirement)
+            $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
             $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
 
             my @deps = split(/\s+/, $deps_str);
@@ -742,6 +744,8 @@ sub execute_script {
             $target =~ s/^\s+|\s+$//g;
             $rule_text =~ s/\\n/\n/g;
             $rule_text =~ s/\\t/\t/g;
+            # Ensure each line starts with a tab (Makefile requirement)
+            $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
             $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
 
             my $key = "$makefile\t$target";
@@ -1091,6 +1095,8 @@ sub interactive_debug {
             # Convert \n and \t in rule text to actual newlines and tabs
             $rule_text =~ s/\\n/\n/g;
             $rule_text =~ s/\\t/\t/g;
+            # Ensure each line starts with a tab (Makefile requirement)
+            $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
             # Transform $(VAR) to $MV{VAR} in rule
             $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
 
@@ -1122,6 +1128,8 @@ sub interactive_debug {
             # Convert \n and \t in rule text to actual newlines and tabs
             $rule_text =~ s/\\n/\n/g;
             $rule_text =~ s/\\t/\t/g;
+            # Ensure each line starts with a tab (Makefile requirement)
+            $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
             # Transform $(VAR) to $MV{VAR} in rule
             $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
 

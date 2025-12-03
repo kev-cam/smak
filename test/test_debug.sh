@@ -4,7 +4,7 @@
 echo "Testing interactive debug mode..."
 echo ""
 
-cat <<EOF | ./smak -Kd
+cat <<EOF | ../smak -Kd
 list
 show program
 rule clean

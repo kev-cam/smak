@@ -4,7 +4,7 @@
 echo "Testing individual gmake functions..."
 echo ""
 
-cat <<'EOF' | ./smak -f Makefile.nested -Kd
+cat <<'EOF' | ../smak -f Makefile.nested -Kd
 print $(patsubst %.c,%.o,foo.c)
 print $(filter %.c,foo.c bar.o baz.c)
 print $(words one two three)

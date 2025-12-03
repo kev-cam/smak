@@ -5,14 +5,14 @@ echo "Testing echo control variable..."
 echo ""
 
 echo "Test 1: Check default value of echo (should be 0)"
-cat <<'EOF' | ./smak -f Makefile.nested -Kd
+cat <<'EOF' | ../smak -f Makefile.nested -Kd
 set
 quit
 EOF
 
 echo ""
 echo "Test 2: Set echo to 1 and run commands (should echo them)"
-cat <<'EOF' | ./smak -f Makefile.nested -Kd
+cat <<'EOF' | ../smak -f Makefile.nested -Kd
 eval $echo = 1
 list
 print $(CC)

@@ -2,19 +2,45 @@
 use strict;
 use warnings;
 use File::Basename;
+use File::Path qw(make_path);
 use FindBin qw($RealBin);
 use lib $RealBin;
 use Smak qw(:all);
 
-# Script to analyze build failures from smak bug reports
+# Script to analyze build failures from smak bug reports or recreate environments
 
-if (@ARGV != 1 || !-d $ARGV[0]) {
+# Check for -recreate option
+my $recreate_mode = 0;
+my $bug_dir;
+
+if (@ARGV == 2 && $ARGV[0] eq '-recreate') {
+    $recreate_mode = 1;
+    $bug_dir = $ARGV[1];
+} elsif (@ARGV == 1 && -d $ARGV[0]) {
+    $bug_dir = $ARGV[0];
+} else {
     print STDERR "Usage: smak-debug <bug-report-directory>\n";
+    print STDERR "   or: smak-debug -recreate <bug-report-directory>\n";
+    print STDERR "\n";
+    print STDERR "Options:\n";
+    print STDERR "  -recreate   Recreate the build environment from directory-listing.txt\n";
+    print STDERR "\n";
     print STDERR "Example: smak-debug bugs/20231203-181951\n";
+    print STDERR "Example: smak-debug -recreate bugs/20231203-181951\n";
     exit 1;
 }
 
-my $bug_dir = $ARGV[0];
+unless (-d $bug_dir) {
+    die "Error: Directory $bug_dir does not exist\n";
+}
+
+# Handle -recreate mode
+if ($recreate_mode) {
+    recreate_environment($bug_dir);
+    exit 0;
+}
+
+# Original analysis mode continues below...
 my $build_log = "$bug_dir/build.log";
 my $makecmp_log = "$bug_dir/make-cmp.txt";
 
@@ -299,3 +325,139 @@ print "=" x 70 . "\n";
 print "END OF DEBUG REPORT\n";
 print "=" x 70 . "\n";
 print "\nFor full details, see: $build_log\n";
+
+# Subroutine to recreate environment from directory listing
+sub recreate_environment {
+    my ($bug_dir) = @_;
+
+    my $listing_file = "$bug_dir/directory-listing.txt";
+    unless (-f $listing_file) {
+        die "Error: Cannot find directory-listing.txt in $bug_dir\n";
+    }
+
+    print "=" x 70 . "\n";
+    print "RECREATING BUILD ENVIRONMENT\n";
+    print "=" x 70 . "\n";
+    print "Bug report: $bug_dir\n";
+    print "Reading: $listing_file\n";
+
+    # Create test directory
+    my $test_dir = "$bug_dir/test";
+    if (-e $test_dir) {
+        print "Warning: $test_dir already exists, removing...\n";
+        system("rm", "-rf", $test_dir);
+    }
+    make_path($test_dir) or die "Cannot create $test_dir: $!\n";
+    print "Created: $test_dir\n\n";
+
+    # Parse directory listing
+    open(my $fh, '<', $listing_file) or die "Cannot open $listing_file: $!\n";
+    my @lines = <$fh>;
+    close($fh);
+
+    # Extract original directory from header
+    my $orig_dir;
+    if ($lines[0] =~ /^Directory listing from:\s+(.+)$/) {
+        $orig_dir = $1;
+        print "Original directory: $orig_dir\n";
+    }
+
+    # Parse ls -lR output
+    my $current_dir = '';
+    my $files_created = 0;
+    my $dirs_created = 0;
+
+    for my $line (@lines) {
+        chomp $line;
+
+        # Skip header lines
+        next if $line =~ /^Directory listing from:/;
+        next if $line =~ /^=+$/;
+        next if $line =~ /^total /;
+        next if $line eq '';
+
+        # Directory header (ends with :)
+        if ($line =~ /^(.+):$/) {
+            $current_dir = $1;
+            # Convert ./path to path
+            $current_dir =~ s/^\.\/?//;
+            next;
+        }
+
+        # Parse ls -l line
+        # Format: permissions links owner group size month day time name
+        # drwxr-xr-x 2 root root 4096 Dec  4 10:22 dirname
+        # -rw-r--r-- 1 root root  209 Dec  4 10:22 filename
+        if ($line =~ /^([d\-l])([rwx\-]{9})\s+\d+\s+\S+\s+\S+\s+\d+\s+(\w+\s+\d+\s+[\d:]+)\s+(.+)$/) {
+            my $type = $1;
+            my $perms = $2;
+            my $timestamp = $3;
+            my $name = $4;
+
+            # Skip . and .. entries
+            next if $name eq '.' || $name eq '..';
+
+            # Build full path in test directory
+            my $full_path = $test_dir;
+            $full_path .= "/$current_dir" if $current_dir;
+            $full_path .= "/$name";
+
+            if ($type eq 'd') {
+                # Create directory
+                unless (-d $full_path) {
+                    make_path($full_path);
+                    $dirs_created++;
+                }
+            } elsif ($type eq '-') {
+                # Create empty file
+                my $dir = dirname($full_path);
+                make_path($dir) unless -d $dir;
+
+                open(my $out, '>', $full_path) or warn "Cannot create $full_path: $!\n";
+                close($out);
+                $files_created++;
+
+                # Set timestamp using touch
+                # Parse timestamp: "Dec  4 10:22" or "Dec  4 2024"
+                my $touch_time = parse_timestamp($timestamp);
+                if ($touch_time) {
+                    system("touch", "-d", $touch_time, $full_path);
+                }
+            }
+            # TODO: Handle symlinks (type 'l') if needed
+        }
+    }
+
+    print "\n";
+    print "=" x 70 . "\n";
+    print "RECREATION COMPLETE\n";
+    print "=" x 70 . "\n";
+    print "Directories created: $dirs_created\n";
+    print "Files created: $files_created\n";
+    print "Test directory: $test_dir\n";
+    print "\n";
+
+    # Check for smak.env
+    my $env_file = "$bug_dir/smak.env";
+    if (-f $env_file) {
+        print "To run with original environment:\n";
+        print "  cd $test_dir\n";
+        print "  source ../${\(basename($env_file))}\n";
+        print "  smak [options]\n";
+    } else {
+        print "Note: smak.env not found in bug report\n";
+        print "To test:\n";
+        print "  cd $test_dir\n";
+        print "  smak [options]\n";
+    }
+    print "\n";
+}
+
+sub parse_timestamp {
+    my ($ts) = @_;
+    # Input: "Dec  4 10:22" or "Dec  4 2024"
+    # Output: format suitable for touch -d
+
+    # For now, just pass it through as touch -d is quite flexible
+    return $ts;
+}

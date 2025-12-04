@@ -349,6 +349,14 @@ sub parse_makefile {
     %MV = ();
     @modifications = ();
 
+    # Set default built-in make variables
+    $MV{MAKE} = 'make';
+    $MV{SHELL} = '/bin/sh';
+    $MV{RM} = 'rm -f';
+    $MV{AR} = 'ar';
+    $MV{CC} = 'cc';
+    $MV{CXX} = 'c++';
+
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
     my $current_target;

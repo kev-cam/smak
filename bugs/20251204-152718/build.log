@@ -1,0 +1,21 @@
+=== SMAK BUILD REPORT ===
+Timestamp: 20251204-152718
+Makefile: Makefile
+Report directory: /mnt/y/smak/bugs/20251204-152718
+==================================================
+
+cmake -S/mnt/y/Xyce-8/xyce -B/mnt/y/Xyce-8/xyce-build --check-build-system CMakeFiles/Makefile.cmake 0
+cmake -E cmake_progress_start /mnt/y/Xyce-8/xyce-build/CMakeFiles /mnt/y/Xyce-8/xyce-build//CMakeFiles/progress.marks
+/home/dkc/bin/smak  -f CMakeFiles/Makefile2 all
+cmake -E cmake_progress_start /mnt/y/Xyce-8/xyce-build/CMakeFiles 0
+
+==================================================
+Running dry-run comparison (smak -n vs make -n)...
+==================================================
+Dry-run outputs saved:
+  smak -n: /mnt/y/smak/bugs/20251204-152718/smak-dryrun.txt
+  make -n: /mnt/y/smak/bugs/20251204-152718/make-dryrun.txt
+
+=== BUILD REPORT COMPLETE ===
+Log saved to: /mnt/y/smak/bugs/20251204-152718/build.log
+Dry-run comparison: smak-dryrun.txt vs make-dryrun.txt

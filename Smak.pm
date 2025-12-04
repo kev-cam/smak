@@ -496,13 +496,74 @@ sub get_rules {
     };
 }
 
+# Helper function to parse make/smak command line
+sub parse_make_command {
+    my ($cmd) = @_;
+
+    my $makefile = '';
+    my @targets;
+
+    # Split command line into tokens (simple split, doesn't handle quoted strings)
+    my @parts = split /\s+/, $cmd;
+
+    # Skip the command itself (make/smak/path)
+    shift @parts;
+
+    # Parse arguments
+    for (my $i = 0; $i < @parts; $i++) {
+        if ($parts[$i] eq '-f' && $i + 1 < @parts) {
+            $makefile = $parts[$i + 1];
+            $i++;  # Skip next arg
+        } elsif ($parts[$i] =~ /^-/) {
+            # Skip other options
+            # Handle options that take arguments
+            if ($parts[$i] =~ /^-(C|I|j|l|o|W)$/ && $i + 1 < @parts) {
+                $i++;  # Skip option argument
+            }
+        } else {
+            # It's a target
+            push @targets, $parts[$i];
+        }
+    }
+
+    return ($makefile, @targets);
+}
+
+# Helper function to get first target from a makefile
+sub get_first_target {
+    my ($mf) = @_;
+
+    # Look for first non-special target in this makefile
+    for my $key (keys %fixed_deps) {
+        if ($key =~ /^\Q$mf\E\t(.+)$/) {
+            my $tgt = $1;
+            # Skip special targets that start with .
+            next if $tgt =~ /^\./;
+            return $tgt;
+        }
+    }
+
+    # Try pseudo targets
+    for my $key (keys %pseudo_deps) {
+        if ($key =~ /^\Q$mf\E\t(.+)$/) {
+            my $tgt = $1;
+            next if $tgt =~ /^\./;
+            return $tgt;
+        }
+    }
+
+    return undef;
+}
+
 sub build_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
     $depth ||= 0;
 
-    return if $visited->{$target};
-    $visited->{$target} = 1;
+    # Track visited targets per makefile to handle same target names in different makefiles
+    my $visit_key = "$makefile\t$target";
+    return if $visited->{$visit_key};
+    $visited->{$visit_key} = 1;
 
     my $key = "$makefile\t$target";
     my @deps;
@@ -561,8 +622,44 @@ sub build_target {
             # Check if command starts with @ (silent mode)
             my $silent = ($cmd_line =~ s/^\s*@//);
 
-            # In dry-run mode, always print commands and skip execution
+            # In dry-run mode, handle recursive make invocations or print commands
             if ($dry_run_mode) {
+                # Check if this is a recursive make/smak invocation
+                if ($cmd_line =~ /\b(make|smak)\s/ || $cmd_line =~ m{/smak(?:\s|$)}) {
+                    # Parse the make/smak command line to extract -f and targets
+                    my ($sub_makefile, @sub_targets) = parse_make_command($cmd_line);
+
+                    if ($sub_makefile) {
+                        # Save current makefile state
+                        my $saved_makefile = $makefile;
+
+                        # Switch to sub-makefile
+                        $makefile = $sub_makefile;
+
+                        # Parse the sub-makefile if not already parsed
+                        my $test_key = "$makefile\t" . ($sub_targets[0] || 'all');
+                        unless (exists $fixed_deps{$test_key} || exists $pattern_deps{$test_key} || exists $pseudo_deps{$test_key}) {
+                            parse_makefile($makefile);
+                        }
+
+                        # Build sub-targets recursively in dry-run mode
+                        if (@sub_targets) {
+                            for my $sub_target (@sub_targets) {
+                                build_target($sub_target, $visited, $depth + 1);
+                            }
+                        } else {
+                            # No targets specified, build first target
+                            my $first_target = get_first_target($makefile);
+                            build_target($first_target, $visited, $depth + 1) if $first_target;
+                        }
+
+                        # Restore makefile state
+                        $makefile = $saved_makefile;
+                        next;
+                    }
+                }
+
+                # Not a recursive make, just print the command
                 print "$cmd_line\n";
                 next;
             }
@@ -599,8 +696,10 @@ sub dry_run_target {
     $visited ||= {};
     $depth ||= 0;
 
-    return if $visited->{$target};
-    $visited->{$target} = 1;
+    # Track visited targets per makefile to handle same target names in different makefiles
+    my $visit_key = "$makefile\t$target";
+    return if $visited->{$visit_key};
+    $visited->{$visit_key} = 1;
 
     my $indent = "  " x $depth;
     print "${indent}Building: $target\n";

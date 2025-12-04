@@ -17,6 +17,7 @@ our @EXPORT_OK = qw(
     get_default_target
     get_rules
     set_report_mode
+    set_dry_run_mode
     tee_print
     expand_vars
     add_rule
@@ -54,11 +55,17 @@ our $makefile;
 our $default_target;
 our $report_mode = 0;
 our $log_fh;
+our $dry_run_mode = 0;
 
 sub set_report_mode {
     my ($enabled, $fh) = @_;
     $report_mode = $enabled;
     $log_fh = $fh if $fh;
+}
+
+sub set_dry_run_mode {
+    my ($enabled) = @_;
+    $dry_run_mode = $enabled;
 }
 
 sub tee_print {
@@ -546,6 +553,12 @@ sub build_target {
 
             # Check if command starts with @ (silent mode)
             my $silent = ($cmd_line =~ s/^\s*@//);
+
+            # In dry-run mode, always print commands and skip execution
+            if ($dry_run_mode) {
+                print "$cmd_line\n";
+                next;
+            }
 
             # Echo command unless silent (like make)
             unless ($silent) {

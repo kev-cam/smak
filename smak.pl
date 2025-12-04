@@ -192,17 +192,28 @@ if (!$debug) {
 sub prompt_commit_bug_report {
     my ($report_dir) = @_;
 
+    # Check if running interactively (has a terminal)
+    if (!-t STDIN) {
+        print "\nNote: Not running interactively, skipping commit prompt.\n";
+        return;
+    }
+
+    # Save current directory
+    use Cwd;
+    my $original_dir = getcwd();
+
+    # Change to smak directory (where bugs/ is located)
+    chdir($RealBin) or do {
+        warn "Warning: Cannot change to smak directory $RealBin: $!\n";
+        return;
+    };
+
     # Check if we're in a git repository
     my $in_git_repo = system("git rev-parse --git-dir >/dev/null 2>&1") == 0;
 
     if (!$in_git_repo) {
         print "\nNote: Not in a git repository, skipping commit prompt.\n";
-        return;
-    }
-
-    # Check if running interactively (has a terminal)
-    if (!-t STDIN) {
-        print "\nNote: Not running interactively, skipping commit prompt.\n";
+        chdir($original_dir);
         return;
     }
 
@@ -226,12 +237,16 @@ sub prompt_commit_bug_report {
         # Extract timestamp from report directory
         my $timestamp = (split(/\//, $report_dir))[-1];
 
+        # Get relative path for git (bugs/timestamp)
+        my $git_path = "bugs/$timestamp";
+
         # Add the bug report directory
-        my $add_result = system("git add $report_dir");
+        my $add_result = system("git add $git_path");
         if ($add_result != 0) {
             warn "Warning: Failed to add bug report to git. Continue anyway? (y/N): ";
             my $cont = <STDIN>;
             chomp($cont) if defined $cont;
+            chdir($original_dir);
             return unless $cont && $cont =~ /^[Yy]/;
         }
 
@@ -245,6 +260,7 @@ sub prompt_commit_bug_report {
         my $commit_result = system("git", "commit", "-m", $commit_msg);
         if ($commit_result != 0) {
             warn "Warning: Failed to commit bug report.\n";
+            chdir($original_dir);
             return;
         }
 
@@ -269,6 +285,9 @@ sub prompt_commit_bug_report {
     } else {
         print "Skipping commit.\n";
     }
+
+    # Return to original directory
+    chdir($original_dir);
 }
 
 # Debug mode - enter interactive debugger

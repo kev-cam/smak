@@ -116,19 +116,31 @@ if ($script_file) {
 
 # If not in debug mode, build targets
 if (!$debug) {
-    # If no targets specified, build default target (like gmake)
-    if (!@targets) {
-        my $default_target = get_default_target();
-        if (defined $default_target) {
-            build_target($default_target);
+    my $build_failed = 0;
+    my $build_error = '';
+
+    # Wrap build in eval to catch failures but still allow report prompt
+    eval {
+        # If no targets specified, build default target (like gmake)
+        if (!@targets) {
+            my $default_target = get_default_target();
+            if (defined $default_target) {
+                build_target($default_target);
+            } else {
+                die "smak: *** No targets. Stop.\n";
+            }
         } else {
-            die "smak: *** No targets. Stop.\n";
+            # Build specified targets
+            foreach my $target (@targets) {
+                build_target($target);
+            }
         }
-    } else {
-        # Build specified targets
-        foreach my $target (@targets) {
-            build_target($target);
-        }
+    };
+
+    # Check if build failed
+    if ($@) {
+        $build_failed = 1;
+        $build_error = $@;
     }
 
     # If in report mode, run make-cmp and save output
@@ -160,8 +172,18 @@ if (!$debug) {
         tee_print("make-cmp output: $makecmp_output\n");
         close($log_fh) if $log_fh;
 
-        # Ask user if they want to commit the bug report
+        # Ask user if they want to commit the bug report (even if build failed)
         prompt_commit_bug_report($report_dir);
+
+        # If build failed, exit with error after prompt
+        if ($build_failed) {
+            exit 1;
+        }
+    } else {
+        # Not in report mode - re-throw the build error if it failed
+        if ($build_failed) {
+            die $build_error;
+        }
     }
 
     exit 0;

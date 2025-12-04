@@ -98,6 +98,19 @@ if ($report) {
         copy($makefile, $makefile_copy) or warn "Could not copy $makefile: $!\n";
     }
 
+    # Capture directory listing for filesystem reconstruction
+    my $listing_file = "$report_dir/directory-listing.txt";
+    my $cwd = $ENV{PWD} || `pwd`;
+    chomp $cwd;
+    my $listing = `ls -lR . 2>&1`;
+    open(my $listing_fh, '>', $listing_file) or warn "Cannot create $listing_file: $!\n";
+    if ($listing_fh) {
+        print $listing_fh "Directory listing from: $cwd\n";
+        print $listing_fh "=" x 50 . "\n\n";
+        print $listing_fh $listing;
+        close($listing_fh);
+    }
+
     # Print header to both terminal and log
     my $header = "=== SMAK BUILD REPORT ===\n" .
                  "Timestamp: $timestamp\n" .

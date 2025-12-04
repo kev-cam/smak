@@ -1,9 +1,6 @@
-
 #!/bin/bash
 # Smak - Makefile parser and build tool
-# Bash wrapper script
-
-export SMAK_LAUNCHER=$0
+# Bash wrapper scrip
 
 script=$(basename $0)
 exe=$0
@@ -16,6 +13,13 @@ while [ "$link" != "$exe" -a ! -z "$link" ]  ; do
 done
 
 SCRIPT_DIR="$(dirname $exe)"
+
+while true ; do
+    case $1 in
+      	-KE) shift ; source $1 ; shift ;; 
+	*)   break ;;
+    esac
+done
 
 # Pass the invocation name to smak.pl via environment variable
 # Use basename so $(MAKE) is set to "smak" not the full path

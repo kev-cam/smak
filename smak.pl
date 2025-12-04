@@ -16,6 +16,7 @@ my $report = 0;
 my $report_dir = '';
 my $log_fh;
 my $dry_run = 0;
+my $silent = 0;
 
 # Parse environment variable options first
 if (defined $ENV{USR_SMAK_OPT}) {
@@ -32,6 +33,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
         'Ks|Kscript=s' => \$script_file,
         'Kreport' => \$report,
         'n|just-print|dry-run|recon' => \$dry_run,
+        's|silent|quiet' => \$silent,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -45,6 +47,7 @@ GetOptions(
     'Ks|Kscript=s' => \$script_file,
     'Kreport' => \$report,
     'n|just-print|dry-run|recon' => \$dry_run,
+    's|silent|quiet' => \$silent,
 ) or die "Error in command line arguments\n";
 
 # Remaining arguments are targets to build
@@ -166,6 +169,7 @@ Options:
   -f, -file, -makefile FILE   Use FILE as a makefile (default: Makefile)
   -n, --just-print            Print commands without executing (dry-run)
   --dry-run, --recon          Same as -n
+  -s, --silent, --quiet       Don't print commands being executed
   -h, --help                  Display this help message
   -Kd, -Kdebug                Enter interactive debug mode
   -Ks, -Kscript FILE          Load and execute smak commands from FILE
@@ -176,6 +180,7 @@ Environment Variables:
 
 Examples:
   smak -n all                 Show what would be built without executing
+  smak -s all                 Build silently without printing commands
   smak -Ks fixes.smak all     Load fixes, then build target 'all'
   USR_SMAK_OPT='-Ks fixes.smak' smak target
   smak -Kreport all           Build with verbose logging to bugs directory
@@ -186,6 +191,11 @@ HELP
 # Set dry-run mode if requested
 if ($dry_run) {
     set_dry_run_mode(1);
+}
+
+# Set silent mode if requested
+if ($silent) {
+    set_silent_mode(1);
 }
 
 # Parse the makefile

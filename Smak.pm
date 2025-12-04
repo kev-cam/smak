@@ -18,6 +18,7 @@ our @EXPORT_OK = qw(
     get_rules
     set_report_mode
     set_dry_run_mode
+    set_silent_mode
     tee_print
     expand_vars
     add_rule
@@ -56,6 +57,7 @@ our $default_target;
 our $report_mode = 0;
 our $log_fh;
 our $dry_run_mode = 0;
+our $silent_mode = 0;
 
 sub set_report_mode {
     my ($enabled, $fh) = @_;
@@ -66,6 +68,11 @@ sub set_report_mode {
 sub set_dry_run_mode {
     my ($enabled) = @_;
     $dry_run_mode = $enabled;
+}
+
+sub set_silent_mode {
+    my ($enabled) = @_;
+    $silent_mode = $enabled;
 }
 
 sub tee_print {
@@ -561,7 +568,8 @@ sub build_target {
             }
 
             # Echo command unless silent (like make)
-            unless ($silent) {
+            # Silent mode (-s) suppresses all command echoing
+            unless ($silent || $silent_mode) {
                 tee_print("$cmd_line\n");
             }
 

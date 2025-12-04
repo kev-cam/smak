@@ -5,5 +5,9 @@
 # Find the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Pass the invocation name to smak.pl via environment variable
+# Use basename so $(MAKE) is set to "smak" not the full path
+export SMAK_INVOKED_AS="$(basename "$0")"
+
 # Execute the Perl script with all arguments passed through
 exec perl "$SCRIPT_DIR/smak.pl" "$@"

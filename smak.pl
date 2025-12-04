@@ -240,8 +240,8 @@ sub prompt_commit_bug_report {
         # Get relative path for git (bugs/timestamp)
         my $git_path = "bugs/$timestamp";
 
-        # Add the bug report directory
-        my $add_result = system("git add $git_path");
+        # Add the bug report directory (force add since bugs/ is in .gitignore)
+        my $add_result = system("git add -f $git_path");
         if ($add_result != 0) {
             warn "Warning: Failed to add bug report to git. Continue anyway? (y/N): ";
             my $cont = <STDIN>;

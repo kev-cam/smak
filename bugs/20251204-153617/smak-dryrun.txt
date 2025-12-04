@@ -1,0 +1,3 @@
+cmake -S/mnt/y/Xyce-8/xyce -B/mnt/y/Xyce-8/xyce-build --check-build-system CMakeFiles/Makefile.cmake 0
+cmake -E cmake_progress_start /mnt/y/Xyce-8/xyce-build/CMakeFiles /mnt/y/Xyce-8/xyce-build//CMakeFiles/progress.marks
+cmake -E cmake_progress_start /mnt/y/Xyce-8/xyce-build/CMakeFiles 0

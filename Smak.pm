@@ -626,8 +626,13 @@ sub build_target {
             if ($dry_run_mode) {
                 # Check if this is a recursive make/smak invocation
                 if ($cmd_line =~ /\b(make|smak)\s/ || $cmd_line =~ m{/smak(?:\s|$)}) {
+                    # Debug: show what we detected
+                    warn "DEBUG: Detected recursive make/smak: $cmd_line\n" if $ENV{SMAK_DEBUG};
+
                     # Parse the make/smak command line to extract -f and targets
                     my ($sub_makefile, @sub_targets) = parse_make_command($cmd_line);
+
+                    warn "DEBUG: Parsed makefile='$sub_makefile' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
 
                     if ($sub_makefile) {
                         # Save current makefile state
@@ -639,7 +644,16 @@ sub build_target {
                         # Parse the sub-makefile if not already parsed
                         my $test_key = "$makefile\t" . ($sub_targets[0] || 'all');
                         unless (exists $fixed_deps{$test_key} || exists $pattern_deps{$test_key} || exists $pseudo_deps{$test_key}) {
-                            parse_makefile($makefile);
+                            eval {
+                                parse_makefile($makefile);
+                            };
+                            if ($@) {
+                                warn "Warning: Could not parse sub-makefile '$makefile': $@\n";
+                                # Restore state and fall back to just printing the command
+                                $makefile = $saved_makefile;
+                                print "$cmd_line\n";
+                                next;
+                            }
                         }
 
                         # Build sub-targets recursively in dry-run mode

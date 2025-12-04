@@ -247,33 +247,42 @@ if (!$debug) {
         $build_error = $@;
     }
 
-    # If in report mode, run make-cmp and save output
+    # If in report mode, run dry-run comparison between smak and make
     if ($report) {
         tee_print("\n" . "=" x 50 . "\n");
-        tee_print("Running make-cmp...\n");
+        tee_print("Running dry-run comparison (smak -n vs make -n)...\n");
         tee_print("=" x 50 . "\n");
 
-        my $makecmp_output = "$report_dir/make-cmp.txt";
-        my $makecmp_result = `make-cmp 2>&1`;
+        # Build target list for commands
+        my $target_args = @targets ? join(' ', @targets) : '';
 
-        # Save make-cmp output to file
-        if (defined $makecmp_result && length($makecmp_result) > 0) {
-            open(my $mc_fh, '>', $makecmp_output) or warn "Cannot write to $makecmp_output: $!\n";
-            print $mc_fh $makecmp_result if $mc_fh;
-            close($mc_fh) if $mc_fh;
-
-            # Display make-cmp output
-            tee_print($makecmp_result);
-        } else {
-            tee_print("(make-cmp produced no output)\n");
-            # Still create the file, even if empty
-            open(my $mc_fh, '>', $makecmp_output);
-            close($mc_fh) if $mc_fh;
+        # Run smak -n
+        my $smak_dryrun_file = "$report_dir/smak-dryrun.txt";
+        my $smak_cmd = "$ENV{SMAK_LAUNCHER} -n -f '$makefile' $target_args 2>&1";
+        my $smak_result = `$smak_cmd`;
+        open(my $smak_fh, '>', $smak_dryrun_file) or warn "Cannot write to $smak_dryrun_file: $!\n";
+        if ($smak_fh) {
+            print $smak_fh $smak_result;
+            close($smak_fh);
         }
+
+        # Run make -n
+        my $make_dryrun_file = "$report_dir/make-dryrun.txt";
+        my $make_cmd = "make -n -f '$makefile' $target_args 2>&1";
+        my $make_result = `$make_cmd`;
+        open(my $make_fh, '>', $make_dryrun_file) or warn "Cannot write to $make_dryrun_file: $!\n";
+        if ($make_fh) {
+            print $make_fh $make_result;
+            close($make_fh);
+        }
+
+        tee_print("Dry-run outputs saved:\n");
+        tee_print("  smak -n: $smak_dryrun_file\n");
+        tee_print("  make -n: $make_dryrun_file\n");
 
         tee_print("\n=== BUILD REPORT COMPLETE ===\n");
         tee_print("Log saved to: $report_dir/build.log\n");
-        tee_print("make-cmp output: $makecmp_output\n");
+        tee_print("Dry-run comparison: smak-dryrun.txt vs make-dryrun.txt\n");
         close($log_fh) if $log_fh;
 
         # Ask user if they want to commit the bug report (even if build failed)

@@ -215,7 +215,8 @@ parse_makefile($makefile);
 
 # Handle Makefile remaking (like GNU make)
 # Check if the makefile itself has a rule and needs to be remade
-unless ($debug) {
+# Skip in dry-run mode to avoid executing remake commands
+unless ($debug || $dry_run) {
     my $makefile_has_rule = 0;
     my $key = "$makefile\t$makefile";
 

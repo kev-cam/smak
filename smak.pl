@@ -213,6 +213,37 @@ if ($silent) {
 # Parse the makefile
 parse_makefile($makefile);
 
+# Handle Makefile remaking (like GNU make)
+# Check if the makefile itself has a rule and needs to be remade
+unless ($debug) {
+    my $makefile_has_rule = 0;
+    my $key = "$makefile\t$makefile";
+
+    # Check if makefile is a target
+    if (exists $Smak::fixed_deps{$key} || exists $Smak::pattern_deps{$key} || exists $Smak::pseudo_deps{$key}) {
+        $makefile_has_rule = 1;
+    }
+
+    if ($makefile_has_rule && -f $makefile) {
+        # Get current modification time
+        my $old_mtime = (stat($makefile))[9];
+
+        # Try to build the makefile
+        eval {
+            build_target($makefile);
+        };
+
+        # Check if makefile was modified
+        if (-f $makefile) {
+            my $new_mtime = (stat($makefile))[9];
+            if ($new_mtime > $old_mtime) {
+                # Makefile was remade, re-parse it
+                parse_makefile($makefile);
+            }
+        }
+    }
+}
+
 # Execute script file if specified
 if ($script_file) {
     execute_script($script_file);

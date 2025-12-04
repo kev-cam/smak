@@ -350,7 +350,8 @@ sub parse_makefile {
     @modifications = ();
 
     # Set default built-in make variables
-    $MV{MAKE} = 'make';
+    # Use the actual invocation path for recursive makes
+    $MV{MAKE} = $0;  # $0 contains how the program was invoked
     $MV{SHELL} = '/bin/sh';
     $MV{RM} = 'rm -f';
     $MV{AR} = 'ar';

@@ -15,6 +15,7 @@ my $script_file = '';
 my $report = 0;
 my $report_dir = '';
 my $log_fh;
+my $dry_run = 0;
 
 # Parse environment variable options first
 if (defined $ENV{USR_SMAK_OPT}) {
@@ -30,6 +31,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
         'Kh|Khelp' => \$help,
         'Ks|Kscript=s' => \$script_file,
         'Kreport' => \$report,
+        'n|just-print|dry-run|recon' => \$dry_run,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -42,6 +44,7 @@ GetOptions(
     'Kh|Khelp' => \$help,
     'Ks|Kscript=s' => \$script_file,
     'Kreport' => \$report,
+    'n|just-print|dry-run|recon' => \$dry_run,
 ) or die "Error in command line arguments\n";
 
 # Remaining arguments are targets to build
@@ -111,6 +114,40 @@ if ($report) {
         close($listing_fh);
     }
 
+    # Create tar file of Makefiles and source files for reconstruction
+    my $tar_file = "$report_dir/files.tar";
+    my @files_to_tar;
+
+    # Always include the main Makefile if it exists
+    push @files_to_tar, $makefile if -f $makefile;
+
+    # Find other Makefiles and common source files
+    my @patterns = qw(Makefile* makefile* *.mk *.make CMakeLists.txt);
+    for my $pattern (@patterns) {
+        my @found = glob($pattern);
+        push @files_to_tar, @found;
+    }
+
+    # Remove duplicates and non-existent files
+    my %seen;
+    @files_to_tar = grep { -f $_ && !$seen{$_}++ } @files_to_tar;
+
+    # Create tar file if we have files to archive
+    if (@files_to_tar) {
+        my $files_list = join(' ', map { "'$_'" } @files_to_tar);
+        system("tar -cf '$tar_file' $files_list 2>/dev/null");
+        if (-f $tar_file && -s $tar_file) {
+            # Create a list of archived files for reference
+            my $tar_list = "$report_dir/files.txt";
+            open(my $list_fh, '>', $tar_list);
+            if ($list_fh) {
+                print $list_fh "Files archived in files.tar:\n";
+                print $list_fh join("\n", @files_to_tar) . "\n";
+                close($list_fh);
+            }
+        }
+    }
+
     # Print header to both terminal and log
     my $header = "=== SMAK BUILD REPORT ===\n" .
                  "Timestamp: $timestamp\n" .
@@ -127,6 +164,8 @@ Usage: smak [options] [targets...]
 
 Options:
   -f, -file, -makefile FILE   Use FILE as a makefile (default: Makefile)
+  -n, --just-print            Print commands without executing (dry-run)
+  --dry-run, --recon          Same as -n
   -Kd, -Kdebug                Enter interactive debug mode
   -Ks, -Kscript FILE          Load and execute smak commands from FILE
   -Kreport                    Create verbose build log and run make-cmp
@@ -136,11 +175,17 @@ Environment Variables:
   USR_SMAK_OPT                Options to prepend (e.g., "USR_SMAK_OPT=-Kd")
 
 Examples:
+  smak -n all                 Show what would be built without executing
   smak -Ks fixes.smak all     Load fixes, then build target 'all'
   USR_SMAK_OPT='-Ks fixes.smak' smak target
   smak -Kreport all           Build with verbose logging to bugs directory
 
 HELP
+}
+
+# Set dry-run mode if requested
+if ($dry_run) {
+    set_dry_run_mode(1);
 }
 
 # Parse the makefile

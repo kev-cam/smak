@@ -547,10 +547,11 @@ sub build_target {
             if ($report_mode) {
                 # Capture both stdout and stderr
                 my $output = `$cmd_line 2>&1`;
-                $exit_code = $?;
+                $exit_code = $? >> 8;  # Extract actual exit code from wait status
                 tee_print($output) if $output;
             } else {
-                $exit_code = system($cmd_line);
+                my $status = system($cmd_line);
+                $exit_code = $status >> 8;  # Extract actual exit code from wait status
             }
 
             if ($exit_code != 0) {

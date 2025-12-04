@@ -28,7 +28,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
     GetOptions(
         'f|file|makefile=s' => \$makefile,
         'Kd|Kdebug' => \$debug,
-        'Kh|Khelp' => \$help,
+        'h|help|Kh|Khelp' => \$help,
         'Ks|Kscript=s' => \$script_file,
         'Kreport' => \$report,
         'n|just-print|dry-run|recon' => \$dry_run,
@@ -41,7 +41,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
 GetOptions(
     'f|file|makefile=s' => \$makefile,
     'Kd|Kdebug' => \$debug,
-    'Kh|Khelp' => \$help,
+    'h|help|Kh|Khelp' => \$help,
     'Ks|Kscript=s' => \$script_file,
     'Kreport' => \$report,
     'n|just-print|dry-run|recon' => \$dry_run,
@@ -166,10 +166,10 @@ Options:
   -f, -file, -makefile FILE   Use FILE as a makefile (default: Makefile)
   -n, --just-print            Print commands without executing (dry-run)
   --dry-run, --recon          Same as -n
+  -h, --help                  Display this help message
   -Kd, -Kdebug                Enter interactive debug mode
   -Ks, -Kscript FILE          Load and execute smak commands from FILE
   -Kreport                    Create verbose build log and run make-cmp
-  -Kh, -Khelp                 Display this help message
 
 Environment Variables:
   USR_SMAK_OPT                Options to prepend (e.g., "USR_SMAK_OPT=-Kd")

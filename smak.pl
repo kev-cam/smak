@@ -8,6 +8,15 @@ use POSIX qw(strftime);
 use lib $RealBin;
 use Smak qw(:all);
 
+# Check for -cmake option early (passthrough to cmake)
+if (@ARGV && $ARGV[0] eq '-cmake') {
+    shift @ARGV;  # Remove -cmake
+    # Execute cmake with remaining arguments
+    exec('cmake', @ARGV);
+    # exec never returns on success
+    die "Failed to execute cmake: $!\n";
+}
+
 my $makefile = 'Makefile';
 my $debug = 0;
 my $help = 0;
@@ -164,6 +173,7 @@ if ($report) {
 sub print_help {
     print <<'HELP';
 Usage: smak [options] [targets...]
+   or: smak -cmake <cmake-args>
 
 Options:
   -f, -file, -makefile FILE   Use FILE as a makefile (default: Makefile)
@@ -171,6 +181,7 @@ Options:
   --dry-run, --recon          Same as -n
   -s, --silent, --quiet       Don't print commands being executed
   -h, --help                  Display this help message
+  -cmake                      Run cmake with remaining arguments (passthrough)
   -Kd, -Kdebug                Enter interactive debug mode
   -Ks, -Kscript FILE          Load and execute smak commands from FILE
   -Kreport                    Create verbose build log and run make-cmp
@@ -181,6 +192,7 @@ Environment Variables:
 Examples:
   smak -n all                 Show what would be built without executing
   smak -s all                 Build silently without printing commands
+  smak -cmake ..              Run cmake in parent directory
   smak -Ks fixes.smak all     Load fixes, then build target 'all'
   USR_SMAK_OPT='-Ks fixes.smak' smak target
   smak -Kreport all           Build with verbose logging to bugs directory

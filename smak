@@ -10,7 +10,7 @@ exe=$0
 link=$(readlink $exe)
 
 # Find the directory where this script is located
-while [ $link != $exe ]  ; do
+while [ "$link" != "$exe" -a ! -z "$link" ]  ; do
     exe=$link
     link=$(readlink $exe)
 done

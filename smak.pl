@@ -67,11 +67,48 @@ if ($report) {
     # Enable report mode in the module
     set_report_mode(1, $log_fh);
 
+    # Create smak.env file with environment variables for reproducing the build
+    my $env_file = "$report_dir/smak.env";
+    open(my $env_fh, '>', $env_file) or warn "Cannot create $env_file: $!\n";
+    if ($env_fh) {
+        print $env_fh "# Smak environment variables for bug report $timestamp\n";
+        print $env_fh "# Source this file with: source smak.env\n\n";
+
+        # Export smak-specific variables
+        print $env_fh "export SMAK_INVOKED_AS='$ENV{SMAK_INVOKED_AS}'\n" if $ENV{SMAK_INVOKED_AS};
+        print $env_fh "export SMAK_LAUNCHER='$ENV{SMAK_LAUNCHER}'\n" if $ENV{SMAK_LAUNCHER};
+
+        # Export relevant build environment variables
+        print $env_fh "export PATH='$ENV{PATH}'\n" if $ENV{PATH};
+        print $env_fh "export SHELL='$ENV{SHELL}'\n" if $ENV{SHELL};
+        print $env_fh "export USER='$ENV{USER}'\n" if $ENV{USER};
+        print $env_fh "export HOME='$ENV{HOME}'\n" if $ENV{HOME};
+        print $env_fh "export PWD='$ENV{PWD}'\n" if $ENV{PWD};
+
+        # Export any USR_SMAK_OPT if set
+        print $env_fh "export USR_SMAK_OPT='$ENV{USR_SMAK_OPT}'\n" if $ENV{USR_SMAK_OPT};
+
+        close($env_fh);
+    }
+
     # Copy Makefile(s) to bug directory for analysis
     use File::Copy;
     if (-f $makefile) {
         my $makefile_copy = "$report_dir/" . (split(/\//, $makefile))[-1];
         copy($makefile, $makefile_copy) or warn "Could not copy $makefile: $!\n";
+    }
+
+    # Capture directory listing for filesystem reconstruction
+    my $listing_file = "$report_dir/directory-listing.txt";
+    my $cwd = $ENV{PWD} || `pwd`;
+    chomp $cwd;
+    my $listing = `ls -lR . 2>&1`;
+    open(my $listing_fh, '>', $listing_file) or warn "Cannot create $listing_file: $!\n";
+    if ($listing_fh) {
+        print $listing_fh "Directory listing from: $cwd\n";
+        print $listing_fh "=" x 50 . "\n\n";
+        print $listing_fh $listing;
+        close($listing_fh);
     }
 
     # Print header to both terminal and log

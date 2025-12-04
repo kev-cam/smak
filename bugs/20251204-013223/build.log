@@ -1,0 +1,10 @@
+=== SMAK BUILD REPORT ===
+Timestamp: 20251204-013223
+Makefile: Makefile
+Report directory: /mnt/y/smak/bugs/20251204-013223
+==================================================
+
+/usr/bin/cmake -S/mnt/y/Xyce-8/xyce -B/mnt/y/Xyce-8/xyce-build --check-build-system CMakeFiles/Makefile.cmake 0
+/usr/bin/cmake -E cmake_progress_start /mnt/y/Xyce-8/xyce-build/CMakeFiles /mnt/y/Xyce-8/xyce-build//CMakeFiles/progress.marks
+  -f CMakeFiles/Makefile2 all
+smak: *** [all] Error -1

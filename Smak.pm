@@ -349,6 +349,15 @@ sub parse_makefile {
     %MV = ();
     @modifications = ();
 
+    # Set default built-in make variables
+    # Use the actual invocation path for recursive makes
+    $MV{MAKE} = $0;  # $0 contains how the program was invoked
+    $MV{SHELL} = '/bin/sh';
+    $MV{RM} = 'rm -f';
+    $MV{AR} = 'ar';
+    $MV{CC} = 'cc';
+    $MV{CXX} = 'c++';
+
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
     my $current_target;

@@ -601,6 +601,9 @@ sub build_target {
         }
     }
 
+    # Expand variables in dependencies
+    @deps = map { expand_vars($_) } @deps;
+
     # Debug: show dependencies and rule status
     if ($ENV{SMAK_DEBUG}) {
         if (@deps) {

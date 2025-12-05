@@ -1,0 +1,10 @@
+#!/bin/bash
+
+case $0 in
+    /*) cd $(dirname $0) ;;
+esac
+
+git rm -fr bugs/*-*-*
+rm -fr bugs/*-*-*
+
+git commit -m "Purged bugs."

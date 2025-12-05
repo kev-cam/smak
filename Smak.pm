@@ -1012,6 +1012,8 @@ Commands:
   build <target>       - Build a target
   dry-run <target>     - Dry run a target
   print <expr>         - Evaluate and print an expression (in isolated subprocess)
+  eval <expr>          - Evaluate a Perl expression (in isolated subprocess)
+  !<command>           - Run a shell command
   set                  - Show control variables
   set <var> <value>    - Set a control variable (timeout, prompt, echo)
   add-rule <target> : <deps> : <rule>
@@ -1174,6 +1176,55 @@ HELP
             } else {
                 print $OUT "Usage: save <filename>\n";
             }
+        }
+        elsif ($cmd eq 'eval') {
+            my $expr = $input;
+            $expr =~ s/^\s*eval\s+//;
+
+            # Evaluate Perl expression in subprocess with timeout
+            my $pid = fork();
+            if (!defined $pid) {
+                print $OUT "Failed to fork: $!\n";
+                next;
+            }
+
+            if ($pid == 0) {
+                # Child process - evaluate the expression
+                my $result = eval $expr;
+                if ($@) {
+                    print "Error: $@\n";
+                } else {
+                    print "$result\n" if defined $result;
+                }
+                exit 0;
+            } else {
+                # Parent process - wait with timeout
+                my $start_time = time();
+                my $timed_out = 0;
+
+                while (1) {
+                    my $kid = waitpid($pid, WNOHANG);
+                    if ($kid > 0) {
+                        last;
+                    }
+                    if (time() - $start_time > $timeout) {
+                        kill 'KILL', $pid;
+                        waitpid($pid, 0);
+                        $timed_out = 1;
+                        last;
+                    }
+                    select(undef, undef, undef, 0.1);
+                }
+
+                if ($timed_out) {
+                    print $OUT "Evaluation timed out after $timeout seconds\n";
+                }
+            }
+        }
+        elsif ($input =~ /^!(.+)/) {
+            # Shell command execution
+            my $shell_cmd = $1;
+            system($shell_cmd);
         }
         else {
             print $OUT "Unknown command: $cmd (type 'help' for commands)\n";

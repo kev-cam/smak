@@ -375,6 +375,11 @@ sub parse_makefile {
     $MV{CC} = 'cc';
     $MV{CXX} = 'c++';
 
+    # Set directory variables (PWD and CURDIR should be the same)
+    use Cwd 'getcwd';
+    $MV{PWD} = getcwd();
+    $MV{CURDIR} = getcwd();
+
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
     my $current_target;

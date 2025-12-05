@@ -123,12 +123,12 @@ if ($report) {
 
     # Capture directory listing for filesystem reconstruction
     my $listing_file = "$report_dir/directory-listing.txt";
-    my $cwd = $ENV{PWD} || `pwd`;
-    chomp $cwd;
+    my $listing_pwd = $ENV{PWD} || `pwd`;
+    chomp $listing_pwd;
     my $listing = `ls -lR . 2>&1`;
     open(my $listing_fh, '>', $listing_file) or warn "Cannot create $listing_file: $!\n";
     if ($listing_fh) {
-        print $listing_fh "Directory listing from: $cwd\n";
+        print $listing_fh "Directory listing from: $listing_pwd\n";
         print $listing_fh "=" x 50 . "\n\n";
         print $listing_fh $listing;
         close($listing_fh);

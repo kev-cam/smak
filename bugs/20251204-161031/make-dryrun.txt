@@ -1,0 +1,49 @@
+cmake -S/mnt/y/Xyce-8/xyce -B/mnt/y/Xyce-8/xyce-build --check-build-system CMakeFiles/Makefile.cmake 0
+cmake -E cmake_progress_start /mnt/y/Xyce-8/xyce-build/CMakeFiles /mnt/y/Xyce-8/xyce-build//CMakeFiles/progress.marks
+make -s -f CMakeFiles/Makefile2 all
+make -s -f src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/build.make src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/UtilityPKG /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/UtilityPKG /mnt/y/Xyce-8/xyce-build/src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/DependInfo.cmake "--color="
+make -s -f src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/build.make src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/build
+/usr/bin/cmake -E touch_nocreate src/UtilityPKG/MakeMeRunEveryBuild.h
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num= "Built target TimeStampHeader"
+make -s -f src/CMakeFiles/XyceLib.dir/build.make src/CMakeFiles/XyceLib.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src /mnt/y/Xyce-8/xyce-build/src/CMakeFiles/XyceLib.dir/DependInfo.cmake "--color="
+make -s -f src/CMakeFiles/XyceLib.dir/build.make src/CMakeFiles/XyceLib.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num=3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97 "Built target XyceLib"
+make -s -f src/CMakeFiles/Xyce.dir/build.make src/CMakeFiles/Xyce.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src /mnt/y/Xyce-8/xyce-build/src/CMakeFiles/Xyce.dir/DependInfo.cmake "--color="
+make -s -f src/CMakeFiles/Xyce.dir/build.make src/CMakeFiles/Xyce.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num=2 "Built target Xyce"
+make -s -f src/test/FFTInterface/CMakeFiles/testFFTInterface.dir/build.make src/test/FFTInterface/CMakeFiles/testFFTInterface.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/test/FFTInterface /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/test/FFTInterface /mnt/y/Xyce-8/xyce-build/src/test/FFTInterface/CMakeFiles/testFFTInterface.dir/DependInfo.cmake "--color="
+make -s -f src/test/FFTInterface/CMakeFiles/testFFTInterface.dir/build.make src/test/FFTInterface/CMakeFiles/testFFTInterface.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num= "Built target testFFTInterface"
+make -s -f src/test/LinearAlgebraTest/CMakeFiles/testBlockLinearSystems.dir/build.make src/test/LinearAlgebraTest/CMakeFiles/testBlockLinearSystems.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/test/LinearAlgebraTest /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/test/LinearAlgebraTest /mnt/y/Xyce-8/xyce-build/src/test/LinearAlgebraTest/CMakeFiles/testBlockLinearSystems.dir/DependInfo.cmake "--color="
+make -s -f src/test/LinearAlgebraTest/CMakeFiles/testBlockLinearSystems.dir/build.make src/test/LinearAlgebraTest/CMakeFiles/testBlockLinearSystems.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num=98 "Built target testBlockLinearSystems"
+make -s -f src/test/DeviceInterface/CMakeFiles/DeviceInterfaceTest.dir/build.make src/test/DeviceInterface/CMakeFiles/DeviceInterfaceTest.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/test/DeviceInterface /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/test/DeviceInterface /mnt/y/Xyce-8/xyce-build/src/test/DeviceInterface/CMakeFiles/DeviceInterfaceTest.dir/DependInfo.cmake "--color="
+make -s -f src/test/DeviceInterface/CMakeFiles/DeviceInterfaceTest.dir/build.make src/test/DeviceInterface/CMakeFiles/DeviceInterfaceTest.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num= "Built target DeviceInterfaceTest"
+make -s -f src/test/DeviceInterface/CMakeFiles/ADC_DACRunTest.dir/build.make src/test/DeviceInterface/CMakeFiles/ADC_DACRunTest.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/test/DeviceInterface /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/test/DeviceInterface /mnt/y/Xyce-8/xyce-build/src/test/DeviceInterface/CMakeFiles/ADC_DACRunTest.dir/DependInfo.cmake "--color="
+make -s -f src/test/DeviceInterface/CMakeFiles/ADC_DACRunTest.dir/build.make src/test/DeviceInterface/CMakeFiles/ADC_DACRunTest.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num= "Built target ADC_DACRunTest"
+make -s -f src/test/GenExtTestHarnesses/CMakeFiles/testGenCoup.dir/build.make src/test/GenExtTestHarnesses/CMakeFiles/testGenCoup.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/test/GenExtTestHarnesses /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/test/GenExtTestHarnesses /mnt/y/Xyce-8/xyce-build/src/test/GenExtTestHarnesses/CMakeFiles/testGenCoup.dir/DependInfo.cmake "--color="
+make -s -f src/test/GenExtTestHarnesses/CMakeFiles/testGenCoup.dir/build.make src/test/GenExtTestHarnesses/CMakeFiles/testGenCoup.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num= "Built target testGenCoup"
+make -s -f src/test/GenExtTestHarnesses/CMakeFiles/TestGH19.dir/build.make src/test/GenExtTestHarnesses/CMakeFiles/TestGH19.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/test/GenExtTestHarnesses /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/test/GenExtTestHarnesses /mnt/y/Xyce-8/xyce-build/src/test/GenExtTestHarnesses/CMakeFiles/TestGH19.dir/DependInfo.cmake "--color="
+make -s -f src/test/GenExtTestHarnesses/CMakeFiles/TestGH19.dir/build.make src/test/GenExtTestHarnesses/CMakeFiles/TestGH19.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num=1 "Built target TestGH19"
+make -s -f src/test/GenExtTestHarnesses/CMakeFiles/TestIssue29.dir/build.make src/test/GenExtTestHarnesses/CMakeFiles/TestIssue29.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/test/GenExtTestHarnesses /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/test/GenExtTestHarnesses /mnt/y/Xyce-8/xyce-build/src/test/GenExtTestHarnesses/CMakeFiles/TestIssue29.dir/DependInfo.cmake "--color="
+make -s -f src/test/GenExtTestHarnesses/CMakeFiles/TestIssue29.dir/build.make src/test/GenExtTestHarnesses/CMakeFiles/TestIssue29.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num= "Built target TestIssue29"
+make -s -f src/test/TwoLevelNewton/CMakeFiles/twoLevelNewtonLinearTran.dir/build.make src/test/TwoLevelNewton/CMakeFiles/twoLevelNewtonLinearTran.dir/depend
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/test/TwoLevelNewton /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/test/TwoLevelNewton /mnt/y/Xyce-8/xyce-build/src/test/TwoLevelNewton/CMakeFiles/twoLevelNewtonLinearTran.dir/DependInfo.cmake "--color="
+make -s -f src/test/TwoLevelNewton/CMakeFiles/twoLevelNewtonLinearTran.dir/build.make src/test/TwoLevelNewton/CMakeFiles/twoLevelNewtonLinearTran.dir/build
+/usr/bin/cmake -E cmake_echo_color "--switch=" --progress-dir=/mnt/y/Xyce-8/xyce-build/CMakeFiles --progress-num= "Built target twoLevelNewtonLinearTran"
+cmake -E cmake_progress_start /mnt/y/Xyce-8/xyce-build/CMakeFiles 0

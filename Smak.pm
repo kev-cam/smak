@@ -565,6 +565,9 @@ sub build_target {
     return if $visited->{$visit_key};
     $visited->{$visit_key} = 1;
 
+    # Debug: show what we're building
+    warn "DEBUG: Building target '$target' (depth=$depth, makefile=$makefile)\n" if $ENV{SMAK_DEBUG};
+
     my $key = "$makefile\t$target";
     my @deps;
     my $rule = '';
@@ -595,6 +598,18 @@ sub build_target {
                     last;
                 }
             }
+        }
+    }
+
+    # Debug: show dependencies and rule status
+    if ($ENV{SMAK_DEBUG}) {
+        if (@deps) {
+            warn "DEBUG:   Dependencies: " . join(', ', @deps) . "\n";
+        }
+        if ($rule && $rule =~ /\S/) {
+            warn "DEBUG:   Has rule: yes\n";
+        } else {
+            warn "DEBUG:   Has rule: no\n";
         }
     }
 

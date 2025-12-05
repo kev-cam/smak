@@ -1,0 +1,4 @@
+"my" variable $cwd masks earlier declaration in same scope at /mnt/y/smak/smak.pl line 126.
+if [ -e ./config.status ]; then 	  echo "./config.status --reconfigure"; 	  ./config.status --reconfigure; 	else 	  echo "config.status is lost, please configure manually" ; 	  exit 1; 	fi
+./config.status
+./config.status

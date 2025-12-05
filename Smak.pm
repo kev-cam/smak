@@ -601,8 +601,17 @@ sub build_target {
         }
     }
 
-    # Expand variables in dependencies
-    @deps = map { expand_vars($_) } @deps;
+    # Expand variables in dependencies (which are in $MV{VAR} format)
+    @deps = map {
+        my $dep = $_;
+        # Expand $MV{VAR} references
+        while ($dep =~ /\$MV\{([^}]+)\}/) {
+            my $var = $1;
+            my $val = $MV{$var} // '';
+            $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+        }
+        $dep;
+    } @deps;
 
     # Debug: show dependencies and rule status
     if ($ENV{SMAK_DEBUG}) {

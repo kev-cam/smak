@@ -16,14 +16,18 @@ SCRIPT_DIR="$(dirname $exe)"
 
 while true ; do
     case $1 in
-      	-KE) shift ; source $1 ; shift ;; 
+      	-KE) shift ; source $1 ; shift ;;
 	*)   break ;;
     esac
 done
 
+if [ ${PATH/:*/} != "$PWD" ] ; then
+    PATH=${PWD}:${PATH}
+fi
+
 # Pass the invocation name to smak.pl via environment variable
 # Use basename so $(MAKE) is set to "smak" not the full path
-export SMAK_INVOKED_AS="$(basename "$0")"
+export SMAK_INVOKED_AS="$0"
 
 # Set launcher path for bug reports
 export SMAK_LAUNCHER="$SCRIPT_DIR/smak"

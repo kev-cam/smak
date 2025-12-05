@@ -330,6 +330,8 @@ sub expand_vars {
         } else {
             # Simple variable reference
             $replacement = $MV{$content} // '';
+            # Convert any $MV{...} in the value to $(...) so they can be expanded
+            $replacement = format_output($replacement);
         }
 
         # Replace in text

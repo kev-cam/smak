@@ -1,0 +1,73 @@
+=== SMAK BUILD REPORT ===
+Timestamp: 20251205-101738
+Makefile: Makefile
+Report directory: /mnt/y/smak/bugs/ghdl-20251205-101738
+==================================================
+
+./config.status --reconfigure
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Use full IEEE library
+Build machine is: x86_64-linux-gnu
+Creating Makefile
+Creating default_paths.ads
+Creating ghdl.gpr
+Creating scripts/gcc/Make-lang.in
+for d in ieee/v87 ieee/v93 ieee/v08 std/v87 std/v93 std/v08 src/ieee src/ieee/v87 src/ieee/v93 src/ieee2008 src/std src/std/v87 src/std/v93 src/std/v08 src/synopsys src/synopsys/v08 src/upf src/vital95 src/vital2000; do \
+  mkdir -p lib/ghdl/$d; \
+done
+Generate ortho_code-x86-flags.ads
+Generate elf_arch.ads
+Generate ghdlsynth_maybe.ads
+Generate grt-readline.ads
+./config.status
+Creating Makefile
+Creating default_paths.ads
+Creating ghdl.gpr
+Creating scripts/gcc/Make-lang.in
+./config.status --reconfigure
+gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Use full IEEE library
+Build machine is: x86_64-linux-gnu
+Creating Makefile
+Creating default_paths.ads
+Creating ghdl.gpr
+Creating scripts/gcc/Make-lang.in
+for d in ieee/v87 ieee/v93 ieee/v08 std/v87 std/v93 std/v08 src/ieee src/ieee/v87 src/ieee/v93 src/ieee2008 src/std src/std/v87 src/std/v93 src/std/v08 src/synopsys src/synopsys/v08 src/upf src/vital95 src/vital2000; do \
+  mkdir -p lib/ghdl/$d; \
+done
+Generate ortho_code-x86-flags.ads
+Generate elf_arch.ads
+Generate ghdlsynth_maybe.ads
+Generate grt-readline.ads
+./config.status
+Creating Makefile
+Creating default_paths.ads
+Creating ghdl.gpr
+Creating scripts/gcc/Make-lang.in
+./config.status
+Creating Makefile
+Creating default_paths.ads
+Creating ghdl.gpr
+Creating scripts/gcc/Make-lang.in
+make -f ./libraries/Makefile.inc LIBSRC_DIR="./libraries"  LIBDST_DIR="lib/ghdl"  enable_gplcompat="false"  LN="ln -s" CP="cp" MKDIR="mkdir" GHDL="/mnt/y/ghdl/ghdl_mcode" XRUN= GHDL_FLAGS="" VHDL_COPY_OBJS=no vhdl.libs.all
+make: *** No rule to make target '/mnt/y/ghdl/ghdl_mcode', needed by 'lib/ghdl/std/v87/std-obj87.cf'.  Stop.
+smak: *** [libs.vhdl.mcode] Error 2
+
+==================================================
+Running dry-run comparison (smak -n vs make -n)...
+==================================================
+Dry-run outputs saved:
+  smak -n: /mnt/y/smak/bugs/ghdl-20251205-101738/smak-dryrun.txt
+  make -n: /mnt/y/smak/bugs/ghdl-20251205-101738/make-dryrun.txt
+
+=== BUILD REPORT COMPLETE ===
+Log saved to: /mnt/y/smak/bugs/ghdl-20251205-101738/build.log
+Dry-run comparison: smak-dryrun.txt vs make-dryrun.txt

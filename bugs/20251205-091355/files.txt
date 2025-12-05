@@ -1,3 +1,0 @@
-Files archived in files.tar:
-Makefile
-Makefile.in

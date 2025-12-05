@@ -1,0 +1,6 @@
+mkdir dep
+gcc -Wall -Wextra -Wshadow -Wstrict-prototypes  -g -O2 -o version.exe -I. -I. ./version.c
+./version.exe `head -1 ./iverilog-vpi.man.in`'\n' > iverilog-vpi.man
+tail -n +2 ./iverilog-vpi.man.in >> iverilog-vpi.man
+man -t ./iverilog-vpi.man > iverilog-vpi.ps
+none iverilog-vpi.ps iverilog-vpi.pdf

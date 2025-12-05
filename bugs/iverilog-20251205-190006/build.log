@@ -1,0 +1,17 @@
+=== SMAK BUILD REPORT ===
+Timestamp: 20251205-190006
+Makefile: Makefile
+Report directory: /home/user/smak/bugs/iverilog-20251205-190006
+==================================================
+
+
+==================================================
+Running dry-run comparison (smak -n vs make -n)...
+==================================================
+Dry-run outputs saved:
+  smak -n: /home/user/smak/bugs/iverilog-20251205-190006/smak-dryrun.txt
+  make -n: /home/user/smak/bugs/iverilog-20251205-190006/make-dryrun.txt
+
+=== BUILD REPORT COMPLETE ===
+Log saved to: /home/user/smak/bugs/iverilog-20251205-190006/build.log
+Dry-run comparison: smak-dryrun.txt vs make-dryrun.txt

@@ -438,8 +438,16 @@ sub prompt_commit_bug_report {
 
     print "Bug report committed successfully.\n";
 
-    # Ask if they want to push (skip if auto_yes)
-    if (!$auto_yes) {
+    # Push to remote (auto-push if auto_yes, otherwise prompt)
+    if ($auto_yes) {
+        print "\nAuto-pushing to remote (--yes flag set)...\n";
+        my $push_result = system("git push origin $branch");
+        if ($push_result == 0) {
+            print "Bug report pushed successfully.\n";
+        } else {
+            warn "Warning: Failed to push to remote. Continuing anyway (--yes flag set)...\n";
+        }
+    } else {
         print "\nPush to remote repository? (y/N): ";
         my $push_response = <STDIN>;
         chomp($push_response) if defined $push_response;
@@ -455,8 +463,6 @@ sub prompt_commit_bug_report {
         } else {
             print "Skipping push. You can push later with: git push origin $branch\n";
         }
-    } else {
-        print "Skipping push (--yes flag set). You can push later with: git push origin $branch\n";
     }
 
     # Return to original directory

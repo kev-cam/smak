@@ -26,6 +26,7 @@ my $report_dir = '';
 my $log_fh;
 my $dry_run = 0;
 my $silent = 0;
+my $yes = 0;  # Auto-answer yes to prompts
 
 # Parse environment variable options first
 if (defined $ENV{USR_SMAK_OPT}) {
@@ -43,6 +44,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
         'Kreport' => \$report,
         'n|just-print|dry-run|recon' => \$dry_run,
         's|silent|quiet' => \$silent,
+        'yes' => \$yes,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -57,6 +59,7 @@ GetOptions(
     'Kreport' => \$report,
     'n|just-print|dry-run|recon' => \$dry_run,
     's|silent|quiet' => \$silent,
+    'yes' => \$yes,
 ) or die "Error in command line arguments\n";
 
 # Remaining arguments are targets to build
@@ -181,6 +184,7 @@ Options:
   --dry-run, --recon          Same as -n
   -s, --silent, --quiet       Don't print commands being executed
   -h, --help                  Display this help message
+  --yes                       Auto-answer yes to prompts (for -Kreport)
   -cmake                      Run cmake with remaining arguments (passthrough)
   -Kd, -Kdebug                Enter interactive debug mode
   -Ks, -Kscript FILE          Load and execute smak commands from FILE
@@ -196,6 +200,7 @@ Examples:
   smak -Ks fixes.smak all     Load fixes, then build target 'all'
   USR_SMAK_OPT='-Ks fixes.smak' smak target
   smak -Kreport all           Build with verbose logging to bugs directory
+  smak -Kreport --yes all     Build with logging, auto-commit bug report
 
 HELP
 }
@@ -318,7 +323,7 @@ if (!$debug) {
         close($log_fh) if $log_fh;
 
         # Ask user if they want to commit the bug report (even if build failed)
-        prompt_commit_bug_report($report_dir);
+        prompt_commit_bug_report($report_dir, $yes);
 
         # If build failed, exit with error after prompt
         if ($build_failed) {
@@ -335,7 +340,14 @@ if (!$debug) {
 }
 
 sub prompt_commit_bug_report {
-    my ($report_dir) = @_;
+    my ($report_dir, $auto_yes) = @_;
+
+    # If -yes flag is set, automatically commit
+    if ($auto_yes) {
+        print "\nAuto-committing bug report (--yes flag set)...\n";
+        # Skip to the commit logic
+        goto COMMIT_REPORT;
+    }
 
     # Check if running interactively (has a terminal)
     if (!-t STDIN) {
@@ -373,6 +385,7 @@ sub prompt_commit_bug_report {
     chomp($response) if defined $response;
 
     if ($response && $response =~ /^[Yy]/) {
+        COMMIT_REPORT:
         print "\nCommitting bug report...\n";
 
         # Get current branch name
@@ -388,11 +401,15 @@ sub prompt_commit_bug_report {
         # Add the bug report directory (force add since bugs/ is in .gitignore)
         my $add_result = system("git add -f $git_path");
         if ($add_result != 0) {
-            warn "Warning: Failed to add bug report to git. Continue anyway? (y/N): ";
-            my $cont = <STDIN>;
-            chomp($cont) if defined $cont;
-            chdir($original_dir);
-            return unless $cont && $cont =~ /^[Yy]/;
+            if ($auto_yes) {
+                warn "Warning: Failed to add bug report to git. Continuing anyway (--yes flag set)...\n";
+            } else {
+                warn "Warning: Failed to add bug report to git. Continue anyway? (y/N): ";
+                my $cont = <STDIN>;
+                chomp($cont) if defined $cont;
+                chdir($original_dir);
+                return unless $cont && $cont =~ /^[Yy]/;
+            }
         }
 
         # Create commit message

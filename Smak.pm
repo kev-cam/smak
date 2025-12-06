@@ -827,6 +827,13 @@ sub get_all_ninja_outputs {
         next if $target =~ /^\.DEFAULT_GOAL/;
         # Skip targets that look like variables or directives
         next if $target =~ /^\$/;
+        # Skip targets with spaces (multi-file targets from meson)
+        next if $target =~ /\s/;
+        # Skip paths that point outside the build directory
+        next if $target =~ /^\.\./;
+        # Skip the ninja file itself and meson internals
+        next if $target =~ /\.ninja$/;
+        next if $target =~ /^meson-/;
         # Add if not seen before
         unless ($seen{$target}++) {
             push @outputs, $target;
@@ -838,6 +845,10 @@ sub get_all_ninja_outputs {
         my ($file, $target) = split(/\t/, $key, 2);
         next if $target eq 'PHONY';
         next if $target eq 'all';
+        next if $target =~ /\s/;
+        next if $target =~ /^\.\./;
+        next if $target =~ /\.ninja$/;
+        next if $target =~ /^meson-/;
         unless ($seen{$target}++) {
             push @outputs, $target;
         }
@@ -848,6 +859,10 @@ sub get_all_ninja_outputs {
         my ($file, $target) = split(/\t/, $key, 2);
         next if $target eq 'PHONY';
         next if $target eq 'all';
+        next if $target =~ /\s/;
+        next if $target =~ /^\.\./;
+        next if $target =~ /\.ninja$/;
+        next if $target =~ /^meson-/;
         unless ($seen{$target}++) {
             push @outputs, $target;
         }

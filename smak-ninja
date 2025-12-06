@@ -9,11 +9,12 @@ use File::Path qw(make_path);
 use POSIX qw(strftime);
 
 # smak-ninja: Work with ninja build files using smak
-# Usage: smak-ninja [build.ninja] [-o output.make] [-Kreport]
+# Usage: smak-ninja [build.ninja] [-o output.make] [-Kreport] [-clean]
 
 my $ninja_file = 'build.ninja';
-my $output_file = 'Makefile.generated';
+my $output_file = '';  # Empty means build mode (not generate mode)
 my $report_mode = 0;
+my $clean_mode = 0;
 my $auto_yes = 0;
 
 # Parse command line arguments
@@ -25,6 +26,9 @@ while (@ARGV) {
     }
     elsif ($arg eq '-Kreport') {
         $report_mode = 1;
+    }
+    elsif ($arg eq '-clean') {
+        $clean_mode = 1;
     }
     elsif ($arg eq '-yes' || $arg eq '--yes') {
         $auto_yes = 1;
@@ -41,16 +45,19 @@ while (@ARGV) {
     }
 }
 
-# Check if ninja file exists
-unless (-f $ninja_file) {
+# Check if ninja file exists (not needed for clean mode if no outputs)
+unless ($clean_mode || -f $ninja_file) {
     die "Error: Cannot find ninja file: $ninja_file\n";
 }
 
 if ($report_mode) {
     # Report mode: Compare smak with ninja -v
     run_report_mode($ninja_file, $auto_yes);
-} else {
-    # Conversion mode: Generate Makefile
+} elsif ($clean_mode) {
+    # Clean mode: List and remove generated files
+    run_clean_mode($ninja_file);
+} elsif ($output_file) {
+    # Generate Makefile only (when -o is specified)
     print "Reading ninja file: $ninja_file\n";
     Smak::parse_ninja($ninja_file);
 
@@ -58,6 +65,26 @@ if ($report_mode) {
     Smak::write_makefile($output_file);
 
     print "Done! You can now use: make -f $output_file\n";
+} else {
+    # Build mode (default): generate temp Makefile and run make
+    print "Reading ninja file: $ninja_file\n";
+    Smak::parse_ninja($ninja_file);
+
+    my $temp_makefile = ".smak-ninja-temp.make";
+    print "Generating temporary Makefile...\n";
+    Smak::write_makefile($temp_makefile);
+
+    print "Building with make...\n";
+    my $ret = system("make -f $temp_makefile");
+
+    unlink($temp_makefile);
+
+    if ($ret == 0) {
+        print "Build completed successfully.\n";
+        exit 0;
+    } else {
+        exit($ret >> 8);
+    }
 }
 
 sub run_report_mode {
@@ -161,35 +188,97 @@ sub prompt_commit_report {
     }
 }
 
+sub run_clean_mode {
+    my ($ninja_file) = @_;
+
+    unless (-f $ninja_file) {
+        die "Error: Cannot find ninja file: $ninja_file\n";
+    }
+
+    print "Reading ninja file: $ninja_file\n";
+    Smak::parse_ninja($ninja_file);
+
+    # Collect all output files from ninja builds
+    my @outputs = Smak::get_all_ninja_outputs();
+
+    if (@outputs == 0) {
+        print "No generated files found in ninja file.\n";
+        return;
+    }
+
+    # Filter to only existing files
+    my @existing = grep { -e $_ } @outputs;
+
+    if (@existing == 0) {
+        print "No generated files currently exist.\n";
+        return;
+    }
+
+    # List files
+    print "Generated files that will be removed:\n";
+    for my $file (sort @existing) {
+        my $size = -s $file;
+        printf "  %-50s (%d bytes)\n", $file, $size;
+    }
+
+    # Prompt for confirmation
+    print "\nRemove these " . scalar(@existing) . " files? [y/N] ";
+    my $response = <STDIN>;
+    chomp($response);
+
+    if ($response =~ /^[yY]/) {
+        my $removed = 0;
+        for my $file (@existing) {
+            if (unlink($file)) {
+                $removed++;
+            } else {
+                warn "Failed to remove $file: $!\n";
+            }
+        }
+        print "Removed $removed files.\n";
+    } else {
+        print "Cancelled.\n";
+    }
+}
+
 sub print_help {
     print <<'HELP';
 smak-ninja - Work with ninja build files using smak
 
 Usage:
-    smak-ninja [build.ninja] [-o output.make] [-Kreport [-yes]]
+    smak-ninja [build.ninja] [OPTIONS]
 
 Modes:
-    Default mode: Convert ninja file to Makefile
+    Default mode: Build the project (generate temp Makefile and run make)
+    -o FILE:      Generate Makefile to FILE without building
     -Kreport:     Generate bug report comparing smak with ninja -v
+    -clean:       List and remove generated files
 
 Options:
-    -o, --output FILE   Write Makefile to FILE (default: Makefile.generated)
+    -o, --output FILE   Generate Makefile to FILE (don't build)
     -Kreport            Generate bug report (compare with ninja -v)
-    -yes, --yes         Auto-commit and push bug reports
+    -clean              List and remove all generated files (with confirmation)
+    -yes, --yes         Auto-commit and push bug reports (with -Kreport)
     -h, --help          Show this help message
 
 Examples:
-    # Convert build.ninja to Makefile.generated
+    # Build the project (default)
     smak-ninja
 
-    # Specify custom ninja file and output
-    smak-ninja my-build.ninja -o Makefile.custom
+    # Build using a specific ninja file
+    smak-ninja my-build.ninja
+
+    # Generate Makefile without building
+    smak-ninja -o Makefile.generated
 
     # Generate bug report comparing smak vs ninja
     smak-ninja -Kreport
 
     # Generate and auto-commit bug report
     smak-ninja -Kreport -yes
+
+    # Clean all generated files
+    smak-ninja -clean
 
 Features:
     - Converts ninja rules to make targets

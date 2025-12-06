@@ -665,11 +665,15 @@ sub _save_ninja_build {
     }
 
     # Expand variables in command
+    # First pass: expand known variables
     for my $var (keys %var_map) {
         my $value = $var_map{$var};
         $command =~ s/\$$var\b/$value/g;
         $command =~ s/\$\{$var\}/$value/g;
     }
+
+    # Second pass: expand any remaining $VAR to empty string (undefined variables)
+    $command =~ s/\$\{?([A-Z_][A-Z0-9_]*)\}?//g;
 
     # Handle DEPFILE tracking
     my $depfile = $build_vars->{DEPFILE} || $build_vars->{depfile};
@@ -807,6 +811,49 @@ sub write_makefile {
 
     close($fh);
     print "Makefile written to: $output_file\n";
+}
+
+sub get_all_ninja_outputs {
+    # Collect all output files from parsed ninja file
+    my @outputs;
+    my %seen;
+
+    # Collect from fixed_deps (most common for ninja builds)
+    for my $key (keys %fixed_deps) {
+        my ($file, $target) = split(/\t/, $key, 2);
+        # Skip special/meta targets
+        next if $target eq 'PHONY';
+        next if $target eq 'all';
+        next if $target =~ /^\.DEFAULT_GOAL/;
+        # Skip targets that look like variables or directives
+        next if $target =~ /^\$/;
+        # Add if not seen before
+        unless ($seen{$target}++) {
+            push @outputs, $target;
+        }
+    }
+
+    # Collect from pattern_deps (rare for ninja, but check anyway)
+    for my $key (keys %pattern_deps) {
+        my ($file, $target) = split(/\t/, $key, 2);
+        next if $target eq 'PHONY';
+        next if $target eq 'all';
+        unless ($seen{$target}++) {
+            push @outputs, $target;
+        }
+    }
+
+    # Collect from pseudo_deps
+    for my $key (keys %pseudo_deps) {
+        my ($file, $target) = split(/\t/, $key, 2);
+        next if $target eq 'PHONY';
+        next if $target eq 'all';
+        unless ($seen{$target}++) {
+            push @outputs, $target;
+        }
+    }
+
+    return @outputs;
 }
 
 # Helper function to parse make/smak command line

@@ -1,131 +1,75 @@
 #!/usr/bin/perl
-# smak-ninja: convert build.ninja -> Makefile with fully expanded commands
-# Usage: ./smak-ninja build.ninja > Makefile
 
+use strict;
 use warnings;
+use FindBin qw($RealBin);
+use lib $RealBin;
+use Smak;
 
-my $ninja_file = shift or die "Usage: $0 build.ninja\n";
+# smak-ninja: Convert ninja build files to Makefiles
+# Usage: smak-ninja [build.ninja] [-o output.make]
 
-open my $fh, '<', $ninja_file or die "Cannot open $ninja_file: $!\n";
+my $ninja_file = 'build.ninja';
+my $output_file = 'Makefile.generated';
 
-my %rules;      # rule_name -> { command => ..., vars => { ... } }
-my %builds;     # build_target -> { rule => ..., inputs => [], vars => { ... } }
-my %vars;       # global variables
+# Parse command line arguments
+while (@ARGV) {
+    my $arg = shift @ARGV;
 
-my $current_rule;
-my $current_build;
-my $in_build = 0;
-my $in_rule = 0;
-
-while (<$fh>) {
-    chomp;
-    s/\s+$//;  # remove trailing spaces
-
-    next if /^#/;   # skip comments
-    next if /^\s*$/;
-
-    # variable assignment: var = value
-    if (/^(\S+)\s*=\s*(.*)$/) {
-        my ($var, $val) = ($1, $2);
-        $vars{$var} = $val;
-        next;
+    if ($arg eq '-o' || $arg eq '--output') {
+        $output_file = shift @ARGV || die "Error: -o requires an argument\n";
     }
-
-    # rule start: rule name
-    if (/^rule\s+(\S+)/) {
-        $current_rule = $1;
-        $rules{$current_rule} = { command => '', vars => {} };
-        $in_rule = 1;
-        next;
+    elsif ($arg eq '-h' || $arg eq '--help') {
+        print_help();
+        exit 0;
     }
-
-    if ($in_rule) {
-        # command line inside rule
-        if (/^\s+command\s*=\s*(.*)$/) {
-            $rules{$current_rule}{command} = $1;
-            next;
-        }
-        # variables inside rule
-        if (/^\s+(\S+)\s*=\s*(.*)$/) {
-            $rules{$current_rule}{vars}{$1} = $2;
-            next;
-        }
-        $in_rule = 0;  # end of rule block
+    elsif ($arg !~ /^-/) {
+        $ninja_file = $arg;
     }
-
-    # build line
-    if (/^build\s+(\S+)\s*:\s*(\S+)\s*(.*)$/) {
-        my ($out, $rule, $ins) = ($1, $2, $3);
-        $builds{$out} = {
-            rule => $rule,
-            inputs => [ split(/\s+/, $ins) ],
-            vars => {}
-        };
-        $current_build = $out;
-        $in_build = 1;
-        next;
-    }
-
-    if ($in_build) {
-        if (/^\s+(\S+)\s*=\s*(.*)$/) {
-            $builds{$current_build}{vars}{$1} = $2;
-            next;
-        }
-        $in_build = 0;
+    else {
+        die "Unknown option: $arg\n";
     }
 }
 
-close $fh;
-
-# recursively expand variables
-sub expand {
-    my ($val, $local_vars) = @_;
-    $local_vars ||= {};
-
-    while ($val =~ /\$(\w+)/) {
-        my $v = $1;
-        my $replacement;
-        if (exists $local_vars->{$v}) {
-            $replacement = $local_vars->{$v};
-        } elsif (exists $vars{$v}) {
-            $replacement = $vars{$v};
-        } else {
-            $replacement = '';
-        }
-        $val =~ s/\$$v/$replacement/g;
-    }
-    return $val;
+# Check if ninja file exists
+unless (-f $ninja_file) {
+    die "Error: Cannot find ninja file: $ninja_file\n";
 }
 
-print "# Auto-generated Makefile from build.ninja\n";
-print "# WARNING: All commands fully expanded per target\n\n";
+print "Reading ninja file: $ninja_file\n";
+Smak::parse_ninja($ninja_file);
 
-# write Makefile targets
-for my $out (sort keys %builds) {
-    my $rule = $builds{$out}{rule};
-    my $inputs = $builds{$out}{inputs};
-    my $local_vars = $builds{$out}{vars};
+print "Converting to Makefile format...\n";
+Smak::write_makefile($output_file);
 
-    # expand inputs
-    my @deps = map { expand($_, $local_vars) } @$inputs;
+print "Done! You can now use: make -f $output_file\n";
 
-    print "$out: @deps\n";
+sub print_help {
+    print <<'HELP';
+smak-ninja - Convert ninja build files to Makefiles
 
-    my $cmd = $rules{$rule}{command};
-    my %cmd_vars = %{ $rules{$rule}{vars} };
+Usage:
+    smak-ninja [build.ninja] [-o output.make]
 
-    # merge rule vars and build vars
-    my %all_vars = (%cmd_vars, %$local_vars);
+Options:
+    -o, --output FILE   Write Makefile to FILE (default: Makefile.generated)
+    -h, --help          Show this help message
 
-    # expand variables recursively
-    for my $var (keys %all_vars) {
-        $all_vars{$var} = expand($all_vars{$var}, \%all_vars);
-    }
+Examples:
+    # Convert build.ninja to Makefile.generated
+    smak-ninja
 
-    # final command expansion
-    $cmd =~ s/\$out/\$@/g;
-    $cmd =~ s/\$in/\$</g;
-    $cmd = expand($cmd, \%all_vars);
+    # Specify custom ninja file and output
+    smak-ninja my-build.ninja -o Makefile.custom
 
-    print "\t$cmd\n\n";
+    # Use the generated Makefile
+    make -f Makefile.generated
+
+Features:
+    - Converts ninja rules to make targets
+    - Tracks dependency files (gcc .d files)
+    - Preserves build commands and variables
+    - Handles ninja $in, $out variable expansion
+
+HELP
 }

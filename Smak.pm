@@ -528,6 +528,274 @@ sub get_rules {
     };
 }
 
+sub parse_ninja {
+    my ($ninja_file) = @_;
+
+    $makefile = $ninja_file;
+    undef $default_target;
+
+    # Reset state
+    %fixed_rule = ();
+    %fixed_deps = ();
+    %pattern_rule = ();
+    %pattern_deps = ();
+    %pseudo_rule = ();
+    %pseudo_deps = ();
+    %MV = ();
+
+    # Ninja-specific: track rules and their properties
+    my %ninja_rules;  # rule_name => {command, description, deps, depfile, ...}
+    my %ninja_vars;   # global ninja variables
+
+    open(my $fh, '<', $ninja_file) or die "Cannot open $ninja_file: $!";
+
+    my $current_section = '';  # 'rule', 'build', or ''
+    my $current_rule_name = '';
+    my $current_build_output = '';
+    my %current_build_vars;
+
+    while (my $line = <$fh>) {
+        chomp $line;
+
+        # Skip comments and empty lines
+        next if $line =~ /^\s*#/ || $line =~ /^\s*$/;
+
+        # Global variable assignment
+        if ($line =~ /^(\w+)\s*=\s*(.*)$/ && $current_section eq '') {
+            my ($var, $value) = ($1, $2);
+            $ninja_vars{$var} = $value;
+            $MV{$var} = $value;
+            next;
+        }
+
+        # Rule definition
+        if ($line =~ /^rule\s+(\S+)/) {
+            $current_section = 'rule';
+            $current_rule_name = $1;
+            $ninja_rules{$current_rule_name} = {};
+            next;
+        }
+
+        # Rule properties (indented lines after 'rule')
+        if ($current_section eq 'rule' && $line =~ /^\s+(\w+)\s*=\s*(.*)$/) {
+            my ($prop, $value) = ($1, $2);
+            $ninja_rules{$current_rule_name}{$prop} = $value;
+            next;
+        }
+
+        # Build statement
+        if ($line =~ /^build\s+(.+?)\s*:\s*(\S+)(?:\s+(.*))?$/) {
+            # End previous build if any
+            if ($current_build_output) {
+                _save_ninja_build(\%ninja_rules, $current_build_output, \%current_build_vars);
+            }
+
+            $current_section = 'build';
+            $current_build_output = $1;
+            my $rule_name = $2;
+            my $inputs = $3 || '';
+
+            # Parse outputs (can be multiple with |)
+            my @outputs = split /\s*\|\s*/, $current_build_output;
+            my $output = $outputs[0];  # Use first output as main target
+
+            # Parse inputs (can have implicit deps with |)
+            my @input_parts = split /\s*\|\s*/, $inputs;
+            my @deps = $input_parts[0] ? (split /\s+/, $input_parts[0]) : ();
+            @deps = grep { $_ ne '' } @deps;
+
+            %current_build_vars = (
+                rule => $rule_name,
+                inputs => \@deps,
+                output => $output,
+            );
+            next;
+        }
+
+        # Build variables (indented lines after 'build')
+        if ($current_section eq 'build' && $line =~ /^\s+(\w+)\s*=\s*(.*)$/) {
+            my ($var, $value) = ($1, $2);
+            $current_build_vars{$var} = $value;
+            next;
+        }
+
+        # Non-indented line ends current section
+        if ($line !~ /^\s/ && $current_section ne '') {
+            if ($current_section eq 'build' && $current_build_output) {
+                _save_ninja_build(\%ninja_rules, $current_build_output, \%current_build_vars);
+                $current_build_output = '';
+                %current_build_vars = ();
+            }
+            $current_section = '';
+        }
+    }
+
+    # Save last build if any
+    if ($current_build_output) {
+        _save_ninja_build(\%ninja_rules, $current_build_output, \%current_build_vars);
+    }
+
+    close($fh);
+}
+
+sub _save_ninja_build {
+    my ($ninja_rules, $build_output, $build_vars) = @_;
+
+    my $output = $build_vars->{output};
+    my $rule_name = $build_vars->{rule};
+    my @inputs = @{$build_vars->{inputs} || []};
+
+    return unless $output && $rule_name;
+
+    # Get rule template
+    my $rule = $ninja_rules->{$rule_name} || {};
+    my $command = $rule->{command} || '';
+
+    # Expand variables in command
+    # Replace ninja variables like $in, $out, $ARGS, etc.
+    my %var_map = (
+        'in' => join(' ', @inputs),
+        'out' => $output,
+    );
+
+    # Add build-specific variables
+    for my $var (keys %$build_vars) {
+        next if $var eq 'rule' || $var eq 'inputs' || $var eq 'output';
+        $var_map{$var} = $build_vars->{$var};
+    }
+
+    # Expand variables in command
+    for my $var (keys %var_map) {
+        my $value = $var_map{$var};
+        $command =~ s/\$$var\b/$value/g;
+        $command =~ s/\$\{$var\}/$value/g;
+    }
+
+    # Handle DEPFILE tracking
+    my $depfile = $build_vars->{DEPFILE} || $build_vars->{depfile};
+    if ($depfile) {
+        # Expand depfile path
+        for my $var (keys %var_map) {
+            my $value = $var_map{$var};
+            $depfile =~ s/\$$var\b/$value/g;
+            $depfile =~ s/\$\{$var\}/$value/g;
+        }
+
+        # If depfile exists, parse it for additional dependencies
+        if (-f $depfile) {
+            my @dep_deps = _parse_depfile($depfile);
+            push @inputs, @dep_deps;
+        }
+    }
+
+    # Store in smak format
+    my $key = "$makefile\t$output";
+    $fixed_deps{$key} = \@inputs;
+    $fixed_rule{$key} = $command;
+
+    # Set default target
+    if (!defined $default_target) {
+        $default_target = $output;
+    }
+}
+
+sub _parse_depfile {
+    my ($depfile) = @_;
+
+    open(my $fh, '<', $depfile) or return ();
+
+    my @deps;
+    my $content = do { local $/; <$fh> };
+    close($fh);
+
+    # Dependency files are in Makefile format: target: dep1 dep2 dep3
+    # Can span multiple lines with backslash continuation
+    $content =~ s/\\\n/ /g;  # Join continuation lines
+
+    if ($content =~ /^[^:]+:\s*(.*)$/m) {
+        my $deps_str = $1;
+        @deps = split /\s+/, $deps_str;
+        @deps = grep { $_ ne '' && -f $_ } @deps;  # Filter to existing files
+    }
+
+    return @deps;
+}
+
+sub write_makefile {
+    my ($output_file) = @_;
+    $output_file ||= 'Makefile.generated';
+
+    open(my $fh, '>', $output_file) or die "Cannot write $output_file: $!";
+
+    # Write header
+    print $fh "# Generated Makefile from $makefile\n";
+    print $fh "# Generated by smak-ninja\n\n";
+
+    # Write variables
+    print $fh "# Variables\n";
+    for my $var (sort keys %MV) {
+        my $value = $MV{$var};
+        print $fh "$var = $value\n";
+    }
+    print $fh "\n";
+
+    # Write default target
+    if ($default_target) {
+        print $fh "# Default target\n";
+        print $fh ".DEFAULT_GOAL := $default_target\n\n";
+    }
+
+    # Collect all targets
+    my %all_targets;
+    for my $key (keys %fixed_deps) {
+        my ($file, $target) = split(/\t/, $key, 2);
+        $all_targets{$target} = $key;
+    }
+    for my $key (keys %pattern_deps) {
+        my ($file, $target) = split(/\t/, $key, 2);
+        $all_targets{$target} = $key;
+    }
+    for my $key (keys %pseudo_deps) {
+        my ($file, $target) = split(/\t/, $key, 2);
+        $all_targets{$target} = $key;
+    }
+
+    # Write rules
+    print $fh "# Build rules\n";
+    for my $target (sort keys %all_targets) {
+        my $key = $all_targets{$target};
+
+        # Get dependencies and rule
+        my $deps_ref = $fixed_deps{$key} || $pattern_deps{$key} || $pseudo_deps{$key};
+        my $rule = $fixed_rule{$key} || $pattern_rule{$key} || $pseudo_rule{$key};
+
+        next unless $deps_ref;
+
+        my @deps = @$deps_ref;
+
+        # Convert $MV{VAR} back to $(VAR)
+        my $deps_str = join(' ', @deps);
+        $deps_str = format_output($deps_str);
+
+        # Write target line
+        print $fh "$target: $deps_str\n";
+
+        # Write rule commands
+        if ($rule && $rule =~ /\S/) {
+            my $formatted_rule = format_output($rule);
+            for my $cmd (split /\n/, $formatted_rule) {
+                next unless $cmd =~ /\S/;
+                print $fh "\t$cmd\n";
+            }
+        }
+
+        print $fh "\n";
+    }
+
+    close($fh);
+    print "Makefile written to: $output_file\n";
+}
+
 # Helper function to parse make/smak command line
 sub parse_make_command {
     my ($cmd) = @_;

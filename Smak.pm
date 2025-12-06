@@ -935,6 +935,14 @@ sub build_target {
     $visited ||= {};
     $depth ||= 0;
 
+    # Skip RCS/SCCS implicit rule patterns (these create infinite loops)
+    # Make's built-in rules try: RCS/file,v, SCCS/s.file, etc.
+    if ($target =~ m{(?:^|/)(?:RCS|SCCS)/} ||
+        $target =~ /^s\./ ||
+        $target =~ /,v+$/) {
+        return;
+    }
+
     # Prevent infinite recursion
     if ($depth > 100) {
         warn "Warning: Maximum recursion depth (100) reached building '$target' in $makefile\n";
@@ -1118,6 +1126,14 @@ sub dry_run_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
     $depth ||= 0;
+
+    # Skip RCS/SCCS implicit rule patterns (these create infinite loops)
+    # Make's built-in rules try: RCS/file,v, SCCS/s.file, etc.
+    if ($target =~ m{(?:^|/)(?:RCS|SCCS)/} ||
+        $target =~ /^s\./ ||
+        $target =~ /,v+$/) {
+        return;
+    }
 
     # Prevent infinite recursion
     if ($depth > 100) {

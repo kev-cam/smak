@@ -206,36 +206,72 @@ sub run_clean_mode {
         return;
     }
 
-    # Filter to only existing files
-    my @existing = grep { -e $_ } @outputs;
+    # Separate existing files from non-existing
+    my @existing = grep { -e $_ && !-d $_ } @outputs;
+    my @missing = grep { !-e $_ } @outputs;
+    my @dirs = grep { -d $_ } @outputs;
+
+    # Show all potential outputs
+    print "\nGenerated files from ninja:\n";
+    print "=" x 70 . "\n\n";
+
+    if (@existing) {
+        print "Files that exist (will be removed):\n";
+        for my $file (sort @existing) {
+            my $size = -s $file;
+            printf "  %-50s (%d bytes)\n", $file, $size;
+        }
+        print "\n";
+    }
+
+    if (@dirs) {
+        print "Directories (will NOT be removed):\n";
+        for my $dir (sort @dirs) {
+            print "  $dir/\n";
+        }
+        print "\n";
+    }
+
+    if (@missing) {
+        my $count = scalar(@missing);
+        print "Files that don't exist yet: $count\n";
+        if ($count <= 20) {
+            for my $file (sort @missing) {
+                print "  $file\n";
+            }
+        }
+        print "\n";
+    }
 
     if (@existing == 0) {
-        print "No generated files currently exist.\n";
+        print "No files to remove.\n";
         return;
     }
 
-    # List files
-    print "Generated files that will be removed:\n";
-    for my $file (sort @existing) {
-        my $size = -s $file;
-        printf "  %-50s (%d bytes)\n", $file, $size;
-    }
-
     # Prompt for confirmation
-    print "\nRemove these " . scalar(@existing) . " files? [y/N] ";
-    my $response = <STDIN>;
-    chomp($response);
+    print "Remove " . scalar(@existing) . " existing file(s)? [y/N] ";
+
+    # Handle non-interactive mode
+    my $response = '';
+    if (-t STDIN) {
+        $response = <STDIN>;
+        chomp($response) if defined $response;
+    } else {
+        print "N (non-interactive mode)\n";
+        return;
+    }
 
     if ($response =~ /^[yY]/) {
         my $removed = 0;
         for my $file (@existing) {
             if (unlink($file)) {
                 $removed++;
+                print "  Removed: $file\n";
             } else {
-                warn "Failed to remove $file: $!\n";
+                warn "  Failed to remove $file: $!\n";
             }
         }
-        print "Removed $removed files.\n";
+        print "\nRemoved $removed file(s).\n";
     } else {
         print "Cancelled.\n";
     }

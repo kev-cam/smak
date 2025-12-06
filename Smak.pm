@@ -734,30 +734,43 @@ sub write_makefile {
     # Write variables
     print $fh "# Variables\n";
     for my $var (sort keys %MV) {
+        next if $var eq 'ninja_required_version';  # Skip ninja-specific vars
         my $value = $MV{$var};
         print $fh "$var = $value\n";
     }
     print $fh "\n";
 
-    # Write default target
-    if ($default_target) {
-        print $fh "# Default target\n";
-        print $fh ".DEFAULT_GOAL := $default_target\n\n";
-    }
-
-    # Collect all targets
+    # Collect all targets (skip PHONY)
     my %all_targets;
     for my $key (keys %fixed_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
+        next if $target eq 'PHONY';  # Skip PHONY target
         $all_targets{$target} = $key;
     }
     for my $key (keys %pattern_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
+        next if $target eq 'PHONY';
         $all_targets{$target} = $key;
     }
     for my $key (keys %pseudo_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
+        next if $target eq 'PHONY';
         $all_targets{$target} = $key;
+    }
+
+    # Find or create 'all' target
+    my $has_all = exists $all_targets{'all'};
+
+    # Write default target
+    print $fh "# Default target\n";
+    if ($has_all) {
+        print $fh ".DEFAULT_GOAL := all\n\n";
+    } else {
+        # Create 'all' target if it doesn't exist
+        print $fh ".DEFAULT_GOAL := all\n\n";
+        print $fh "# Default all target\n";
+        print $fh "all:\n";
+        print $fh "\t\@echo 'Build complete'\n\n";
     }
 
     # Write rules

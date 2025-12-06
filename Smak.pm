@@ -349,6 +349,16 @@ sub format_output {
     return $text;
 }
 
+sub transform_make_vars {
+    my ($text) = @_;
+    # Transform $(VAR) to $MV{VAR}
+    $text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+    # Transform $X (single-letter variables) to $MV{X}, but not automatic vars like $@, $<, $^, $*, $?
+    # Automatic variables are handled separately in expand_vars
+    $text =~ s/\$([A-Za-z0-9_])(?![A-Za-z0-9_{])/\$MV{$1}/g;
+    return $text;
+}
+
 sub parse_makefile {
     my ($makefile_path) = @_;
 
@@ -424,8 +434,8 @@ sub parse_makefile {
         if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*[:?]?=\s*(.*)$/) {
             $save_current_rule->();
             my ($var, $value) = ($1, $2);
-            # Transform $(VAR) to $MV{VAR} in the value
-            $value =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+            # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
+            $value = transform_make_vars($value);
             $MV{$var} = $value;
             next;
         }
@@ -441,8 +451,8 @@ sub parse_makefile {
             $target =~ s/^\s+|\s+$//g;
             $deps_str =~ s/^\s+|\s+$//g;
 
-            # Transform $(VAR) to $MV{VAR} in dependencies
-            $deps_str =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+            # Transform $(VAR) and $X to $MV{VAR} and $MV{X} in dependencies
+            $deps_str = transform_make_vars($deps_str);
 
             my @deps = split /\s+/, $deps_str;
             @deps = grep { $_ ne '' } @deps;
@@ -453,11 +463,26 @@ sub parse_makefile {
 
             my $key = "$makefile\t$target";
             if ($current_type eq 'fixed') {
-                $fixed_deps{$key} = \@deps;
+                # Append dependencies if target already exists (like gmake)
+                if (exists $fixed_deps{$key}) {
+                    push @{$fixed_deps{$key}}, @deps;
+                } else {
+                    $fixed_deps{$key} = \@deps;
+                }
             } elsif ($current_type eq 'pattern') {
-                $pattern_deps{$key} = \@deps;
+                # Append dependencies if target already exists (like gmake)
+                if (exists $pattern_deps{$key}) {
+                    push @{$pattern_deps{$key}}, @deps;
+                } else {
+                    $pattern_deps{$key} = \@deps;
+                }
             } elsif ($current_type eq 'pseudo') {
-                $pseudo_deps{$key} = \@deps;
+                # Append dependencies if target already exists (like gmake)
+                if (exists $pseudo_deps{$key}) {
+                    push @{$pseudo_deps{$key}}, @deps;
+                } else {
+                    $pseudo_deps{$key} = \@deps;
+                }
             }
 
             # Set default target to first non-pseudo target (like gmake)
@@ -471,8 +496,8 @@ sub parse_makefile {
         # Rule command (starts with tab)
         if ($line =~ /^\t(.*)$/ && defined $current_target) {
             my $cmd = $1;
-            # Transform $(VAR) to $MV{VAR}
-            $cmd =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+            # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
+            $cmd = transform_make_vars($cmd);
             $current_rule .= "$cmd\n";
             next;
         }
@@ -863,9 +888,9 @@ sub add_rule {
     my $type = classify_target($target);
     my $key = "$makefile\t$target";
 
-    # Transform $(VAR) to $MV{VAR}
-    $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
-    $deps =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+    # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
+    $rule_text = transform_make_vars($rule_text);
+    $deps = transform_make_vars($deps);
 
     my @deps_array = split /\s+/, $deps;
 
@@ -895,8 +920,8 @@ sub modify_rule {
     my $type = classify_target($target);
     my $key = "$makefile\t$target";
 
-    # Transform $(VAR) to $MV{VAR}
-    $rule_text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+    # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
+    $rule_text = transform_make_vars($rule_text);
 
     my $found = 0;
     if ($type eq 'fixed' && exists $fixed_rule{$key}) {
@@ -928,8 +953,8 @@ sub modify_deps {
     my $type = classify_target($target);
     my $key = "$makefile\t$target";
 
-    # Transform $(VAR) to $MV{VAR}
-    $deps =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+    # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
+    $deps = transform_make_vars($deps);
 
     my @deps_array = split /\s+/, $deps;
 

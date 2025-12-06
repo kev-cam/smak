@@ -430,6 +430,48 @@ sub parse_makefile {
             next;
         }
 
+        # Handle include directives
+        if ($line =~ /^-?include\s+(.+)$/) {
+            $save_current_rule->();
+            my $include_files = $1;
+            # Expand variables in the include filename
+            $include_files = transform_make_vars($include_files);
+
+            # Handle multiple includes on one line
+            for my $include_file (split /\s+/, $include_files) {
+                # Expand $MV{...} to actual values
+                while ($include_file =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $include_file =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+
+                # Make path absolute relative to current Makefile's directory
+                my $include_path = $include_file;
+                unless ($include_path =~ m{^/}) {
+                    use File::Basename;
+                    use File::Spec;
+                    my $makefile_dir = dirname($makefile);
+                    $include_path = File::Spec->catfile($makefile_dir, $include_file);
+                }
+
+                # Parse the included file (ignore if it doesn't exist and line starts with -)
+                if (-f $include_path) {
+                    # Save current makefile name
+                    my $saved_makefile = $makefile;
+
+                    # Parse included file in-place (variables go into same %MV)
+                    parse_included_makefile($include_path);
+
+                    # Restore current makefile name
+                    $makefile = $saved_makefile;
+                } elsif ($line !~ /^-include/) {
+                    warn "Warning: included file not found: $include_path\n";
+                }
+            }
+            next;
+        }
+
         # Variable assignment
         if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*[:?]?=\s*(.*)$/) {
             $save_current_rule->();
@@ -510,6 +552,129 @@ sub parse_makefile {
     $save_current_rule->();
 
     close($fh);
+}
+
+sub parse_included_makefile {
+    my ($include_path) = @_;
+
+    # Parse an included Makefile without resetting global state
+    # Variables and rules are added to the existing %MV, %fixed_deps, etc.
+
+    open(my $fh, '<', $include_path) or do {
+        warn "Warning: Cannot open included file $include_path: $!\n";
+        return;
+    };
+
+    # Temporarily update $makefile for proper key generation
+    my $saved_makefile = $makefile;
+    $makefile = $include_path;
+
+    my $current_target;
+    my $current_rule = '';
+    my $current_type;
+
+    my $save_current_rule = sub {
+        return unless $current_target;
+
+        my $key = "$saved_makefile\t$current_target";  # Use original makefile for keys
+        if ($current_type eq 'fixed') {
+            $fixed_rule{$key} = $current_rule;
+        } elsif ($current_type eq 'pattern') {
+            $pattern_rule{$key} = $current_rule;
+        } elsif ($current_type eq 'pseudo') {
+            $pseudo_rule{$key} = $current_rule;
+        }
+
+        $current_target = undef;
+        $current_rule = '';
+        $current_type = undef;
+    };
+
+    while (my $line = <$fh>) {
+        chomp $line;
+
+        # Handle line continuations
+        while ($line =~ /\\$/) {
+            $line =~ s/\\$//;
+            my $next = <$fh>;
+            last unless defined $next;
+            chomp $next;
+            $line .= $next;
+        }
+
+        # Skip comments and empty lines
+        if (!defined $current_target && ($line =~ /^\s*#/ || $line =~ /^\s*$/)) {
+            next;
+        }
+
+        # Variable assignment (most important for included files like flags.make)
+        if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*[:?]?=\s*(.*)$/) {
+            $save_current_rule->();
+            my ($var, $value) = ($1, $2);
+            $value = transform_make_vars($value);
+            $MV{$var} = $value;
+            next;
+        }
+
+        # Rule definition (included files might have rules too)
+        if ($line =~ /^([^:]+):\s*(.*)$/) {
+            $save_current_rule->();
+
+            my $target = $1;
+            my $deps_str = $2;
+
+            $target =~ s/^\s+|\s+$//g;
+            $deps_str =~ s/^\s+|\s+$//g;
+            $deps_str = transform_make_vars($deps_str);
+
+            my @deps = split /\s+/, $deps_str;
+            @deps = grep { $_ ne '' } @deps;
+
+            $current_target = $target;
+            $current_type = classify_target($target);
+            $current_rule = '';
+
+            my $key = "$saved_makefile\t$target";
+            if ($current_type eq 'fixed') {
+                if (exists $fixed_deps{$key}) {
+                    push @{$fixed_deps{$key}}, @deps;
+                } else {
+                    $fixed_deps{$key} = \@deps;
+                }
+            } elsif ($current_type eq 'pattern') {
+                if (exists $pattern_deps{$key}) {
+                    push @{$pattern_deps{$key}}, @deps;
+                } else {
+                    $pattern_deps{$key} = \@deps;
+                }
+            } elsif ($current_type eq 'pseudo') {
+                if (exists $pseudo_deps{$key}) {
+                    push @{$pseudo_deps{$key}}, @deps;
+                } else {
+                    $pseudo_deps{$key} = \@deps;
+                }
+            }
+
+            next;
+        }
+
+        # Rule command
+        if ($line =~ /^\t(.*)$/ && defined $current_target) {
+            my $cmd = $1;
+            $cmd = transform_make_vars($cmd);
+            $current_rule .= "$cmd\n";
+            next;
+        }
+
+        # If we get here with a current target, save it
+        $save_current_rule->() if defined $current_target;
+    }
+
+    # Save the last rule if any
+    $save_current_rule->();
+
+    close($fh);
+    $makefile = $saved_makefile;
 }
 
 sub get_default_target {

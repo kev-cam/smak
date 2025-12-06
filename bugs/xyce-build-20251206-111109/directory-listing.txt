@@ -1,0 +1,774 @@
+Directory listing from: /mnt/y/Xyce-8/xyce-build
+==================================================
+
+.:
+total 92
+-rwxrwxrwx 1 dkc dkc 30473 Dec  4 11:01 CMakeCache.txt
+drwxrwxrwx 1 dkc dkc   512 Dec  6 11:10 CMakeFiles
+-rwxrwxrwx 1 dkc dkc  4391 Nov 21 12:42 CPackConfig.cmake
+-rwxrwxrwx 1 dkc dkc  4845 Nov 21 12:22 CPackSourceConfig.cmake
+-rwxrwxrwx 1 dkc dkc 13794 Dec  4 14:23 Makefile
+-rwxrwxrwx 1 dkc dkc 13803 Dec  4 11:01 Makefile~
+-rwxrwxrwx 1 dkc dkc  2546 Nov 28 14:07 cmake_install.cmake
+-rwxrwxrwx 1 dkc dkc  5641 Nov 21 12:50 install_manifest.txt
+drwxrwxrwx 1 dkc dkc   512 Dec  6 10:50 src
+drwxrwxrwx 1 dkc dkc   512 Dec  4 11:01 utils
+
+./CMakeFiles:
+total 300
+drwxrwxrwx 1 dkc dkc    512 Nov 21 12:22 3.28.3
+-rwxrwxrwx 1 dkc dkc 210378 Nov 21 12:22 CMakeConfigureLog.yaml
+-rwxrwxrwx 1 dkc dkc    618 Nov 21 12:49 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc    493 Dec  4 11:01 CMakeRuleHashes.txt
+-rwxrwxrwx 1 dkc dkc  14250 Dec  4 11:01 Makefile.cmake
+-rwxrwxrwx 1 dkc dkc  45842 Dec  4 11:01 Makefile2
+drwxrwxrwx 1 dkc dkc    512 Dec  6 11:10 Progress
+-rwxrwxrwx 1 dkc dkc  21874 Dec  4 11:01 TargetDirectories.txt
+-rwxrwxrwx 1 dkc dkc     85 Dec  4 11:01 cmake.check_cache
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 pkgRedirects
+-rwxrwxrwx 1 dkc dkc      3 Dec  4 11:01 progress.marks
+
+./CMakeFiles/3.28.3:
+total 44
+-rwxrwxrwx 1 dkc dkc  2525 Nov 21 12:22 CMakeCCompiler.cmake
+-rwxrwxrwx 1 dkc dkc  5539 Nov 21 12:22 CMakeCXXCompiler.cmake
+-rwxrwxrwx 1 dkc dkc 15968 Nov 21 12:22 CMakeDetermineCompilerABI_C.bin
+-rwxrwxrwx 1 dkc dkc 15992 Nov 21 12:22 CMakeDetermineCompilerABI_CXX.bin
+-rwxrwxrwx 1 dkc dkc   462 Nov 21 12:22 CMakeSystem.cmake
+drwxrwxrwx 1 dkc dkc   512 Nov 21 12:22 CompilerIdC
+drwxrwxrwx 1 dkc dkc   512 Nov 21 12:22 CompilerIdCXX
+
+./CMakeFiles/3.28.3/CompilerIdC:
+total 44
+-rwxrwxrwx 1 dkc dkc 27030 Nov 21 12:22 CMakeCCompilerId.c
+-rwxrwxrwx 1 dkc dkc 16088 Nov 21 12:22 a.out
+drwxrwxrwx 1 dkc dkc   512 Nov 21 12:22 tmp
+
+./CMakeFiles/3.28.3/CompilerIdC/tmp:
+total 0
+
+./CMakeFiles/3.28.3/CompilerIdCXX:
+total 44
+-rwxrwxrwx 1 dkc dkc 26804 Nov 21 12:22 CMakeCXXCompilerId.cpp
+-rwxrwxrwx 1 dkc dkc 16096 Nov 21 12:22 a.out
+drwxrwxrwx 1 dkc dkc   512 Nov 21 12:22 tmp
+
+./CMakeFiles/3.28.3/CompilerIdCXX/tmp:
+total 0
+
+./CMakeFiles/Progress:
+total 0
+-rwxrwxrwx 1 dkc dkc 3 Dec  6 11:10 count.txt
+
+./CMakeFiles/pkgRedirects:
+total 0
+
+./src:
+total 752
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 AnalysisPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 CMakeFiles
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 CircuitPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 DakotaLinkPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 DeviceModelPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 ErrorHandlingPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 IOInterfacePKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 LinearAlgebraServicesPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 LoaderServicesPKG
+-rwxrwxrwx 1 dkc dkc 746574 Nov 21 12:22 Makefile
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 MultiTimePDEPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 NonlinearSolverPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 ParallelDistPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 TimeIntegrationPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 TopoManagerPKG
+drwxrwxrwx 1 dkc dkc    512 Dec  6 11:10 UtilityPKG
+-rwxrwxrwx 1 dkc dkc   3022 Nov 21 12:22 Xyce_config.h
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 cmake
+-rwxrwxrwx 1 dkc dkc  12658 Nov 28 14:07 cmake_install.cmake
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 test
+
+./src/AnalysisPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7152 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1253 Nov 28 14:07 cmake_install.cmake
+
+./src/AnalysisPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+drwxrwxrwx 1 dkc dkc 512 Nov 21 12:22 Export
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 Xyce.dir
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:44 XyceLib.dir
+-rwxrwxrwx 1 dkc dkc   3 Dec  4 11:01 progress.marks
+
+./src/CMakeFiles/Export:
+total 0
+drwxrwxrwx 1 dkc dkc 512 Dec  4 11:01 7522d88c33879abaf68ef0687be18c8c
+
+./src/CMakeFiles/Export/7522d88c33879abaf68ef0687be18c8c:
+total 16
+-rwxrwxrwx 1 dkc dkc  826 Nov 28 14:07 XyceTargets-debug.cmake
+-rwxrwxrwx 1 dkc dkc  836 Nov 21 12:22 XyceTargets-release.cmake
+-rwxrwxrwx 1 dkc dkc 4124 Nov 21 12:22 XyceTargets.cmake
+
+./src/CMakeFiles/Xyce.dir:
+total 44
+-rwxrwxrwx 1 dkc dkc   697 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc  7096 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   263 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc     0 Dec  6 10:39 compiler_depend.internal.tmp875ce
+-rwxrwxrwx 1 dkc dkc   107 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc 21216 Dec  6 10:39 compiler_depend.make.tmpafdc5
+-rwxrwxrwx 1 dkc dkc   111 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc    88 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1454 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2339 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    42 Dec  4 11:01 progress.make
+
+./src/CMakeFiles/XyceLib.dir:
+total 38504
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 AnalysisPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 CircuitPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 DakotaLinkPKG
+-rwxrwxrwx 1 dkc dkc   111686 Nov 21 12:22 DependInfo.cmake
+drwxrwxrwx 1 dkc dkc      512 Nov 21 12:22 DeviceModelPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 ErrorHandlingPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 IOInterfacePKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 LinearAlgebraServicesPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 LoaderServicesPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 MultiTimePDEPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 NonlinearSolverPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 ParallelDistPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 TimeIntegrationPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:49 TopoManagerPKG
+drwxrwxrwx 1 dkc dkc      512 Dec  6 10:50 UtilityPKG
+-rwxrwxrwx 1 dkc dkc  1064129 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc    71927 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc       36 Dec  4 11:01 cmake_clean_target.cmake
+-rwxrwxrwx 1 dkc dkc  9762471 Dec  6 10:44 compiler_depend.internal
+-rwxrwxrwx 1 dkc dkc  6998244 Nov 21 12:56 compiler_depend.internal.tmpa2801
+-rwxrwxrwx 1 dkc dkc 10543033 Dec  6 10:43 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc 10810389 Nov 21 12:56 compiler_depend.make.tmp76a44
+-rwxrwxrwx 1 dkc dkc      114 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc       91 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc     2769 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc    33233 Nov 21 12:22 link.txt
+-rwxrwxrwx 1 dkc dkc    11318 Dec  4 11:01 progress.make
+
+./src/CMakeFiles/XyceLib.dir/AnalysisPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/CircuitPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/DakotaLinkPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/DeviceModelPKG:
+total 0
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 ADMS
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 Core
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 EXTSC
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 IBISModels
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 NeuronModels
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 OpenModels
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 TCADModels
+
+./src/CMakeFiles/XyceLib.dir/DeviceModelPKG/ADMS:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/DeviceModelPKG/Core:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/DeviceModelPKG/EXTSC:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/DeviceModelPKG/IBISModels:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/DeviceModelPKG/NeuronModels:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/DeviceModelPKG/OpenModels:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/DeviceModelPKG/TCADModels:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/ErrorHandlingPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/IOInterfacePKG:
+total 0
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 Output
+
+./src/CMakeFiles/XyceLib.dir/IOInterfacePKG/Output:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/LinearAlgebraServicesPKG:
+total 0
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 ksparse
+
+./src/CMakeFiles/XyceLib.dir/LinearAlgebraServicesPKG/ksparse:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/LoaderServicesPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/MultiTimePDEPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/NonlinearSolverPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/ParallelDistPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/TimeIntegrationPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/TopoManagerPKG:
+total 0
+
+./src/CMakeFiles/XyceLib.dir/UtilityPKG:
+total 0
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:49 ExpressionSrc
+
+./src/CMakeFiles/XyceLib.dir/UtilityPKG/ExpressionSrc:
+total 0
+
+./src/CircuitPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7147 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1252 Nov 28 14:07 cmake_install.cmake
+
+./src/CircuitPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DakotaLinkPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7162 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1255 Nov 28 14:07 cmake_install.cmake
+
+./src/DakotaLinkPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DeviceModelPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 ADMS
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+drwxrwxrwx 1 dkc dkc  512 Dec  6 10:55 Core
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 EXTSC
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 IBISModels
+-rwxrwxrwx 1 dkc dkc 7167 Nov 21 12:22 Makefile
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 NeuronModels
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 OpenModels
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 TCADModels
+-rwxrwxrwx 1 dkc dkc 2522 Nov 28 14:07 cmake_install.cmake
+
+./src/DeviceModelPKG/ADMS:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7192 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1261 Nov 28 14:07 cmake_install.cmake
+
+./src/DeviceModelPKG/ADMS/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DeviceModelPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DeviceModelPKG/Core:
+total 184
+drwxrwxrwx 1 dkc dkc   512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc  7192 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 71251 Dec  6 11:10 N_DEV_ReactionLexer.cxx
+-rwxrwxrwx 1 dkc dkc 59527 Dec  6 11:10 N_DEV_ReactionParser.cxx
+-rwxrwxrwx 1 dkc dkc 28069 Dec  6 11:10 N_DEV_ReactionParser.hxx
+-rwxrwxrwx 1 dkc dkc  1261 Nov 28 14:07 cmake_install.cmake
+-rwxrwxrwx 1 dkc dkc  8203 Dec  6 11:10 location.hh
+-rwxrwxrwx 1 dkc dkc   401 Dec  6 11:10 position.hh
+-rwxrwxrwx 1 dkc dkc   320 Dec  6 11:10 stack.hh
+
+./src/DeviceModelPKG/Core/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DeviceModelPKG/EXTSC:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7197 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1262 Nov 28 14:07 cmake_install.cmake
+
+./src/DeviceModelPKG/EXTSC/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DeviceModelPKG/IBISModels:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7222 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1267 Nov 28 14:07 cmake_install.cmake
+
+./src/DeviceModelPKG/IBISModels/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DeviceModelPKG/NeuronModels:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7232 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1269 Nov 28 14:07 cmake_install.cmake
+
+./src/DeviceModelPKG/NeuronModels/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DeviceModelPKG/OpenModels:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7222 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1267 Nov 28 14:07 cmake_install.cmake
+
+./src/DeviceModelPKG/OpenModels/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/DeviceModelPKG/TCADModels:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7222 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1267 Nov 28 14:07 cmake_install.cmake
+
+./src/DeviceModelPKG/TCADModels/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/ErrorHandlingPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7177 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1258 Nov 28 14:07 cmake_install.cmake
+
+./src/ErrorHandlingPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/IOInterfacePKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7167 Nov 21 12:22 Makefile
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 Output
+-rwxrwxrwx 1 dkc dkc 1435 Nov 28 14:07 cmake_install.cmake
+
+./src/IOInterfacePKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/IOInterfacePKG/Output:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7202 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1263 Nov 28 14:07 cmake_install.cmake
+
+./src/IOInterfacePKG/Output/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/LinearAlgebraServicesPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7217 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1266 Nov 28 14:07 cmake_install.cmake
+
+./src/LinearAlgebraServicesPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/LoaderServicesPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7182 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1259 Nov 28 14:07 cmake_install.cmake
+
+./src/LoaderServicesPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/MultiTimePDEPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7172 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1257 Nov 28 14:07 cmake_install.cmake
+
+./src/MultiTimePDEPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/NonlinearSolverPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7187 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1260 Nov 28 14:07 cmake_install.cmake
+
+./src/NonlinearSolverPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/ParallelDistPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7172 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1257 Nov 28 14:07 cmake_install.cmake
+
+./src/ParallelDistPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/TimeIntegrationPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7187 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1260 Nov 28 14:07 cmake_install.cmake
+
+./src/TimeIntegrationPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/TopoManagerPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7167 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1256 Nov 28 14:07 cmake_install.cmake
+
+./src/TopoManagerPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/UtilityPKG:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+drwxrwxrwx 1 dkc dkc  512 Dec  6 10:55 ExpressionSrc
+-rwxrwxrwx 1 dkc dkc 7823 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1434 Nov 28 14:07 cmake_install.cmake
+-rwxrwxrwx 1 dkc dkc   78 Dec  6 11:10 timestamp.h
+
+./src/UtilityPKG/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+drwxrwxrwx 1 dkc dkc 512 Dec  4 11:01 TimeStampHeader.dir
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/UtilityPKG/CMakeFiles/TimeStampHeader.dir:
+total 8
+-rwxrwxrwx 1 dkc dkc  794 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 3560 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc  254 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc  125 Nov 21 12:22 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc  119 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc   21 Dec  4 11:01 progress.make
+
+./src/UtilityPKG/ExpressionSrc:
+total 1168
+drwxrwxrwx 1 dkc dkc    512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 841260 Dec  6 11:10 ExpressionLexer.cxx
+-rwxrwxrwx 1 dkc dkc 221904 Dec  6 11:10 ExpressionParser.cxx
+-rwxrwxrwx 1 dkc dkc  99151 Dec  6 11:10 ExpressionParser.hxx
+-rwxrwxrwx 1 dkc dkc   7217 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc   1266 Nov 28 14:07 cmake_install.cmake
+-rwxrwxrwx 1 dkc dkc   8257 Dec  6 11:10 location.hh
+-rwxrwxrwx 1 dkc dkc    401 Dec  6 11:10 position.hh
+-rwxrwxrwx 1 dkc dkc    320 Dec  6 11:10 stack.hh
+
+./src/UtilityPKG/ExpressionSrc/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/cmake:
+total 12
+-rwxrwxrwx 1 dkc dkc 1412 Nov 21 12:22 XyceConfig.cmake
+-rwxrwxrwx 1 dkc dkc 1862 Nov 21 12:22 XyceConfigVersion.cmake
+-rwxrwxrwx 1 dkc dkc 3823 Nov 28 14:07 XyceTargets.cmake
+
+./src/test:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+drwxrwxrwx 1 dkc dkc  512 Dec  6 10:50 DeviceInterface
+drwxrwxrwx 1 dkc dkc  512 Dec  6 10:50 FFTInterface
+drwxrwxrwx 1 dkc dkc  512 Dec  6 10:50 GenExtTestHarnesses
+drwxrwxrwx 1 dkc dkc  512 Dec  6 10:50 LinearAlgebraTest
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 MPITest
+-rwxrwxrwx 1 dkc dkc 7117 Nov 21 12:22 Makefile
+drwxrwxrwx 1 dkc dkc  512 Dec  6 10:50 TwoLevelNewton
+-rwxrwxrwx 1 dkc dkc 2308 Nov 28 14:07 cmake_install.cmake
+
+./src/test/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   3 Dec  4 11:01 progress.marks
+
+./src/test/DeviceInterface:
+total 16
+drwxrwxrwx 1 dkc dkc   512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 11099 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc  1262 Nov 28 14:07 cmake_install.cmake
+
+./src/test/DeviceInterface/CMakeFiles:
+total 4
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 ADC_DACRunTest.dir
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 DeviceInterfaceTest.dir
+-rwxrwxrwx 1 dkc dkc   3 Dec  4 11:01 progress.marks
+
+./src/test/DeviceInterface/CMakeFiles/ADC_DACRunTest.dir:
+total 24
+-rwxrwxrwx 1 dkc dkc   810 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 10168 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   333 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc   117 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc   121 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc    98 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1403 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2360 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    41 Dec  4 11:01 progress.make
+
+./src/test/DeviceInterface/CMakeFiles/DeviceInterfaceTest.dir:
+total 72
+-rwxrwxrwx 1 dkc dkc   835 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 10738 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   368 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc 13945 Dec  6 10:39 compiler_depend.internal
+-rwxrwxrwx 1 dkc dkc 28900 Dec  6 10:39 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc   126 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc   103 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1403 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2375 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    41 Dec  4 11:01 progress.make
+
+./src/test/FFTInterface:
+total 16
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 9078 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1259 Nov 28 14:07 cmake_install.cmake
+
+./src/test/FFTInterface/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   3 Dec  4 11:01 progress.marks
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 testFFTInterface.dir
+
+./src/test/FFTInterface/CMakeFiles/testFFTInterface.dir:
+total 24
+-rwxrwxrwx 1 dkc dkc   811 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 10120 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   347 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc   119 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc   123 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc   100 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1403 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2366 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    41 Dec  4 11:01 progress.make
+
+./src/test/GenExtTestHarnesses:
+total 20
+drwxrwxrwx 1 dkc dkc   512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 12473 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc  1266 Nov 28 14:07 cmake_install.cmake
+
+./src/test/GenExtTestHarnesses/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 TestGH19.dir
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 TestIssue29.dir
+-rwxrwxrwx 1 dkc dkc   3 Dec  4 11:01 progress.marks
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 testGenCoup.dir
+
+./src/test/GenExtTestHarnesses/CMakeFiles/TestGH19.dir:
+total 24
+-rwxrwxrwx 1 dkc dkc  792 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 9852 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc  291 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc  111 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc  115 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc   92 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc 1403 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc 2342 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc   42 Dec  4 11:01 progress.make
+
+./src/test/GenExtTestHarnesses/CMakeFiles/TestIssue29.dir:
+total 24
+-rwxrwxrwx 1 dkc dkc   807 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 10194 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   312 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc   114 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc   118 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc    95 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1403 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2351 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    41 Dec  4 11:01 progress.make
+
+./src/test/GenExtTestHarnesses/CMakeFiles/testGenCoup.dir:
+total 24
+-rwxrwxrwx 1 dkc dkc   807 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 10194 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   312 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc   114 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc   118 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc    95 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1403 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2351 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    41 Dec  4 11:01 progress.make
+
+./src/test/LinearAlgebraTest:
+total 16
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 9391 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1264 Nov 28 14:07 cmake_install.cmake
+
+./src/test/LinearAlgebraTest/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   3 Dec  4 11:01 progress.marks
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 testBlockLinearSystems.dir
+
+./src/test/LinearAlgebraTest/CMakeFiles/testBlockLinearSystems.dir:
+total 24
+-rwxrwxrwx 1 dkc dkc   856 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 11264 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   389 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc   125 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc   129 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc   106 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1403 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2384 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    43 Dec  4 11:01 progress.make
+
+./src/test/MPITest:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7157 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1254 Nov 28 14:07 cmake_install.cmake
+
+./src/test/MPITest/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./src/test/TwoLevelNewton:
+total 16
+drwxrwxrwx 1 dkc dkc   512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 11564 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc  1261 Nov 28 14:07 cmake_install.cmake
+
+./src/test/TwoLevelNewton/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   3 Dec  4 11:01 progress.marks
+drwxrwxrwx 1 dkc dkc 512 Dec  4 11:01 twoLevelNewtonLinearDC.dir
+drwxrwxrwx 1 dkc dkc 512 Dec  6 10:50 twoLevelNewtonLinearTran.dir
+
+./src/test/TwoLevelNewton/CMakeFiles/twoLevelNewtonLinearDC.dir:
+total 24
+-rwxrwxrwx 1 dkc dkc   847 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 10988 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   389 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc   125 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc   129 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc   106 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1448 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2384 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    43 Dec  4 11:01 progress.make
+
+./src/test/TwoLevelNewton/CMakeFiles/twoLevelNewtonLinearTran.dir:
+total 24
+-rwxrwxrwx 1 dkc dkc   857 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 11216 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc   403 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc   127 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc   131 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc   108 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc  1448 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  2390 Nov 28 14:07 link.txt
+-rwxrwxrwx 1 dkc dkc    41 Dec  4 11:01 progress.make
+
+./utils:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7102 Nov 21 12:22 Makefile
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 SimulinkInterface
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 XyceCInterface
+-rwxrwxrwx 1 dkc dkc 1594 Nov 28 14:07 cmake_install.cmake
+
+./utils/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./utils/SimulinkInterface:
+total 12
+drwxrwxrwx 1 dkc dkc  512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc 7192 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc 1892 Nov 28 14:07 cmake_install.cmake
+
+./utils/SimulinkInterface/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+
+./utils/XyceCInterface:
+total 40
+drwxrwxrwx 1 dkc dkc   512 Dec  4 11:01 CMakeFiles
+-rwxrwxrwx 1 dkc dkc  9111 Nov 21 12:22 Makefile
+-rwxrwxrwx 1 dkc dkc   323 Nov 21 12:22 SetupPythonEnv.m
+-rwxrwxrwx 1 dkc dkc  3166 Nov 28 14:07 cmake_install.cmake
+-rwxrwxrwx 1 dkc dkc 23514 Nov 21 12:22 xyce_interface.py
+
+./utils/XyceCInterface/CMakeFiles:
+total 4
+-rwxrwxrwx 1 dkc dkc 618 Nov 21 12:22 CMakeDirectoryInformation.cmake
+-rwxrwxrwx 1 dkc dkc   2 Dec  4 11:01 progress.marks
+drwxrwxrwx 1 dkc dkc 512 Dec  4 11:01 xycecinterface.dir
+
+./utils/XyceCInterface/CMakeFiles/xycecinterface.dir:
+total 16
+-rwxrwxrwx 1 dkc dkc  816 Nov 21 12:22 DependInfo.cmake
+-rwxrwxrwx 1 dkc dkc 5855 Nov 21 12:22 build.make
+-rwxrwxrwx 1 dkc dkc  353 Dec  4 11:01 cmake_clean.cmake
+-rwxrwxrwx 1 dkc dkc   46 Dec  4 11:01 cmake_clean_target.cmake
+-rwxrwxrwx 1 dkc dkc  117 Dec  4 11:01 compiler_depend.make
+-rwxrwxrwx 1 dkc dkc  121 Nov 21 12:22 compiler_depend.ts
+-rwxrwxrwx 1 dkc dkc   98 Dec  4 11:01 depend.make
+-rwxrwxrwx 1 dkc dkc 1445 Nov 28 14:07 flags.make
+-rwxrwxrwx 1 dkc dkc  126 Nov 21 12:22 link.txt
+-rwxrwxrwx 1 dkc dkc   44 Dec  4 11:01 progress.make

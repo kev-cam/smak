@@ -1,484 +1,282 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
-use File::Basename;
-use File::Path qw(make_path);
 use FindBin qw($RealBin);
 use lib $RealBin;
-use Smak qw(:all);
+use Smak;
+use Cwd qw(getcwd);
 
-# Script to analyze build failures from smak bug reports or recreate environments
+# smak-debug: Diagnostic tool for analyzing Makefile parsing and execution
+# Usage: smak-debug [options] [target]
 
-# Check for -recreate option
-my $recreate_mode = 0;
-my $bug_dir;
+my $show_vars = 0;
+my $show_targets = 0;
+my $show_includes = 0;
+my $show_command = 0;
+my $compare_make = 0;
+my $target = '';
+my $makefile = 'Makefile';
+my $verbose = 0;
 
-if (@ARGV == 2 && $ARGV[0] eq '-recreate') {
-    $recreate_mode = 1;
-    $bug_dir = $ARGV[1];
-} elsif (@ARGV == 1 && -d $ARGV[0]) {
-    $bug_dir = $ARGV[0];
-} else {
-    print STDERR "Usage: smak-debug <bug-report-directory>\n";
-    print STDERR "   or: smak-debug -recreate <bug-report-directory>\n";
-    print STDERR "\n";
-    print STDERR "Options:\n";
-    print STDERR "  -recreate   Recreate the build environment from directory-listing.txt\n";
-    print STDERR "\n";
-    print STDERR "Example: smak-debug bugs/20231203-181951\n";
-    print STDERR "Example: smak-debug -recreate bugs/20231203-181951\n";
-    exit 1;
-}
+# Parse command line arguments
+while (@ARGV) {
+    my $arg = shift @ARGV;
 
-unless (-d $bug_dir) {
-    die "Error: Directory $bug_dir does not exist\n";
-}
-
-# Handle -recreate mode
-if ($recreate_mode) {
-    recreate_environment($bug_dir);
-    exit 0;
-}
-
-# Original analysis mode continues below...
-my $build_log = "$bug_dir/build.log";
-my $makecmp_log = "$bug_dir/make-cmp.txt";
-
-unless (-f $build_log) {
-    die "Error: Cannot find build.log in $bug_dir\n";
-}
-
-print "=" x 70 . "\n";
-print "SMAK DEBUG REPORT ANALYZER\n";
-print "=" x 70 . "\n";
-print "Report directory: $bug_dir\n";
-print "Build log: $build_log\n";
-print "\n";
-
-# Read the entire build log
-open(my $fh, '<', $build_log) or die "Cannot open $build_log: $!\n";
-my @log_lines = <$fh>;
-close($fh);
-
-# Extract report metadata
-my ($timestamp, $makefile_name);
-for my $line (@log_lines) {
-    if ($line =~ /^Timestamp:\s+(.+)$/) {
-        $timestamp = $1;
+    if ($arg eq '-v' || $arg eq '--vars') {
+        $show_vars = 1;
     }
-    elsif ($line =~ /^Makefile:\s+(.+)$/) {
-        $makefile_name = $1;
+    elsif ($arg eq '-t' || $arg eq '--targets') {
+        $show_targets = 1;
+    }
+    elsif ($arg eq '-i' || $arg eq '--includes') {
+        $show_includes = 1;
+    }
+    elsif ($arg eq '-c' || $arg eq '--command') {
+        $show_command = 1;
+    }
+    elsif ($arg eq '-m' || $arg eq '--compare') {
+        $compare_make = 1;
+    }
+    elsif ($arg eq '-this' || $arg eq '--this') {
+        # Analyze everything for the first target
+        $show_vars = 1;
+        $show_targets = 1;
+        $show_includes = 1;
+        $show_command = 1;
+        $compare_make = 1;
+        $verbose = 1;
+    }
+    elsif ($arg eq '-f' || $arg eq '--file') {
+        $makefile = shift @ARGV || die "Error: -f requires an argument\n";
+    }
+    elsif ($arg eq '-h' || $arg eq '--help') {
+        print_help();
+        exit 0;
+    }
+    elsif ($arg !~ /^-/) {
+        $target = $arg;
+    }
+    else {
+        die "Unknown option: $arg\n";
     }
 }
 
-print "Timestamp: $timestamp\n" if $timestamp;
-print "Original Makefile: $makefile_name\n" if $makefile_name;
-
-# Try to find and parse the copied Makefile in the bug directory
-my $makefile_copy;
-if ($makefile_name) {
-    my $basename = (split(/\//, $makefile_name))[-1];
-    $makefile_copy = "$bug_dir/$basename";
+# Default: show everything if no options specified
+unless ($show_vars || $show_targets || $show_includes || $show_command || $compare_make) {
+    $show_vars = 1;
+    $show_targets = 1;
 }
 
-my $parsed_makefile = 0;
-if ($makefile_copy && -f $makefile_copy) {
-    print "Parsed Makefile: $makefile_copy\n";
-    eval {
-        parse_makefile($makefile_copy);
-        $parsed_makefile = 1;
-    };
-    if ($@) {
-        warn "Warning: Could not parse Makefile: $@\n";
-    }
-} else {
-    print "Note: Makefile copy not found in bug directory\n";
-}
-print "\n";
+print "=== SMAK DEBUGGER ===\n";
+print "Makefile: $makefile\n";
+print "Directory: " . getcwd() . "\n\n";
 
-# Look for errors
-my @errors;
-my @error_contexts;
-my @failed_targets;
-
-for (my $i = 0; $i < @log_lines; $i++) {
-    my $line = $log_lines[$i];
-
-    # Look for smak error messages
-    if ($line =~ /smak: \*\*\* \[(.+?)\] Error (\d+)/) {
-        my $target = $1;
-        push @errors, {
-            target => $target,
-            code => $2,
-            line_num => $i + 1,
-        };
-        push @failed_targets, $target unless grep { $_ eq $target } @failed_targets;
-
-        # Capture context (previous 10 lines)
-        my $start = $i - 10 > 0 ? $i - 10 : 0;
-        my @context = @log_lines[$start..$i];
-        push @error_contexts, {
-            error => $errors[-1],
-            context => \@context,
-        };
-    }
-    # Look for other error indicators
-    elsif ($line =~ /error:/i && $line !~ /warnings being treated as errors/i) {
-        # Compiler/linker errors
-        push @errors, {
-            type => 'compiler',
-            message => $line,
-            line_num => $i + 1,
-        };
-    }
+# Check if Makefile exists
+unless (-f $makefile) {
+    die "Error: Makefile not found: $makefile\n";
 }
 
-# Report findings
-if (@errors) {
+# Parse the Makefile
+print "Parsing Makefile...\n";
+eval {
+    Smak::parse_makefile($makefile);
+};
+if ($@) {
+    die "Error parsing Makefile: $@\n";
+}
+print "Done.\n\n";
+
+# Get the parsed data
+my $rules = Smak::get_rules();
+my $default = Smak::get_default_target();
+
+# Determine target to analyze
+unless ($target) {
+    $target = $default || 'all';
+}
+print "Target: $target\n\n";
+
+# Show includes (if requested)
+if ($show_includes) {
     print "=" x 70 . "\n";
-    print "ERRORS FOUND: " . scalar(@errors) . "\n";
-    print "=" x 70 . "\n\n";
-
-    for my $err_ctx (@error_contexts) {
-        my $err = $err_ctx->{error};
-        print "-" x 70 . "\n";
-        print "ERROR: Target [$err->{target}] failed with exit code $err->{code}\n";
-        print "-" x 70 . "\n";
-        print "Context (last 10 lines before error):\n\n";
-        print @{$err_ctx->{context}};
-        print "\n";
-    }
-
-    # Show compiler errors separately
-    my @compiler_errors = grep { $_->{type} && $_->{type} eq 'compiler' } @errors;
-    if (@compiler_errors) {
-        print "-" x 70 . "\n";
-        print "COMPILER/LINKER ERRORS:\n";
-        print "-" x 70 . "\n";
-        for my $err (@compiler_errors) {
-            print "Line $err->{line_num}: $err->{message}";
-        }
-        print "\n";
-    }
-} else {
+    print "INCLUDE FILES PROCESSED:\n";
     print "=" x 70 . "\n";
-    print "NO ERRORS DETECTED\n";
-    print "=" x 70 . "\n";
-    print "Build appears to have completed successfully.\n\n";
+    # This would require tracking includes during parsing
+    # For now, just note this feature needs implementation
+    print "Note: Include tracking not yet implemented.\n";
+    print "Check for 'include' directives manually in $makefile\n\n";
 }
 
-# If we parsed the Makefile and have failed targets, show dependency analysis
-if ($parsed_makefile && @failed_targets) {
+# Show variables (if requested)
+if ($show_vars) {
     print "=" x 70 . "\n";
-    print "MAKEFILE ANALYSIS FOR FAILED TARGETS\n";
-    print "=" x 70 . "\n\n";
-
-    my $rules = get_rules();
-    my $makefile_key_base = $makefile_copy . "\t";
-
-    for my $target (@failed_targets) {
-        print "-" x 70 . "\n";
-        print "Target: $target\n";
-        print "-" x 70 . "\n";
-
-        my $key = $makefile_key_base . $target;
-        my @deps;
-        my $rule_text = '';
-
-        # Find the target in the rules
-        if (exists $rules->{fixed_deps}{$key}) {
-            @deps = @{$rules->{fixed_deps}{$key} || []};
-            $rule_text = $rules->{fixed_rule}{$key} || '';
-            print "Type: Fixed rule\n";
-        } elsif (exists $rules->{pattern_deps}{$key}) {
-            @deps = @{$rules->{pattern_deps}{$key} || []};
-            $rule_text = $rules->{pattern_rule}{$key} || '';
-            print "Type: Pattern rule\n";
-        } elsif (exists $rules->{pseudo_deps}{$key}) {
-            @deps = @{$rules->{pseudo_deps}{$key} || []};
-            $rule_text = $rules->{pseudo_rule}{$key} || '';
-            print "Type: Pseudo rule\n";
-        } else {
-            # Try pattern matching
-            my $found = 0;
-            for my $pkey (keys %{$rules->{pattern_rule}}) {
-                if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                    my $pattern = $1;
-                    my $pattern_re = $pattern;
-                    $pattern_re =~ s/%/(.+)/g;
-                    if ($target =~ /^$pattern_re$/) {
-                        @deps = @{$rules->{pattern_deps}{$pkey} || []};
-                        $rule_text = $rules->{pattern_rule}{$pkey} || '';
-                        my $stem = $1;
-                        @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
-                        print "Type: Matched pattern rule ($pattern)\n";
-                        $found = 1;
-                        last;
-                    }
-                }
-            }
-            if (!$found) {
-                print "Type: Target not found in Makefile\n";
-            }
-        }
-
-        if (@deps) {
-            print "Dependencies: " . join(', ', @deps) . "\n";
-        } else {
-            print "Dependencies: (none)\n";
-        }
-
-        if ($rule_text) {
-            print "\nRule commands:\n";
-            # Format the rule text
-            my $formatted = $rule_text;
-            $formatted =~ s/\$MV\{([^}]+)\}/\$($1)/g;
-            print $formatted;
-            if ($formatted !~ /\n$/) {
-                print "\n";
-            }
-        } else {
-            print "Rule: (no commands defined)\n";
-        }
-        print "\n";
-    }
-}
-
-# Analyze make-cmp output if available
-if (-f $makecmp_log && -s $makecmp_log) {
+    print "VARIABLES DEFINED:\n";
     print "=" x 70 . "\n";
-    print "MAKE-CMP OUTPUT\n";
-    print "=" x 70 . "\n";
-    open(my $mc_fh, '<', $makecmp_log) or die "Cannot open $makecmp_log: $!\n";
-    while (my $line = <$mc_fh>) {
-        print $line;
-    }
-    close($mc_fh);
-    print "\n";
-} else {
-    print "=" x 70 . "\n";
-    print "MAKE-CMP OUTPUT\n";
-    print "=" x 70 . "\n";
-    print "(No make-cmp output available)\n\n";
-}
 
-# Show command summary
-print "=" x 70 . "\n";
-print "COMMAND SUMMARY\n";
-print "=" x 70 . "\n";
-
-my @commands;
-for my $line (@log_lines) {
-    # Skip header/footer lines
-    next if $line =~ /^==+/;
-    next if $line =~ /^SMAK BUILD REPORT/;
-    next if $line =~ /^Timestamp:/;
-    next if $line =~ /^Makefile:/;
-    next if $line =~ /^Report directory:/;
-    next if $line =~ /^Running make-cmp/;
-    next if $line =~ /^BUILD REPORT COMPLETE/;
-    next if $line =~ /^Log saved to:/;
-    next if $line =~ /^make-cmp output:/;
-    next if $line =~ /^\s*$/;
-    next if $line =~ /^\(make-cmp/;
-
-    # Commands typically don't start with whitespace in our log
-    # and are often longer, identifiable patterns
-    if ($line =~ /^(cc|gcc|g\+\+|clang|clang\+\+|ld|ar|ranlib|make|cmake)/i) {
-        push @commands, $line;
-    }
-}
-
-if (@commands) {
-    print "Detected commands executed:\n\n";
-    my $cmd_num = 1;
-    for my $cmd (@commands) {
-        print "$cmd_num. $cmd";
-        $cmd_num++;
-    }
-} else {
-    print "No commands detected in log.\n";
-}
-
-# Show variable summary if Makefile was parsed
-if ($parsed_makefile) {
-    my $rules = get_rules();
     my %vars = %{$rules->{variables}};
+    my @var_names = sort keys %vars;
 
-    if (keys %vars) {
-        print "\n";
-        print "=" x 70 . "\n";
-        print "MAKEFILE VARIABLES\n";
-        print "=" x 70 . "\n";
+    if (@var_names) {
+        printf "Total variables: %d\n\n", scalar(@var_names);
 
-        for my $var (sort keys %vars) {
-            my $value = $vars{$var};
-            # Convert $MV{VAR} back to $(VAR) for display
-            $value =~ s/\$MV\{([^}]+)\}/\$($1)/g;
-            print "$var = $value\n";
-        }
-    }
-}
+        # Show key variables
+        my @key_vars = qw(CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS INCLUDES
+                          CXX_FLAGS CXX_INCLUDES CXX_DEFINES CMAKE_CXX_FLAGS);
 
-print "\n";
-print "=" x 70 . "\n";
-print "END OF DEBUG REPORT\n";
-print "=" x 70 . "\n";
-print "\nFor full details, see: $build_log\n";
-
-# Subroutine to recreate environment from directory listing
-sub recreate_environment {
-    my ($bug_dir) = @_;
-
-    my $listing_file = "$bug_dir/directory-listing.txt";
-    unless (-f $listing_file) {
-        die "Error: Cannot find directory-listing.txt in $bug_dir\n";
-    }
-
-    print "=" x 70 . "\n";
-    print "RECREATING BUILD ENVIRONMENT\n";
-    print "=" x 70 . "\n";
-    print "Bug report: $bug_dir\n";
-    print "Reading: $listing_file\n";
-
-    # Create test directory
-    my $test_dir = "$bug_dir/test";
-    if (-e $test_dir) {
-        print "Warning: $test_dir already exists, removing...\n";
-        system("rm", "-rf", $test_dir);
-    }
-    make_path($test_dir) or die "Cannot create $test_dir: $!\n";
-    print "Created: $test_dir\n\n";
-
-    # Parse directory listing
-    open(my $fh, '<', $listing_file) or die "Cannot open $listing_file: $!\n";
-    my @lines = <$fh>;
-    close($fh);
-
-    # Extract original directory from header
-    my $orig_dir;
-    if ($lines[0] =~ /^Directory listing from:\s+(.+)$/) {
-        $orig_dir = $1;
-        print "Original directory: $orig_dir\n";
-    }
-
-    # Parse ls -lR output
-    my $current_dir = '';
-    my $files_created = 0;
-    my $dirs_created = 0;
-
-    for my $line (@lines) {
-        chomp $line;
-
-        # Skip header lines
-        next if $line =~ /^Directory listing from:/;
-        next if $line =~ /^=+$/;
-        next if $line =~ /^total /;
-        next if $line eq '';
-
-        # Directory header (ends with :)
-        if ($line =~ /^(.+):$/) {
-            $current_dir = $1;
-            # Convert ./path to path
-            $current_dir =~ s/^\.\/?//;
-            next;
-        }
-
-        # Parse ls -l line
-        # Format: permissions links owner group size month day time name
-        # drwxr-xr-x 2 root root 4096 Dec  4 10:22 dirname
-        # -rw-r--r-- 1 root root  209 Dec  4 10:22 filename
-        if ($line =~ /^([d\-l])([rwx\-]{9})\s+\d+\s+\S+\s+\S+\s+\d+\s+(\w+\s+\d+\s+[\d:]+)\s+(.+)$/) {
-            my $type = $1;
-            my $perms = $2;
-            my $timestamp = $3;
-            my $name = $4;
-
-            # Skip . and .. entries
-            next if $name eq '.' || $name eq '..';
-
-            # Build full path in test directory
-            my $full_path = $test_dir;
-            $full_path .= "/$current_dir" if $current_dir;
-            $full_path .= "/$name";
-
-            if ($type eq 'd') {
-                # Create directory
-                unless (-d $full_path) {
-                    make_path($full_path);
-                    $dirs_created++;
-                }
-            } elsif ($type eq '-') {
-                # Create empty file
-                my $dir = dirname($full_path);
-                make_path($dir) unless -d $dir;
-
-                open(my $out, '>', $full_path) or warn "Cannot create $full_path: $!\n";
-                close($out);
-                $files_created++;
-
-                # Set timestamp using touch
-                # Parse timestamp: "Dec  4 10:22" or "Dec  4 2024"
-                my $touch_time = parse_timestamp($timestamp);
-                if ($touch_time) {
-                    system("touch", "-d", $touch_time, $full_path);
-                }
+        print "Key variables:\n";
+        for my $var (@key_vars) {
+            if (exists $vars{$var}) {
+                my $value = $vars{$var};
+                # Format output nicely
+                $value = Smak::format_output($value);
+                print "  $var = $value\n";
             }
-            # TODO: Handle symlinks (type 'l') if needed
         }
-    }
 
-    # Extract tar file if it exists (overlays real files on top of empty structure)
-    my $tar_file = "$bug_dir/files.tar";
-    my $files_extracted = 0;
-    if (-f $tar_file) {
-        print "Extracting archived files from files.tar...\n";
-        my $result = system("cd '$test_dir' && tar -xf '$tar_file' 2>&1");
-        if ($result == 0) {
-            # Count files in tar
-            my $tar_list = `tar -tf '$tar_file' 2>/dev/null`;
-            my @tar_files = split(/\n/, $tar_list);
-            $files_extracted = scalar(@tar_files);
-            print "Extracted $files_extracted file(s) from archive\n";
-        } else {
-            warn "Warning: Failed to extract tar file\n";
+        if ($verbose) {
+            print "\nAll variables:\n";
+            for my $var (@var_names) {
+                my $value = $vars{$var};
+                $value = Smak::format_output($value);
+                # Truncate long values
+                if (length($value) > 100) {
+                    $value = substr($value, 0, 97) . "...";
+                }
+                print "  $var = $value\n";
+            }
         }
-    }
-
-    print "\n";
-    print "=" x 70 . "\n";
-    print "RECREATION COMPLETE\n";
-    print "=" x 70 . "\n";
-    print "Directories created: $dirs_created\n";
-    print "Files created: $files_created\n";
-    print "Files extracted from archive: $files_extracted\n" if $files_extracted > 0;
-    print "Test directory: $test_dir\n";
-    print "\n";
-
-    # Check for smak.env
-    my $env_file = "$bug_dir/smak.env";
-    if (-f $env_file) {
-        print "To run with original environment:\n";
-        print "  cd $test_dir\n";
-        print "  smak -KE ../smak.env [options]\n";
-        print "\nOr manually:\n";
-        print "  cd $test_dir\n";
-        print "  source ../smak.env\n";
-        print "  smak [options]\n";
     } else {
-        print "Note: smak.env not found in bug report\n";
-        print "To test:\n";
-        print "  cd $test_dir\n";
-        print "  smak [options]\n";
+        print "No variables defined.\n";
     }
     print "\n";
 }
 
-sub parse_timestamp {
-    my ($ts) = @_;
-    # Input: "Dec  4 10:22" or "Dec  4 2024"
-    # Output: format suitable for touch -d
+# Show targets (if requested)
+if ($show_targets) {
+    print "=" x 70 . "\n";
+    print "TARGETS DEFINED:\n";
+    print "=" x 70 . "\n";
 
-    # For now, just pass it through as touch -d is quite flexible
-    return $ts;
+    my @targets;
+    for my $key (keys %{$rules->{fixed_deps}}) {
+        my ($file, $tgt) = split(/\t/, $key, 2);
+        push @targets, $tgt if $file eq $makefile;
+    }
+
+    @targets = sort @targets;
+    printf "Total targets: %d\n\n", scalar(@targets);
+
+    if (@targets <= 20 || $verbose) {
+        for my $tgt (@targets) {
+            print "  $tgt\n";
+        }
+    } else {
+        print "First 20 targets:\n";
+        for my $tgt (@targets[0..19]) {
+            print "  $tgt\n";
+        }
+        print "  ... (use -v to see all)\n";
+    }
+    print "\n";
+}
+
+# Show command for target (if requested)
+if ($show_command) {
+    print "=" x 70 . "\n";
+    print "COMMAND FOR TARGET: $target\n";
+    print "=" x 70 . "\n";
+
+    my $key = "$makefile\t$target";
+    my $deps = $rules->{fixed_deps}{$key};
+    my $rule = $rules->{fixed_rule}{$key};
+
+    if ($deps) {
+        print "Dependencies:\n";
+        for my $dep (@$deps) {
+            my $expanded = Smak::format_output($dep);
+            $expanded = Smak::expand_vars($expanded);
+            print "  $expanded\n";
+        }
+        print "\n";
+    }
+
+    if ($rule && $rule =~ /\S/) {
+        print "Rule (before expansion):\n";
+        my $formatted = Smak::format_output($rule);
+        print "  $formatted\n\n";
+
+        print "Rule (after expansion):\n";
+        my $expanded = Smak::expand_vars($formatted);
+
+        # Expand automatic variables
+        $expanded =~ s/\$@/$target/g;
+        if ($deps && @$deps) {
+            $expanded =~ s/\$</$deps->[0]/g;
+            my $all_deps = join(' ', @$deps);
+            $expanded =~ s/\$\^/$all_deps/g;
+        }
+
+        print "  $expanded\n\n";
+    } else {
+        print "No rule defined for this target.\n\n";
+    }
+}
+
+# Compare with make (if requested)
+if ($compare_make) {
+    print "=" x 70 . "\n";
+    print "COMPARISON WITH MAKE:\n";
+    print "=" x 70 . "\n";
+
+    print "Running: make -n -f $makefile $target\n\n";
+    my $make_output = `make -n -f $makefile $target 2>&1`;
+
+    if ($? == 0) {
+        print "Make output:\n";
+        print "-" x 70 . "\n";
+        print $make_output;
+        print "-" x 70 . "\n";
+    } else {
+        print "Make failed with exit code: " . ($? >> 8) . "\n";
+        print $make_output;
+    }
+}
+
+sub print_help {
+    print <<'HELP';
+smak-debug - Diagnostic tool for analyzing Makefile parsing and execution
+
+Usage:
+    smak-debug [options] [target]
+
+Options:
+    -v, --vars          Show variables defined in Makefile
+    -t, --targets       Show targets defined in Makefile
+    -i, --includes      Show include files processed
+    -c, --command       Show expanded command for target
+    -m, --compare       Compare with make's output
+    -this, --this       Analyze everything (all options + verbose)
+    -f, --file FILE     Use FILE instead of Makefile
+    -h, --help          Show this help message
+
+Examples:
+    # Analyze current Makefile failure
+    smak-debug -this
+
+    # Show all variables
+    smak-debug -v
+
+    # Show command for specific target
+    smak-debug -c mytarget
+
+    # Compare with make
+    smak-debug -m mytarget
+
+    # Full analysis of specific target
+    smak-debug -this mytarget
+
+    # Debug specific Makefile
+    smak-debug -f build.make -this mytarget
+
+HELP
 }

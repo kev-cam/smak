@@ -935,6 +935,13 @@ sub build_target {
     $visited ||= {};
     $depth ||= 0;
 
+    # Prevent infinite recursion
+    if ($depth > 100) {
+        warn "Warning: Maximum recursion depth (100) reached building '$target' in $makefile\n";
+        warn "         This may indicate a circular dependency or overly deep dependency chain.\n";
+        return;
+    }
+
     # Track visited targets per makefile to handle same target names in different makefiles
     my $visit_key = "$makefile\t$target";
     return if $visited->{$visit_key};
@@ -1111,6 +1118,13 @@ sub dry_run_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
     $depth ||= 0;
+
+    # Prevent infinite recursion
+    if ($depth > 100) {
+        warn "Warning: Maximum recursion depth (100) reached for target '$target' in $makefile\n";
+        warn "         This may indicate a circular dependency or overly deep dependency chain.\n";
+        return;
+    }
 
     # Track visited targets per makefile to handle same target names in different makefiles
     my $visit_key = "$makefile\t$target";

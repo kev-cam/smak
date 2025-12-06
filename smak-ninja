@@ -1,0 +1,74 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use FindBin qw($RealBin);
+use lib $RealBin;
+use Smak;
+
+# smak-ninja: Convert ninja build files to Makefiles
+# Usage: smak-ninja [build.ninja] [-o output.make]
+
+my $ninja_file = 'build.ninja';
+my $output_file = 'Makefile.generated';
+
+# Parse command line arguments
+while (@ARGV) {
+    my $arg = shift @ARGV;
+
+    if ($arg eq '-o' || $arg eq '--output') {
+        $output_file = shift @ARGV || die "Error: -o requires an argument\n";
+    }
+    elsif ($arg eq '-h' || $arg eq '--help') {
+        print_help();
+        exit 0;
+    }
+    elsif ($arg !~ /^-/) {
+        $ninja_file = $arg;
+    }
+    else {
+        die "Unknown option: $arg\n";
+    }
+}
+
+# Check if ninja file exists
+unless (-f $ninja_file) {
+    die "Error: Cannot find ninja file: $ninja_file\n";
+}
+
+print "Reading ninja file: $ninja_file\n";
+Smak::parse_ninja($ninja_file);
+
+print "Converting to Makefile format...\n";
+Smak::write_makefile($output_file);
+
+print "Done! You can now use: make -f $output_file\n";
+
+sub print_help {
+    print <<'HELP';
+smak-ninja - Convert ninja build files to Makefiles
+
+Usage:
+    smak-ninja [build.ninja] [-o output.make]
+
+Options:
+    -o, --output FILE   Write Makefile to FILE (default: Makefile.generated)
+    -h, --help          Show this help message
+
+Examples:
+    # Convert build.ninja to Makefile.generated
+    smak-ninja
+
+    # Specify custom ninja file and output
+    smak-ninja my-build.ninja -o Makefile.custom
+
+    # Use the generated Makefile
+    make -f Makefile.generated
+
+Features:
+    - Converts ninja rules to make targets
+    - Tracks dependency files (gcc .d files)
+    - Preserves build commands and variables
+    - Handles ninja $in, $out variable expansion
+
+HELP
+}

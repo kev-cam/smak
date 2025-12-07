@@ -36,6 +36,10 @@ while (@ARGV) {
         print_help();
         exit 0;
     }
+    elsif ($arg =~ /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/) {
+        # Variable assignment (VAR=VALUE)
+        Smak::set_cmd_var($1, $2);
+    }
     elsif ($arg !~ /^-/) {
         $ninja_file = $arg;
     }

@@ -62,8 +62,17 @@ GetOptions(
     'yes' => \$yes,
 ) or die "Error in command line arguments\n";
 
-# Remaining arguments are targets to build
-my @targets = @ARGV;
+# Parse variable assignments and targets from remaining arguments
+my @targets;
+for my $arg (@ARGV) {
+    if ($arg =~ /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/) {
+        # Variable assignment (VAR=VALUE)
+        Smak::set_cmd_var($1, $2);
+    } else {
+        # Target name
+        push @targets, $arg;
+    }
+}
 
 if ($help) {
     print_help();

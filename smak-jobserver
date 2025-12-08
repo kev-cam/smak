@@ -1,0 +1,249 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use IO::Socket::INET;
+use IO::Select;
+use POSIX qw(:sys_wait_h);
+use FindBin qw($RealBin);
+
+# Job-master server that manages worker pool
+# Sits in select() loop listening to:
+#   - Master socket (build requests)
+#   - Worker sockets (job results)
+
+# Usage: smak-jobserver <num_workers> <master_host:port>
+my ($num_workers, $master_addr) = @ARGV;
+die "Usage: $0 <num_workers> <master_host:port>\n" unless $num_workers && $master_addr;
+
+# Parse master address
+my ($master_host, $master_port) = split(/:/, $master_addr);
+die "Invalid master address. Use host:port\n" unless defined $master_port;
+
+# Connect to master
+print STDERR "Job-master connecting to master at $master_host:$master_port...\n";
+my $master_socket = IO::Socket::INET->new(
+    PeerHost => $master_host,
+    PeerPort => $master_port,
+    Proto    => 'tcp',
+    Timeout  => 10,
+) or die "Cannot connect to master: $!\n";
+
+$master_socket->autoflush(1);
+print STDERR "Job-master connected to master\n";
+
+# Send ready signal
+print $master_socket "JOBSERVER_READY\n";
+
+# Receive environment from master
+my %worker_env;
+while (my $line = <$master_socket>) {
+    chomp $line;
+    last if $line eq 'ENV_END';
+    if ($line =~ /^ENV (\w+)=(.*)$/) {
+        $worker_env{$1} = $2;
+    }
+}
+print STDERR "Job-master received environment\n";
+
+# Create worker pool
+my @workers;
+my %worker_status;  # socket => {busy => 0/1, task_id => N}
+my $worker_script = "$RealBin/smak-worker";
+die "Worker script not found: $worker_script\n" unless -x $worker_script;
+
+# Create socket server for workers
+my $worker_server = IO::Socket::INET->new(
+    LocalAddr => '127.0.0.1',
+    LocalPort => 0,  # Let OS assign port
+    Proto     => 'tcp',
+    Listen    => $num_workers,
+    Reuse     => 1,
+) or die "Cannot create worker server: $!\n";
+
+my $worker_port = $worker_server->sockport();
+print STDERR "Job-master worker server on port $worker_port\n";
+
+# Spawn workers
+for (my $i = 0; $i < $num_workers; $i++) {
+    my $pid = fork();
+    die "Cannot fork worker: $!\n" unless defined $pid;
+
+    if ($pid == 0) {
+        # Child - exec worker
+        exec($worker_script, "127.0.0.1:$worker_port");
+        die "Failed to exec worker: $!\n";
+    }
+    print STDERR "Spawned worker $i (PID $pid)\n";
+}
+
+# Accept worker connections
+$worker_server->blocking(0);
+my $select = IO::Select->new($worker_server, $master_socket);
+my $workers_connected = 0;
+my $startup_timeout = 10;
+my $start_time = time();
+
+while ($workers_connected < $num_workers) {
+    if (time() - $start_time > $startup_timeout) {
+        die "Timeout waiting for workers\n";
+    }
+
+    my @ready = $select->can_read(0.1);
+    for my $socket (@ready) {
+        if ($socket == $worker_server) {
+            my $worker = $worker_server->accept();
+            if ($worker) {
+                $worker->autoflush(1);
+
+                # Wait for READY
+                my $ready = <$worker>;
+                chomp $ready if defined $ready;
+                if ($ready eq 'READY') {
+                    push @workers, $worker;
+                    $worker_status{$worker} = {busy => 0, task_id => 0};
+                    $select->add($worker);
+                    $workers_connected++;
+                    print STDERR "Worker connected ($workers_connected/$num_workers)\n";
+
+                    # Send environment
+                    print $worker "ENV_START\n";
+                    for my $key (keys %worker_env) {
+                        print $worker "ENV $key=$worker_env{$key}\n";
+                    }
+                    print $worker "ENV_END\n";
+                }
+            }
+        }
+    }
+}
+
+print STDERR "All workers ready. Job-master entering listen loop.\n";
+print $master_socket "JOBSERVER_WORKERS_READY\n";
+
+# Job queue
+my @job_queue;
+my %running_jobs;  # task_id => {target, worker, dir, command}
+my $next_task_id = 1;
+
+# Main event loop
+while (1) {
+    my @ready = $select->can_read(0.1);
+
+    for my $socket (@ready) {
+        if ($socket == $master_socket) {
+            # Master sent us something
+            my $line = <$socket>;
+            unless (defined $line) {
+                print STDERR "Master disconnected. Shutting down.\n";
+                shutdown_workers();
+                exit 0;
+            }
+            chomp $line;
+
+            if ($line eq 'SHUTDOWN') {
+                print STDERR "Shutdown requested by master.\n";
+                shutdown_workers();
+                print $master_socket "SHUTDOWN_ACK\n";
+                exit 0;
+
+            } elsif ($line =~ /^SUBMIT_JOB$/) {
+                # Read job details
+                my $target = <$socket>; chomp $target if defined $target;
+                my $dir = <$socket>; chomp $dir if defined $dir;
+                my $cmd = <$socket>; chomp $cmd if defined $cmd;
+
+                # Queue the job
+                push @job_queue, {
+                    target => $target,
+                    dir => $dir,
+                    command => $cmd,
+                };
+
+                print STDERR "Queued job: $target\n";
+
+                # Try to dispatch
+                dispatch_jobs();
+            }
+
+        } else {
+            # Worker sent us something
+            my $line = <$socket>;
+            unless (defined $line) {
+                # Worker disconnected
+                print STDERR "Worker disconnected\n";
+                $select->remove($socket);
+                next;
+            }
+            chomp $line;
+
+            if ($line =~ /^TASK_START (\d+)$/) {
+                my $task_id = $1;
+                print STDERR "Task $task_id started\n";
+
+            } elsif ($line =~ /^OUTPUT (.*)$/) {
+                my $output = $1;
+                # Forward to master
+                print $master_socket "OUTPUT $output\n";
+
+            } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
+                my ($task_id, $exit_code) = ($1, $2);
+                my $job = $running_jobs{$task_id};
+
+                # Mark worker as available
+                $worker_status{$socket}{busy} = 0;
+                $worker_status{$socket}{task_id} = 0;
+                delete $running_jobs{$task_id};
+
+                print STDERR "Task $task_id completed (exit=$exit_code)\n";
+
+                # Report to master
+                print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n";
+
+                # Dispatch more jobs
+                dispatch_jobs();
+            }
+        }
+    }
+}
+
+sub dispatch_jobs {
+    while (@job_queue) {
+        # Find available worker
+        my $available_worker;
+        for my $worker (@workers) {
+            if (!$worker_status{$worker}{busy}) {
+                $available_worker = $worker;
+                last;
+            }
+        }
+
+        last unless $available_worker;
+
+        # Dispatch job
+        my $job = shift @job_queue;
+        my $task_id = $next_task_id++;
+
+        $worker_status{$available_worker}{busy} = 1;
+        $worker_status{$available_worker}{task_id} = $task_id;
+        $running_jobs{$task_id} = $job;
+        $running_jobs{$task_id}{worker} = $available_worker;
+
+        print $available_worker "TASK $task_id\n";
+        print $available_worker "DIR $job->{dir}\n";
+        print $available_worker "CMD $job->{command}\n";
+
+        print STDERR "Dispatched task $task_id to worker\n";
+    }
+}
+
+sub shutdown_workers {
+    for my $worker (@workers) {
+        print $worker "SHUTDOWN\n";
+        close($worker);
+    }
+
+    # Reap worker processes
+    while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
+        # Zombie reaper
+    }
+}

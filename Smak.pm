@@ -70,13 +70,8 @@ our $silent_mode = 0;
 
 # Job server state
 our $jobs = 1;  # Number of parallel jobs
-our $job_server;  # Socket server for workers
-our $job_port;  # Port the server is listening on
-our @workers;  # List of worker sockets
-our %worker_status;  # Track which workers are busy: socket => {busy => 0/1, task_id => N}
-our @job_queue;  # Queue of pending jobs: [{target, command, dir}, ...]
-our %running_jobs;  # Track running jobs: task_id => {target, worker_socket, start_time}
-our $next_task_id = 1;
+our $job_server_socket;  # Socket to job-master
+our $job_server_pid;  # PID of job-master process
 
 sub set_report_mode {
     my ($enabled, $fh) = @_;
@@ -101,103 +96,84 @@ sub set_jobs {
 
 sub start_job_server {
     use IO::Socket::INET;
-    use IO::Select;
     use FindBin qw($RealBin);
 
     return if $jobs <= 1;  # No job server needed for sequential builds
 
-    # Create socket server on random available port
-    $job_server = IO::Socket::INET->new(
+    # Create socket server for job-master to connect to
+    my $server = IO::Socket::INET->new(
         LocalAddr => '127.0.0.1',
         LocalPort => 0,  # Let OS assign port
         Proto     => 'tcp',
-        Listen    => $jobs,
+        Listen    => 1,
         Reuse     => 1,
-    ) or die "Cannot create job server socket: $!\n";
+    ) or die "Cannot create socket for job-master: $!\n";
 
-    $job_port = $job_server->sockport();
-    warn "Job server started on port $job_port\n" if $ENV{SMAK_DEBUG};
+    my $port = $server->sockport();
+    warn "Master listening on port $port for job-master\n" if $ENV{SMAK_DEBUG};
 
-    # Spawn worker processes
-    my $worker_script = "$RealBin/smak-worker";
-    die "Worker script not found: $worker_script\n" unless -x $worker_script;
+    # Spawn job-master process
+    my $jobserver_script = "$RealBin/smak-jobserver";
+    die "Job-master script not found: $jobserver_script\n" unless -x $jobserver_script;
 
-    for (my $i = 0; $i < $jobs; $i++) {
-        my $pid = fork();
-        die "Cannot fork worker: $!\n" unless defined $pid;
+    $job_server_pid = fork();
+    die "Cannot fork job-master: $!\n" unless defined $job_server_pid;
 
-        if ($pid == 0) {
-            # Child process - exec worker
-            exec($worker_script, "127.0.0.1:$job_port");
-            die "Failed to exec worker: $!\n";
-        }
-        # Parent continues
-        warn "Spawned worker $i with PID $pid\n" if $ENV{SMAK_DEBUG};
+    if ($job_server_pid == 0) {
+        # Child - exec job-master
+        exec($jobserver_script, $jobs, "127.0.0.1:$port");
+        die "Failed to exec job-master: $!\n";
     }
 
-    # Accept worker connections
-    $job_server->blocking(0);  # Non-blocking accepts
-    my $select = IO::Select->new($job_server);
-    my $workers_connected = 0;
-    my $timeout = 10;  # 10 second timeout
-    my $start_time = time();
+    warn "Spawned job-master with PID $job_server_pid\n" if $ENV{SMAK_DEBUG};
 
-    while ($workers_connected < $jobs) {
-        if (time() - $start_time > $timeout) {
-            die "Timeout waiting for workers to connect\n";
-        }
+    # Wait for job-master to connect
+    $server->timeout(10);
+    $job_server_socket = $server->accept();
+    die "Job-master failed to connect\n" unless $job_server_socket;
 
-        if ($select->can_read(0.1)) {
-            my $worker = $job_server->accept();
-            if ($worker) {
-                $worker->autoflush(1);
+    $job_server_socket->autoflush(1);
+    close($server);  # Don't need listener anymore
 
-                # Wait for READY signal
-                my $ready_line = <$worker>;
-                chomp $ready_line if defined $ready_line;
-                if ($ready_line eq 'READY') {
-                    push @workers, $worker;
-                    $worker_status{$worker} = {busy => 0, task_id => 0};
-                    $workers_connected++;
-                    warn "Worker connected ($workers_connected/$jobs)\n" if $ENV{SMAK_DEBUG};
+    # Wait for READY signal
+    my $ready = <$job_server_socket>;
+    chomp $ready if defined $ready;
+    die "Job-master didn't send READY\n" unless $ready eq 'JOBSERVER_READY';
 
-                    # Send environment to worker
-                    print $worker "ENV_START\n";
-                    for my $key (keys %ENV) {
-                        # Skip large or problematic environment variables
-                        next if $key =~ /^(BASH_FUNC_|_)/;
-                        my $val = $ENV{$key};
-                        $val =~ s/\n/ /g;  # Remove newlines
-                        print $worker "ENV $key=$val\n";
-                    }
-                    print $worker "ENV_END\n";
-                } else {
-                    warn "Worker sent unexpected ready signal: $ready_line\n";
-                }
-            }
-        }
+    warn "Job-master connected and ready\n" if $ENV{SMAK_DEBUG};
+
+    # Send environment to job-master
+    for my $key (keys %ENV) {
+        next if $key =~ /^(BASH_FUNC_|_)/;
+        my $val = $ENV{$key};
+        $val =~ s/\n/ /g;
+        print $job_server_socket "ENV $key=$val\n";
     }
+    print $job_server_socket "ENV_END\n";
 
-    warn "All $jobs workers ready\n" if $ENV{SMAK_DEBUG};
+    # Wait for workers to be ready
+    my $workers_ready = <$job_server_socket>;
+    chomp $workers_ready if defined $workers_ready;
+    die "Job-master workers not ready\n" unless $workers_ready eq 'JOBSERVER_WORKERS_READY';
+
+    warn "Job-master and all workers ready\n" if $ENV{SMAK_DEBUG};
 }
 
 sub stop_job_server {
-    return unless $job_server;
+    return unless $job_server_socket;
 
-    # Send shutdown signal to all workers
-    for my $worker (@workers) {
-        print $worker "SHUTDOWN\n";
-        close($worker);
-    }
+    # Send shutdown to job-master
+    print $job_server_socket "SHUTDOWN\n";
 
-    close($job_server);
-    $job_server = undef;
-    @workers = ();
-    %worker_status = ();
+    # Wait for acknowledgment
+    my $ack = <$job_server_socket>;
+    close($job_server_socket);
+    $job_server_socket = undef;
 
-    # Wait for worker processes to exit
-    while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
-        # Reap zombie workers
+    # Wait for job-master to exit
+    if ($job_server_pid) {
+        waitpid($job_server_pid, 0);
+        $job_server_pid = undef;
     }
 }
 
@@ -210,104 +186,43 @@ sub submit_job {
         return;
     }
 
-    # For parallel builds, add to queue
-    push @job_queue, {
-        target => $target,
-        command => $command,
-        dir => $dir,
-    };
+    # For parallel builds, send to job-master and wait for completion
+    $dir ||= '.';
 
-    # Try to dispatch queued jobs
-    dispatch_jobs();
-}
+    warn "Submitting job: $target\n" if $ENV{SMAK_DEBUG};
 
-sub dispatch_jobs {
-    use IO::Select;
+    # Send job to job-master
+    print $job_server_socket "SUBMIT_JOB\n";
+    print $job_server_socket "$target\n";
+    print $job_server_socket "$dir\n";
+    print $job_server_socket "$command\n";
 
-    return unless $job_server;  # Not in parallel mode
+    # Wait for completion (blocking)
+    while (my $line = <$job_server_socket>) {
+        chomp $line;
 
-    while (@job_queue) {
-        # Find an available worker
-        my $available_worker;
-        for my $worker (@workers) {
-            if (!$worker_status{$worker}{busy}) {
-                $available_worker = $worker;
-                last;
+        if ($line =~ /^OUTPUT (.*)$/) {
+            # Forward output from worker
+            my $output = $1;
+            tee_print("$output\n") unless $silent_mode;
+
+        } elsif ($line =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+            my ($completed_target, $exit_code) = ($1, $2);
+
+            if ($exit_code != 0) {
+                my $err_msg = "smak: *** [$completed_target] Error $exit_code\n";
+                tee_print($err_msg);
+                stop_job_server();
+                die $err_msg;
             }
-        }
 
-        last unless $available_worker;  # No workers available
-
-        # Get next job from queue
-        my $job = shift @job_queue;
-        my $task_id = $next_task_id++;
-
-        # Send job to worker
-        $worker_status{$available_worker}{busy} = 1;
-        $worker_status{$available_worker}{task_id} = $task_id;
-        $running_jobs{$task_id} = {
-            target => $job->{target},
-            worker_socket => $available_worker,
-            start_time => time(),
-        };
-
-        my $dir = $job->{dir} || '.';
-        print $available_worker "TASK $task_id\n";
-        print $available_worker "DIR $dir\n";
-        print $available_worker "CMD $job->{command}\n";
-
-        warn "Dispatched task $task_id ($job->{target}) to worker\n" if $ENV{SMAK_DEBUG};
-    }
-}
-
-sub wait_for_jobs {
-    use IO::Select;
-
-    return unless $job_server;  # Not in parallel mode
-    return unless %running_jobs;  # No running jobs
-
-    my $select = IO::Select->new(@workers);
-
-    while (%running_jobs) {
-        # Wait for worker output
-        my @ready = $select->can_read(0.1);
-
-        for my $worker (@ready) {
-            my $line = <$worker>;
-            next unless defined $line;
-            chomp $line;
-
-            if ($line =~ /^TASK_START (\d+)$/) {
-                my $task_id = $1;
-                warn "Task $task_id started\n" if $ENV{SMAK_DEBUG};
-
-            } elsif ($line =~ /^OUTPUT (.*)$/) {
-                my $output = $1;
-                tee_print("$output\n") unless $silent_mode;
-
-            } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
-                my ($task_id, $exit_code) = ($1, $2);
-                my $job = $running_jobs{$task_id};
-
-                if ($exit_code != 0) {
-                    my $err_msg = "smak: *** [$job->{target}] Error $exit_code\n";
-                    tee_print($err_msg);
-                    stop_job_server();
-                    die $err_msg;
-                }
-
-                # Mark worker as available
-                $worker_status{$worker}{busy} = 0;
-                $worker_status{$worker}{task_id} = 0;
-                delete $running_jobs{$task_id};
-
-                warn "Task $task_id completed\n" if $ENV{SMAK_DEBUG};
-
-                # Try to dispatch more jobs
-                dispatch_jobs();
-            }
+            warn "Job completed: $completed_target\n" if $ENV{SMAK_DEBUG};
+            return;  # Job done
         }
     }
+
+    # If we get here, job-master disconnected
+    die "Job-master disconnected unexpectedly\n";
 }
 
 sub execute_command_sequential {
@@ -1652,11 +1567,7 @@ sub build_target {
         build_target($dep, $visited, $depth + 1);
     }
 
-    # Wait for all pending jobs to complete before executing this target's rule
-    # This ensures dependencies are fully built before we build the target
-    wait_for_jobs();
-
-    # Execute rule if it exists
+    # Execute rule if it exists (submit_job is blocking, so no need to wait)
     if ($rule && $rule =~ /\S/) {
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($rule);

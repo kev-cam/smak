@@ -272,7 +272,14 @@ sub run_cli {
 
     print "Smak CLI mode - type 'help' for commands\n";
     print "Makefile: $makefile\n";
-    print "Parallel jobs: $jobs\n\n";
+    print "Parallel jobs: $jobs\n";
+
+    # Start job server now if parallel builds are configured
+    if ($jobs > 1) {
+        print "Starting job server...\n";
+        start_job_server();
+    }
+    print "\n";
 
     my $term = Term::ReadLine->new('smak');
 
@@ -408,8 +415,8 @@ if ($silent) {
 set_jobs($jobs);
 
 # Start job server if parallel builds are requested
-# Skip in debug mode (interactive debugging doesn't work with parallel builds)
-unless ($debug || $dry_run) {
+# Skip in debug, dry-run, or CLI mode
+unless ($debug || $dry_run || $cli) {
     start_job_server();
 }
 

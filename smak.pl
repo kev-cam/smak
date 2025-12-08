@@ -473,8 +473,8 @@ HELP
     if ($detached || !defined($line)) {
         print "\nDetached from CLI.\n";
         if ($jobserver_pid) {
-            print "Job server still running (PID $jobserver_pid).\n";
-            print "To monitor: ./smak-attach\n";
+            print "Job server still running\n";
+            print "To monitor: smak-attach -pid $jobserver_pid\n";
 
             # Fork to keep master connection alive in background
             my $bg_pid = fork();

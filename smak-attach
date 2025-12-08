@@ -103,7 +103,18 @@ sub check_port_files {
 my @jobservers = find_jobservers();
 
 unless (@jobservers) {
-    die "No running smak job-master instances found.\n";
+    print STDERR "No running smak job-master instances found.\n";
+    print STDERR "Checking for smak.pl processes...\n";
+
+    my $smak_procs = `pgrep -lfa 'smak.pl' 2>/dev/null`;
+    if ($smak_procs) {
+        print STDERR "Found smak.pl processes:\n$smak_procs";
+        print STDERR "\nThe job-master may have crashed. Check for errors in:\n";
+        print STDERR "  - stderr output from smak.pl\n";
+        print STDERR "  - Try running: SMAK_DEBUG=1 smak.pl -cli -j 4\n";
+    }
+
+    exit 1;
 }
 
 # Clean up stale port files and verify consistency

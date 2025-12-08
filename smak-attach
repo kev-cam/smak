@@ -27,7 +27,7 @@ sub find_jobservers {
         $cmdline =~ s/\s+$//;
 
         # Check if it's a smak-jobserver process
-        if ($cmdline =~ /smak-jobserver\s+(\d+)/) {
+        if ($cmdline =~ /smak.pl\s+(\d+)/) {
             my $num_workers = $1;
 
             # Get working directory

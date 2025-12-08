@@ -76,6 +76,7 @@ our $silent_mode = 0;
 our $jobs = 1;  # Number of parallel jobs
 our $job_server_socket;  # Socket to job-master
 our $job_server_pid;  # PID of job-master process
+our $job_server_master_port;  # Master port for reconnection
 
 sub set_report_mode {
     my ($enabled, $fh) = @_;
@@ -135,6 +136,7 @@ sub start_job_server {
     close($fh);
     chomp($observer_port, $master_port);
 
+    $job_server_master_port = $master_port;  # Store for reconnection info
     warn "Job-master master port: $master_port\n" if $ENV{SMAK_DEBUG};
 
     # Connect to job-master

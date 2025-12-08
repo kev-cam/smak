@@ -408,6 +408,20 @@ sub parse_makefile {
     $MV{AR} = 'ar';
     $MV{CC} = 'cc';
     $MV{CXX} = 'c++';
+    $MV{CPP} = '\$(CC) -E';
+    $MV{AS} = 'as';
+    $MV{FC} = 'f77';
+    $MV{LEX} = 'lex';
+    $MV{YACC} = 'yacc';
+    $MV{CFLAGS} = '';
+    $MV{CXXFLAGS} = '';
+    $MV{CPPFLAGS} = '';
+    $MV{LDFLAGS} = '';
+    $MV{LDLIBS} = '';
+    $MV{'COMPILE.c'} = '$(CC) $(CFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c';
+    $MV{'COMPILE.cc'} = '$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c';
+    $MV{'LINK.o'} = '$(CC) $(LDFLAGS) $(TARGET_ARCH)';
+    $MV{'OUTPUT_OPTION'} = '-o $@';
 
     # Set directory variables (PWD and CURDIR should be the same)
     use Cwd 'getcwd';
@@ -1308,6 +1322,32 @@ sub build_target {
                 }
             }
         }
+
+        # If still no rule found, try built-in implicit rules (like Make's built-in rules)
+        if (!$rule || $rule !~ /\S/) {
+            # Check for object file (.o) targets
+            if ($target =~ /^(.+)\.o$/) {
+                my $base = $1;
+                # Try different source file extensions in order (C first, then C++)
+                my @source_exts = ('c', 'cc', 'cpp', 'C', 'cxx', 'c++');
+                for my $ext (@source_exts) {
+                    my $source = "$base.$ext";
+                    # Check if source file exists
+                    if (-f $source) {
+                        $stem = $base;
+                        @deps = ($source);
+                        # Use appropriate compilation rule based on extension
+                        if ($ext eq 'c') {
+                            $rule = "\t\$(COMPILE.c) \$(OUTPUT_OPTION) \$<\n";
+                        } else {
+                            $rule = "\t\$(COMPILE.cc) \$(OUTPUT_OPTION) \$<\n";
+                        }
+                        warn "DEBUG: Using built-in implicit rule for $target from $source\n" if $ENV{SMAK_DEBUG};
+                        last;
+                    }
+                }
+            }
+        }
     }
 
     # Expand variables in dependencies (which are in $MV{VAR} format)
@@ -1528,6 +1568,32 @@ sub dry_run_target {
                     $stem = $1;  # Save stem for $* expansion
                     @deps = map { s/%/$stem/g; $_ } @deps;
                     last;
+                }
+            }
+        }
+
+        # If still no rule found, try built-in implicit rules (like Make's built-in rules)
+        if (!$rule || $rule !~ /\S/) {
+            # Check for object file (.o) targets
+            if ($target =~ /^(.+)\.o$/) {
+                my $base = $1;
+                # Try different source file extensions in order (C first, then C++)
+                my @source_exts = ('c', 'cc', 'cpp', 'C', 'cxx', 'c++');
+                for my $ext (@source_exts) {
+                    my $source = "$base.$ext";
+                    # Check if source file exists
+                    if (-f $source) {
+                        $stem = $base;
+                        @deps = ($source);
+                        # Use appropriate compilation rule based on extension
+                        if ($ext eq 'c') {
+                            $rule = "\t\$(COMPILE.c) \$(OUTPUT_OPTION) \$<\n";
+                        } else {
+                            $rule = "\t\$(COMPILE.cc) \$(OUTPUT_OPTION) \$<\n";
+                        }
+                        warn "DEBUG: Using built-in implicit rule for $target from $source\n" if $ENV{SMAK_DEBUG};
+                        last;
+                    }
                 }
             }
         }

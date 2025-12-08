@@ -100,21 +100,19 @@ sub set_jobs {
 
 sub start_job_server {
     use IO::Socket::INET;
+    use IO::Select;
     use FindBin qw($RealBin);
 
     return if $jobs <= 1;  # No job server needed for sequential builds
-
-    # Spawn job-master process
-    my $jobserver_script = "$RealBin/smak-jobserver";
-    die "Job-master script not found: $jobserver_script\n" unless -x $jobserver_script;
 
     $job_server_pid = fork();
     die "Cannot fork job-master: $!\n" unless defined $job_server_pid;
 
     if ($job_server_pid == 0) {
-        # Child - exec job-master
-        exec($jobserver_script, $jobs);
-        die "Failed to exec job-master: $!\n";
+        # Child - run job-master with full access to parsed Makefile data
+        # This allows job-master to understand dependencies and parallelize intelligently
+        run_job_master($jobs, $RealBin);
+        exit 0;  # Should never reach here
     }
 
     warn "Spawned job-master with PID $job_server_pid\n" if $ENV{SMAK_DEBUG};
@@ -2485,6 +2483,568 @@ sub show_dependencies {
 
     unless ($found) {
         print "No rule found for target: $target\n";
+    }
+}
+
+# Job-master main loop - runs in forked child with full Makefile data
+# This allows intelligent dependency-aware parallelization
+sub run_job_master {
+    my ($num_workers, $bin_dir) = @_;
+
+    use IO::Socket::INET;
+    use IO::Select;
+    use POSIX qw(:sys_wait_h);
+    use Cwd 'abs_path';
+
+    # Job-master has access to all parsed Makefile data:
+    # - %rules: target dependencies
+    # - %pseudo_rule: build commands
+    # - %variables: makefile variables
+    # This enables dependency-aware task dispatch
+
+    my @workers;
+    my %worker_status;  # socket => {ready => 0/1, task_id => N}
+    my $worker_script = "$bin_dir/smak-worker";
+    die "Worker script not found: $worker_script\n" unless -x $worker_script;
+
+    # Create socket server for master connections
+    my $master_server = IO::Socket::INET->new(
+        LocalAddr => '127.0.0.1',
+        LocalPort => 0,  # Let OS assign port
+        Proto     => 'tcp',
+        Listen    => 1,
+        Reuse     => 1,
+    ) or die "Cannot create master server: $!\n";
+
+    my $master_port = $master_server->sockport();
+    print STDERR "Job-master master server on port $master_port\n";
+
+    # Create socket server for workers
+    my $worker_server = IO::Socket::INET->new(
+        LocalAddr => '127.0.0.1',
+        LocalPort => 0,  # Let OS assign port
+        Proto     => 'tcp',
+        Listen    => $num_workers,
+        Reuse     => 1,
+    ) or die "Cannot create worker server: $!\n";
+
+    my $worker_port = $worker_server->sockport();
+    print STDERR "Job-master worker server on port $worker_port\n";
+
+    # Create socket server for observers (monitoring/attach)
+    my $observer_server = IO::Socket::INET->new(
+        LocalAddr => '127.0.0.1',
+        LocalPort => 0,  # Let OS assign port
+        Proto     => 'tcp',
+        Listen    => 5,  # Allow multiple observers
+        Reuse     => 1,
+    ) or die "Cannot create observer server: $!\n";
+
+    my $observer_port = $observer_server->sockport();
+    print STDERR "Job-master observer server on port $observer_port\n";
+
+    # Write ports to file for smak-attach to find
+    open(my $port_fh, '>', "/tmp/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
+    if ($port_fh) {
+        print $port_fh "$observer_port\n";
+        print $port_fh "$master_port\n";
+        close($port_fh);
+    }
+
+    my @observers;  # List of connected observers
+
+    # Detect and connect to FUSE filesystem monitor
+    my $fuse_socket;
+    my %inode_cache;  # inode => path
+    my %pending_path_requests;  # inode => 1 (waiting for resolution)
+    my %file_modifications;  # path => {workers => [pids], last_op => time}
+
+    sub detect_fuse_monitor {
+        # Check if we're in a FUSE filesystem
+        my $cwd = abs_path('.');
+
+        # Read /proc/mounts to find FUSE filesystems
+        open(my $mounts, '<', '/proc/mounts') or return undef;
+        my $fuse_pid;
+        while (my $line = <$mounts>) {
+            # Look for fuse.sshfs or similar
+            if ($line =~ /^(\S+)\s+(\S+)\s+fuse\.(\S+)/) {
+                my ($dev, $mountpoint, $fstype) = ($1, $2, $3);
+                # Check if our CWD is under this mount
+                if ($cwd =~ /^\Q$mountpoint\E/) {
+                    print STDERR "Detected FUSE filesystem: $fstype at $mountpoint\n";
+                    # Try to find the FUSE process - look for sshfs process
+                    my $ps_output = `ps aux | grep -E '(sshfs|smak-fuse)' | grep -v grep`;
+                    for my $ps_line (split /\n/, $ps_output) {
+                        if ($ps_line =~ /^\S+\s+(\d+).*$mountpoint/) {
+                            $fuse_pid = $1;
+                            last;
+                        }
+                    }
+                    last if $fuse_pid;
+                }
+            }
+        }
+        close($mounts);
+
+        return undef unless $fuse_pid;
+
+        # Find the listening port using lsof
+        my $lsof_output = `lsof -Pan -p $fuse_pid -i TCP -s TCP:LISTEN 2>/dev/null`;
+        for my $line (split /\n/, $lsof_output) {
+            if ($line =~ /:(\d+)\s+\(LISTEN\)/) {
+                my $port = $1;
+                print STDERR "Found FUSE monitor on port $port (PID $fuse_pid)\n";
+                return $port;
+            }
+        }
+
+        return undef;
+    }
+
+    if (my $fuse_port = detect_fuse_monitor()) {
+        # Connect to FUSE monitor
+        $fuse_socket = IO::Socket::INET->new(
+            PeerHost => '127.0.0.1',
+            PeerPort => $fuse_port,
+            Proto    => 'tcp',
+            Timeout  => 5,
+        );
+        if ($fuse_socket) {
+            $fuse_socket->autoflush(1);
+            print STDERR "Connected to FUSE monitor\n";
+        } else {
+            print STDERR "Failed to connect to FUSE monitor: $!\n";
+        }
+    } else {
+        print STDERR "No FUSE filesystem monitor detected\n";
+    }
+
+    # Wait for initial master connection
+    print STDERR "Waiting for master connection...\n";
+    my $master_socket = $master_server->accept();
+    die "Failed to accept master connection\n" unless $master_socket;
+    $master_socket->autoflush(1);
+    print STDERR "Master connected\n";
+
+    # Receive environment from master
+    my %worker_env;
+    while (my $line = <$master_socket>) {
+        chomp $line;
+        last if $line eq 'ENV_END';
+        if ($line =~ /^ENV (\w+)=(.*)$/) {
+            $worker_env{$1} = $2;
+        }
+    }
+    print STDERR "Job-master received environment\n";
+
+    # Spawn workers
+    for (my $i = 0; $i < $num_workers; $i++) {
+        my $pid = fork();
+        die "Cannot fork worker: $!\n" unless defined $pid;
+
+        if ($pid == 0) {
+            # Child - exec worker
+            exec($worker_script, "127.0.0.1:$worker_port");
+            die "Failed to exec worker: $!\n";
+        }
+        print STDERR "Spawned worker $i (PID $pid)\n";
+    }
+
+    # Set up IO::Select for multiplexing
+    $worker_server->blocking(0);
+    $observer_server->blocking(0);
+    $master_server->blocking(0);
+    my $select = IO::Select->new($worker_server, $observer_server, $master_socket, $master_server);
+    $select->add($fuse_socket) if $fuse_socket;
+    my $workers_connected = 0;
+    my $startup_timeout = 10;
+    my $start_time = time();
+
+    # Wait for all workers to connect
+    while ($workers_connected < $num_workers) {
+        if (time() - $start_time > $startup_timeout) {
+            die "Timeout waiting for workers to connect\n";
+        }
+
+        my @ready = $select->can_read(0.1);
+        for my $socket (@ready) {
+            if ($socket == $worker_server) {
+                my $worker = $worker_server->accept();
+                if ($worker) {
+                    $worker->autoflush(1);
+                    # Read READY signal
+                    my $ready = <$worker>;
+                    chomp $ready if defined $ready;
+                    if ($ready eq 'READY') {
+                        push @workers, $worker;
+                        $worker_status{$worker} = {ready => 1, task_id => 0};
+                        $select->add($worker);
+                        $workers_connected++;
+                        print STDERR "Worker connected ($workers_connected/$num_workers)\n";
+
+                        # Send environment
+                        print $worker "ENV_START\n";
+                        for my $key (keys %worker_env) {
+                            print $worker "ENV $key=$worker_env{$key}\n";
+                        }
+                        print $worker "ENV_END\n";
+                    }
+                }
+            }
+        }
+    }
+
+    print STDERR "All workers ready. Job-master entering listen loop.\n";
+    print $master_socket "JOBSERVER_WORKERS_READY\n";
+
+    # Job queue and dependency tracking
+    my @job_queue;
+    my %running_jobs;  # task_id => {target, worker, dir, command, started}
+    my $next_task_id = 1;
+
+    # Helper functions
+    sub broadcast_observers {
+        my ($msg) = @_;
+        for my $obs (@observers) {
+            print $obs "$msg\n";
+        }
+    }
+
+    sub send_status {
+        my ($socket) = @_;
+        print $socket "STATUS_START\n";
+        print $socket "WORKERS " . scalar(@workers) . "\n";
+        print $socket "QUEUED " . scalar(@job_queue) . "\n";
+        print $socket "RUNNING " . scalar(keys %running_jobs) . "\n";
+        print $socket "STATUS_END\n";
+    }
+
+    sub shutdown_workers {
+        for my $worker (@workers) {
+            print $worker "SHUTDOWN\n";
+        }
+    }
+
+    sub dispatch_jobs {
+        while (@job_queue) {
+            # Find a ready worker
+            my $ready_worker;
+            for my $worker (@workers) {
+                if ($worker_status{$worker}{ready}) {
+                    $ready_worker = $worker;
+                    last;
+                }
+            }
+            last unless $ready_worker;  # No workers available
+
+            # Dispatch next job
+            my $job = shift @job_queue;
+            my $task_id = $next_task_id++;
+
+            $worker_status{$ready_worker}{ready} = 0;
+            $worker_status{$ready_worker}{task_id} = $task_id;
+
+            $running_jobs{$task_id} = {
+                target => $job->{target},
+                worker => $ready_worker,
+                dir => $job->{dir},
+                command => $job->{command},
+                started => 0,
+            };
+
+            # Send task to worker
+            print $ready_worker "TASK $task_id\n";
+            print $ready_worker "DIR $job->{dir}\n";
+            print $ready_worker "CMD $job->{command}\n";
+
+            print STDERR "Dispatched task $task_id to worker\n";
+            broadcast_observers("DISPATCHED $task_id $job->{target}");
+        }
+    }
+
+    # Main event loop
+    while (1) {
+        my @ready = $select->can_read(0.1);
+
+        for my $socket (@ready) {
+            if ($socket == $master_server) {
+                # New master connecting
+                my $new_master = $master_server->accept();
+                if ($new_master) {
+                    if ($master_socket) {
+                        print STDERR "New master connecting, closing old connection\n";
+                        $select->remove($master_socket);
+                        close($master_socket);
+                    }
+                    $master_socket = $new_master;
+                    $master_socket->autoflush(1);
+                    $select->add($master_socket);
+                    print STDERR "New master connected\n";
+
+                    # Receive environment from new master
+                    %worker_env = ();
+                    while (my $line = <$master_socket>) {
+                        chomp $line;
+                        last if $line eq 'ENV_END';
+                        if ($line =~ /^ENV (\w+)=(.*)$/) {
+                            $worker_env{$1} = $2;
+                        }
+                    }
+                    print $master_socket "JOBSERVER_WORKERS_READY\n";
+                    print STDERR "New master ready\n";
+                }
+
+            } elsif ($socket == $master_socket) {
+                # Master sent us something
+                my $line = <$socket>;
+                unless (defined $line) {
+                    print STDERR "Master disconnected. Waiting for reconnection...\n";
+                    $select->remove($master_socket);
+                    close($master_socket);
+                    $master_socket = undef;
+                    next;
+                }
+                chomp $line;
+
+                if ($line eq 'SHUTDOWN') {
+                    print STDERR "Shutdown requested by master.\n";
+                    shutdown_workers();
+                    print $master_socket "SHUTDOWN_ACK\n";
+                    exit 0;
+
+                } elsif ($line =~ /^SUBMIT_JOB$/) {
+                    # Read job details
+                    my $target = <$socket>; chomp $target if defined $target;
+                    my $dir = <$socket>; chomp $dir if defined $dir;
+                    my $cmd = <$socket>; chomp $cmd if defined $cmd;
+
+                    # Queue the job
+                    push @job_queue, {
+                        target => $target,
+                        dir => $dir,
+                        command => $cmd,
+                    };
+
+                    print STDERR "Queued job: $target\n";
+                    broadcast_observers("QUEUED $target");
+
+                    # Try to dispatch
+                    dispatch_jobs();
+
+                } elsif ($line =~ /^LIST_TASKS$/) {
+                    # Send task list to master
+                    print $master_socket "Queued tasks: " . scalar(@job_queue) . "\n";
+                    for my $job (@job_queue) {
+                        print $master_socket "  [QUEUED] $job->{target}\n";
+                    }
+                    print $master_socket "Running tasks: " . scalar(keys %running_jobs) . "\n";
+                    for my $task_id (sort { $a <=> $b } keys %running_jobs) {
+                        my $job = $running_jobs{$task_id};
+                        my $state = $job->{started} ? 'RUNNING' : 'DISPATCHED';
+                        print $master_socket "  [$state] Task $task_id: $job->{target}\n";
+                    }
+                    print $master_socket "TASKS_END\n";
+
+                } elsif ($line =~ /^KILL_WORKERS$/) {
+                    # Kill all workers
+                    print STDERR "Killing all workers\n";
+                    for my $worker (@workers) {
+                        print $worker "SHUTDOWN\n";
+                        close($worker);
+                        $select->remove($worker);
+                    }
+                    @workers = ();
+                    %worker_status = ();
+                    %running_jobs = ();
+                    print $master_socket "All workers killed\n";
+
+                } elsif ($line =~ /^RESTART_WORKERS (\d+)$/) {
+                    my $new_count = $1;
+                    # Kill existing workers
+                    print STDERR "Restarting workers ($new_count)\n";
+                    for my $worker (@workers) {
+                        print $worker "SHUTDOWN\n";
+                        close($worker);
+                        $select->remove($worker);
+                    }
+                    @workers = ();
+                    %worker_status = ();
+                    %running_jobs = ();
+
+                    # Spawn new workers
+                    my $worker_port = $worker_server->sockport();
+                    for (my $i = 0; $i < $new_count; $i++) {
+                        my $worker_pid = fork();
+                        if ($worker_pid == 0) {
+                            exec($worker_script, "127.0.0.1:$worker_port");
+                            die "Failed to exec worker: $!\n";
+                        }
+                    }
+                    print $master_socket "Restarting $new_count workers...\n";
+
+                } elsif ($line =~ /^LIST_FILES$/) {
+                    # List tracked file modifications
+                    if ($fuse_socket) {
+                        print $master_socket "Tracked file modifications:\n";
+                        for my $path (sort keys %file_modifications) {
+                            my $info = $file_modifications{$path};
+                            my $pids = join(', ', @{$info->{workers}});
+                            print $master_socket "  $path (PIDs: $pids)\n";
+                        }
+                        print $master_socket "FILES_END\n";
+                    } else {
+                        print $master_socket "FUSE monitoring not available\n";
+                        print $master_socket "FILES_END\n";
+                    }
+                }
+
+            } elsif ($socket == $worker_server) {
+                # New worker connecting
+                my $worker = $worker_server->accept();
+                if ($worker) {
+                    $worker->autoflush(1);
+                    $select->add($worker);
+                    push @workers, $worker;
+                    $worker_status{$worker} = {ready => 0, task_id => 0};
+                    print STDERR "Worker connected during runtime\n";
+                }
+
+            } elsif ($socket == $observer_server) {
+                # New observer connecting
+                my $observer = $observer_server->accept();
+                if ($observer) {
+                    $observer->autoflush(1);
+                    $select->add($observer);
+                    push @observers, $observer;
+                    print STDERR "Observer connected\n";
+                    # Send current status
+                    send_status($observer);
+                }
+
+            } elsif (grep { $_ == $socket } @observers) {
+                # Observer sent command
+                my $line = <$socket>;
+                unless (defined $line) {
+                    # Observer disconnected
+                    print STDERR "Observer disconnected\n";
+                    $select->remove($socket);
+                    @observers = grep { $_ != $socket } @observers;
+                    next;
+                }
+                chomp $line;
+
+                if ($line eq 'STATUS') {
+                    send_status($socket);
+                } elsif ($line eq 'QUIT') {
+                    close($socket);
+                    $select->remove($socket);
+                    @observers = grep { $_ != $socket } @observers;
+                }
+
+            } elsif ($fuse_socket && $socket == $fuse_socket) {
+                # FUSE filesystem event
+                my $line = <$socket>;
+                unless (defined $line) {
+                    # FUSE monitor disconnected
+                    print STDERR "FUSE monitor disconnected\n";
+                    $select->remove($fuse_socket);
+                    $fuse_socket = undef;
+                    next;
+                }
+                chomp $line;
+
+                # Parse FUSE event: OP:PID:INODE or INO:INODE:PATH
+                if ($line =~ /^(\w+):(\d+):(.+)$/) {
+                    my ($op, $arg1, $arg2) = ($1, $2, $3);
+
+                    if ($op eq 'INO') {
+                        # Path resolution response: INO:inode:path
+                        my ($inode, $path) = ($arg1, $arg2);
+                        $inode_cache{$inode} = $path;
+                        delete $pending_path_requests{$inode};
+
+                        # Track modification
+                        $file_modifications{$path} ||= {workers => [], last_op => time()};
+                        print STDERR "FUSE: $path (inode $inode)\n";
+
+                    } else {
+                        # File operation: OP:pid:inode
+                        my ($pid, $inode) = ($arg1, $arg2);
+
+                        # Request path if we don't have it cached
+                        if (!exists $inode_cache{$inode} && !exists $pending_path_requests{$inode}) {
+                            print $fuse_socket "PATH:$inode\n";
+                            $pending_path_requests{$inode} = 1;
+                        }
+
+                        # Track operation (path will be resolved asynchronously)
+                        if (exists $inode_cache{$inode}) {
+                            my $path = $inode_cache{$inode};
+                            $file_modifications{$path} ||= {workers => [], last_op => time()};
+                            push @{$file_modifications{$path}{workers}}, $pid
+                                unless grep { $_ == $pid } @{$file_modifications{$path}{workers}};
+                            $file_modifications{$path}{last_op} = time();
+                            print STDERR "FUSE: $op $path by PID $pid\n";
+                        }
+                    }
+                }
+
+            } else {
+                # Worker sent us something
+                my $line = <$socket>;
+                unless (defined $line) {
+                    # Worker disconnected
+                    print STDERR "Worker disconnected\n";
+                    $select->remove($socket);
+                    next;
+                }
+                chomp $line;
+
+                if ($line eq 'READY') {
+                    # Worker is ready for a job
+                    $worker_status{$socket}{ready} = 1;
+                    print STDERR "Worker ready\n";
+                    # Try to dispatch queued jobs
+                    dispatch_jobs();
+
+                } elsif ($line =~ /^TASK_START (\d+)$/) {
+                    my $task_id = $1;
+                    # Mark task as actually running (not just dispatched)
+                    if (exists $running_jobs{$task_id}) {
+                        $running_jobs{$task_id}{started} = 1;
+                    }
+                    print STDERR "Task $task_id started\n";
+
+                } elsif ($line =~ /^OUTPUT (.*)$/) {
+                    my $output = $1;
+                    # Forward to master
+                    print $master_socket "OUTPUT $output\n" if $master_socket;
+
+                } elsif ($line =~ /^ERROR (.*)$/) {
+                    my $error = $1;
+                    # Forward error to master
+                    print $master_socket "ERROR $error\n" if $master_socket;
+
+                } elsif ($line =~ /^WARN (.*)$/) {
+                    my $warning = $1;
+                    # Forward warning to master
+                    print $master_socket "WARN $warning\n" if $master_socket;
+
+                } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
+                    my ($task_id, $exit_code) = ($1, $2);
+                    my $job = $running_jobs{$task_id};
+
+                    # Don't mark ready here - wait for READY message
+                    delete $running_jobs{$task_id};
+
+                    print STDERR "Task $task_id completed (exit=$exit_code)\n";
+
+                    # Report to master
+                    print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n" if $master_socket;
+                }
+            }
+        }
     }
 }
 

@@ -19,6 +19,9 @@ our @EXPORT_OK = qw(
     set_report_mode
     set_dry_run_mode
     set_silent_mode
+    set_jobs
+    start_job_server
+    stop_job_server
     tee_print
     expand_vars
     add_rule
@@ -65,6 +68,11 @@ our $log_fh;
 our $dry_run_mode = 0;
 our $silent_mode = 0;
 
+# Job server state
+our $jobs = 1;  # Number of parallel jobs
+our $job_server_socket;  # Socket to job-master
+our $job_server_pid;  # PID of job-master process
+
 sub set_report_mode {
     my ($enabled, $fh) = @_;
     $report_mode = $enabled;
@@ -79,6 +87,178 @@ sub set_dry_run_mode {
 sub set_silent_mode {
     my ($enabled) = @_;
     $silent_mode = $enabled;
+}
+
+sub set_jobs {
+    my ($num_jobs) = @_;
+    $jobs = $num_jobs || 1;
+}
+
+sub start_job_server {
+    use IO::Socket::INET;
+    use FindBin qw($RealBin);
+
+    return if $jobs <= 1;  # No job server needed for sequential builds
+
+    # Create socket server for job-master to connect to
+    my $server = IO::Socket::INET->new(
+        LocalAddr => '127.0.0.1',
+        LocalPort => 0,  # Let OS assign port
+        Proto     => 'tcp',
+        Listen    => 1,
+        Reuse     => 1,
+    ) or die "Cannot create socket for job-master: $!\n";
+
+    my $port = $server->sockport();
+    warn "Master listening on port $port for job-master\n" if $ENV{SMAK_DEBUG};
+
+    # Spawn job-master process
+    my $jobserver_script = "$RealBin/smak-jobserver";
+    die "Job-master script not found: $jobserver_script\n" unless -x $jobserver_script;
+
+    $job_server_pid = fork();
+    die "Cannot fork job-master: $!\n" unless defined $job_server_pid;
+
+    if ($job_server_pid == 0) {
+        # Child - exec job-master
+        exec($jobserver_script, $jobs, "127.0.0.1:$port");
+        die "Failed to exec job-master: $!\n";
+    }
+
+    warn "Spawned job-master with PID $job_server_pid\n" if $ENV{SMAK_DEBUG};
+
+    # Wait for job-master to connect
+    $server->timeout(10);
+    $job_server_socket = $server->accept();
+    die "Job-master failed to connect\n" unless $job_server_socket;
+
+    $job_server_socket->autoflush(1);
+    close($server);  # Don't need listener anymore
+
+    # Wait for READY signal
+    my $ready = <$job_server_socket>;
+    chomp $ready if defined $ready;
+    die "Job-master didn't send READY\n" unless $ready eq 'JOBSERVER_READY';
+
+    warn "Job-master connected and ready\n" if $ENV{SMAK_DEBUG};
+
+    # Send environment to job-master
+    for my $key (keys %ENV) {
+        next if $key =~ /^(BASH_FUNC_|_)/;
+        my $val = $ENV{$key};
+        $val =~ s/\n/ /g;
+        print $job_server_socket "ENV $key=$val\n";
+    }
+    print $job_server_socket "ENV_END\n";
+
+    # Wait for workers to be ready
+    my $workers_ready = <$job_server_socket>;
+    chomp $workers_ready if defined $workers_ready;
+    die "Job-master workers not ready\n" unless $workers_ready eq 'JOBSERVER_WORKERS_READY';
+
+    warn "Job-master and all workers ready\n" if $ENV{SMAK_DEBUG};
+}
+
+sub stop_job_server {
+    return unless $job_server_socket;
+
+    # Send shutdown to job-master
+    print $job_server_socket "SHUTDOWN\n";
+
+    # Wait for acknowledgment
+    my $ack = <$job_server_socket>;
+    close($job_server_socket);
+    $job_server_socket = undef;
+
+    # Wait for job-master to exit
+    if ($job_server_pid) {
+        waitpid($job_server_pid, 0);
+        $job_server_pid = undef;
+    }
+}
+
+sub submit_job {
+    my ($target, $command, $dir) = @_;
+
+    # For sequential builds, execute immediately
+    if ($jobs <= 1) {
+        execute_command_sequential($target, $command, $dir);
+        return;
+    }
+
+    # For parallel builds, send to job-master and wait for completion
+    $dir ||= '.';
+
+    warn "Submitting job: $target\n" if $ENV{SMAK_DEBUG};
+
+    # Send job to job-master
+    print $job_server_socket "SUBMIT_JOB\n";
+    print $job_server_socket "$target\n";
+    print $job_server_socket "$dir\n";
+    print $job_server_socket "$command\n";
+
+    # Wait for completion (blocking)
+    while (my $line = <$job_server_socket>) {
+        chomp $line;
+
+        if ($line =~ /^OUTPUT (.*)$/) {
+            # Forward output from worker
+            my $output = $1;
+            tee_print("$output\n") unless $silent_mode;
+
+        } elsif ($line =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+            my ($completed_target, $exit_code) = ($1, $2);
+
+            if ($exit_code != 0) {
+                my $err_msg = "smak: *** [$completed_target] Error $exit_code\n";
+                tee_print($err_msg);
+                stop_job_server();
+                die $err_msg;
+            }
+
+            warn "Job completed: $completed_target\n" if $ENV{SMAK_DEBUG};
+            return;  # Job done
+        }
+    }
+
+    # If we get here, job-master disconnected
+    die "Job-master disconnected unexpectedly\n";
+}
+
+sub execute_command_sequential {
+    my ($target, $command, $dir) = @_;
+
+    my $old_dir;
+    if ($dir && $dir ne '.') {
+        use Cwd 'getcwd';
+        $old_dir = getcwd();
+        chdir($dir) or die "Cannot chdir to $dir: $!\n";
+    }
+
+    # Echo command unless silent
+    unless ($silent_mode) {
+        tee_print("$command\n");
+    }
+
+    # Execute command
+    my $exit_code;
+    if ($report_mode) {
+        my $output = `$command 2>&1`;
+        $exit_code = $? >> 8;
+        tee_print($output) if $output;
+    } else {
+        my $status = system($command);
+        $exit_code = $status >> 8;
+    }
+
+    if ($exit_code != 0) {
+        my $err_msg = "smak: *** [$target] Error $exit_code\n";
+        tee_print($err_msg);
+        chdir($old_dir) if $old_dir;
+        die $err_msg;
+    }
+
+    chdir($old_dir) if $old_dir;
 }
 
 sub set_cmd_var {
@@ -1387,7 +1567,7 @@ sub build_target {
         build_target($dep, $visited, $depth + 1);
     }
 
-    # Execute rule if it exists
+    # Execute rule if it exists (submit_job is blocking, so no need to wait)
     if ($rule && $rule =~ /\S/) {
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($rule);
@@ -1463,29 +1643,10 @@ sub build_target {
                 next;
             }
 
-            # Echo command unless silent (like make)
-            # Silent mode (-s) suppresses all command echoing
-            unless ($silent || $silent_mode) {
-                tee_print("$cmd_line\n");
-            }
-
-            # Execute the command (capture output if in report mode)
-            my $exit_code;
-            if ($report_mode) {
-                # Capture both stdout and stderr
-                my $output = `$cmd_line 2>&1`;
-                $exit_code = $? >> 8;  # Extract actual exit code from wait status
-                tee_print($output) if $output;
-            } else {
-                my $status = system($cmd_line);
-                $exit_code = $status >> 8;  # Extract actual exit code from wait status
-            }
-
-            if ($exit_code != 0) {
-                my $err_msg = "smak: *** [$target] Error $exit_code\n";
-                tee_print($err_msg);
-                die $err_msg;
-            }
+            # Use job system for parallel execution
+            use Cwd 'getcwd';
+            my $cwd = getcwd();
+            submit_job($target, $cmd_line, $cwd);
         }
     }
 }

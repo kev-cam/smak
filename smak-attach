@@ -3,9 +3,57 @@ use strict;
 use warnings;
 use IO::Socket::INET;
 use IO::Select;
+use Cwd 'abs_path';
+
+# Get process info from /proc
+sub get_process_info {
+    my ($pid) = @_;
+    my $info = {};
+
+    # Get command line
+    if (open(my $fh, '<', "/proc/$pid/cmdline")) {
+        my $cmdline = <$fh>;
+        close($fh);
+        if ($cmdline) {
+            # Replace null bytes with spaces
+            $cmdline =~ s/\0/ /g;
+            $cmdline =~ s/\s+$//;  # Trim trailing whitespace
+            $info->{cmdline} = $cmdline;
+        }
+    }
+
+    # Get working directory
+    my $cwd_link = "/proc/$pid/cwd";
+    if (-l $cwd_link) {
+        my $cwd = readlink($cwd_link);
+        $info->{cwd} = $cwd if $cwd;
+    }
+
+    return $info;
+}
 
 # Find running job-master instances
 my @port_files = glob("/tmp/smak-jobserver-*.port");
+
+# Filter out stale port files (process not running or not a job-master)
+my @valid_files;
+for my $file (@port_files) {
+    my ($pid) = $file =~ /smak-jobserver-(\d+)\.port/;
+    if ($pid && -d "/proc/$pid") {
+        # Check if it's actually a smak-jobserver process
+        my $info = get_process_info($pid);
+        if ($info->{cmdline} && $info->{cmdline} =~ /smak-jobserver/) {
+            push @valid_files, $file;
+        } else {
+            # PID exists but is not a job-master (PID reused)
+            unlink $file;
+        }
+    } else {
+        # Process not running
+        unlink $file;
+    }
+}
+@port_files = @valid_files;
 
 unless (@port_files) {
     die "No running smak job-master instances found.\n";
@@ -16,7 +64,21 @@ if (@port_files > 1) {
     for (my $i = 0; $i < @port_files; $i++) {
         my $file = $port_files[$i];
         my ($pid) = $file =~ /smak-jobserver-(\d+)\.port/;
-        print "  [$i] PID $pid\n";
+        my $info = get_process_info($pid);
+
+        print "  [$i] PID $pid";
+        if ($info->{cwd}) {
+            print " - $info->{cwd}";
+        }
+        print "\n";
+        if ($info->{cmdline}) {
+            # Extract just the job count and connection info
+            my $cmd = $info->{cmdline};
+            if ($cmd =~ /smak-jobserver\s+(\d+)\s+([\d.:]+)/) {
+                my ($jobs, $conn) = ($1, $2);
+                print "      Jobs: $jobs, Connection: $conn\n";
+            }
+        }
     }
     print "Select instance (0-" . ($#port_files) . "): ";
     my $choice = <STDIN>;

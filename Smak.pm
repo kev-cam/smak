@@ -29,6 +29,10 @@ our @EXPORT_OK = qw(
     modify_deps
     delete_rule
     save_modifications
+    list_targets
+    list_variables
+    get_variable
+    show_dependencies
 );
 
 our %EXPORT_TAGS = (
@@ -2303,6 +2307,180 @@ sub print_rules {
             my $value = format_output($MV{$var});
             print "$var = $value\n";
         }
+    }
+}
+
+# List all targets, optionally filtered by pattern
+sub list_targets {
+    my ($pattern) = @_;
+    $pattern ||= '';
+
+    my %targets;
+
+    # Collect from fixed rules and deps
+    # Key format is: base\ttarget
+    for my $key (keys %fixed_rule) {
+        my ($base, $target) = split(/\t/, $key);
+        $targets{$target} = 1;
+    }
+    for my $key (keys %fixed_deps) {
+        my ($base, $target) = split(/\t/, $key);
+        $targets{$target} = 1;
+    }
+
+    # Collect from pattern rules and deps
+    for my $key (keys %pattern_rule) {
+        my ($base, $target) = split(/\t/, $key);
+        $targets{$target} = 1;
+    }
+    for my $key (keys %pattern_deps) {
+        my ($base, $target) = split(/\t/, $key);
+        $targets{$target} = 1;
+    }
+
+    # Collect from pseudo rules and deps
+    for my $key (keys %pseudo_rule) {
+        my ($base, $target) = split(/\t/, $key);
+        $targets{$target} = 1;
+    }
+    for my $key (keys %pseudo_deps) {
+        my ($base, $target) = split(/\t/, $key);
+        $targets{$target} = 1;
+    }
+
+    # Filter by pattern if provided
+    my @result;
+    if ($pattern) {
+        @result = grep { /$pattern/ } keys %targets;
+    } else {
+        @result = keys %targets;
+    }
+
+    return @result;
+}
+
+# List all variables, optionally filtered by pattern
+sub list_variables {
+    my ($pattern) = @_;
+    $pattern ||= '';
+
+    my @result;
+    if ($pattern) {
+        @result = grep { /$pattern/ } keys %MV;
+    } else {
+        @result = keys %MV;
+    }
+
+    return @result;
+}
+
+# Get variable value (expanded)
+sub get_variable {
+    my ($var) = @_;
+
+    # Check command-line overrides first
+    return expand_vars($cmd_vars{$var}) if exists $cmd_vars{$var};
+
+    # Check makefile variables
+    return expand_vars($MV{$var}) if exists $MV{$var};
+
+    # Check environment
+    return $ENV{$var} if exists $ENV{$var};
+
+    return '';
+}
+
+# Show dependencies for a target
+sub show_dependencies {
+    my ($target) = @_;
+
+    # Try different rule types
+    my $found = 0;
+
+    # Check fixed rules
+    # Key format is: base\ttarget
+    for my $key (keys %fixed_deps) {
+        my ($base, $t) = split(/\t/, $key);
+        if ($t eq $target) {
+            print "Target: $target (fixed rule)\n";
+            print "Base directory: $base\n";
+            my @deps = @{$fixed_deps{$key} || []};
+            if (@deps) {
+                print "Dependencies:\n";
+                foreach my $dep (@deps) {
+                    print "  $dep\n";
+                }
+            } else {
+                print "No dependencies\n";
+            }
+            if (exists $fixed_rule{$key}) {
+                print "Rule:\n";
+                my @lines = split(/\n/, $fixed_rule{$key});
+                foreach my $line (@lines) {
+                    print "  $line\n";
+                }
+            }
+            $found = 1;
+            print "\n";
+        }
+    }
+
+    # Check pattern rules
+    for my $key (keys %pattern_deps) {
+        my ($base, $t) = split(/\t/, $key);
+        if ($t eq $target) {
+            print "Target: $target (pattern rule)\n";
+            print "Base directory: $base\n";
+            my @deps = @{$pattern_deps{$key} || []};
+            if (@deps) {
+                print "Dependencies:\n";
+                foreach my $dep (@deps) {
+                    print "  $dep\n";
+                }
+            } else {
+                print "No dependencies\n";
+            }
+            if (exists $pattern_rule{$key}) {
+                print "Rule:\n";
+                my @lines = split(/\n/, $pattern_rule{$key});
+                foreach my $line (@lines) {
+                    print "  $line\n";
+                }
+            }
+            $found = 1;
+            print "\n";
+        }
+    }
+
+    # Check pseudo rules
+    for my $key (keys %pseudo_deps) {
+        my ($base, $t) = split(/\t/, $key);
+        if ($t eq $target) {
+            print "Target: $target (phony/pseudo)\n";
+            print "Base directory: $base\n";
+            my @deps = @{$pseudo_deps{$key} || []};
+            if (@deps) {
+                print "Dependencies:\n";
+                foreach my $dep (@deps) {
+                    print "  $dep\n";
+                }
+            } else {
+                print "No dependencies\n";
+            }
+            if (exists $pseudo_rule{$key}) {
+                print "Rule:\n";
+                my @lines = split(/\n/, $pseudo_rule{$key});
+                foreach my $line (@lines) {
+                    print "  $line\n";
+                }
+            }
+            $found = 1;
+            print "\n";
+        }
+    }
+
+    unless ($found) {
+        print "No rule found for target: $target\n";
     }
 }
 

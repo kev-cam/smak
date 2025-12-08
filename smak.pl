@@ -28,6 +28,7 @@ my $dry_run = 0;
 my $silent = 0;
 my $yes = 0;  # Auto-answer yes to prompts
 my $jobs = 1;  # Number of parallel jobs (default: 1 = sequential)
+my $cli = 0;  # CLI mode (interactive shell)
 
 # Parse environment variable options first
 if (defined $ENV{USR_SMAK_OPT}) {
@@ -47,6 +48,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
         's|silent|quiet' => \$silent,
         'yes' => \$yes,
         'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
+        'cli' => \$cli,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -63,6 +65,7 @@ GetOptions(
     's|silent|quiet' => \$silent,
     'yes' => \$yes,
     'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
+    'cli' => \$cli,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -241,6 +244,7 @@ Options:
   --dry-run, --recon          Same as -n
   -s, --silent, --quiet       Don't print commands being executed
   -j, --jobs [N]              Run N jobs in parallel (default: 1, -j = CPU count)
+  -cli                        Enter CLI mode (interactive shell for building)
   -h, --help                  Display this help message
   --yes                       Auto-answer yes to prompts (for -Kreport)
   -cmake                      Run cmake with remaining arguments (passthrough)
@@ -261,6 +265,133 @@ Examples:
   smak -Kreport --yes all     Build with logging, auto-commit bug report
 
 HELP
+}
+
+sub run_cli {
+    use Term::ReadLine;
+
+    print "Smak CLI mode - type 'help' for commands\n";
+    print "Makefile: $makefile\n";
+    print "Parallel jobs: $jobs\n\n";
+
+    my $term = Term::ReadLine->new('smak');
+
+    while (defined(my $line = $term->readline('smak> '))) {
+        chomp $line;
+        $line =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+        next if $line eq '';  # Skip empty lines
+
+        $term->addhistory($line) if $line =~ /\S/;
+
+        my @words = split(/\s+/, $line);
+        my $cmd = shift @words;
+
+        if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') {
+            print "Exiting...\n";
+            last;
+
+        } elsif ($cmd eq 'help' || $cmd eq 'h' || $cmd eq '?') {
+            print <<'HELP';
+Available commands:
+  build <target>      Build the specified target
+  list [pattern]      List all targets (optionally matching pattern)
+  status              Show job server status (if parallel builds enabled)
+  vars [pattern]      Show all variables (optionally matching pattern)
+  deps <target>       Show dependencies for target
+  help, h, ?          Show this help
+  quit, exit, q       Exit CLI
+
+Examples:
+  build all           Build the 'all' target
+  build clean         Build the 'clean' target
+  list task           List targets matching 'task'
+  deps foo.o          Show dependencies for foo.o
+HELP
+
+        } elsif ($cmd eq 'build' || $cmd eq 'b') {
+            if (@words == 0) {
+                # Build default target
+                my $default_target = get_default_target();
+                if (defined $default_target) {
+                    print "Building default target: $default_target\n";
+                    eval { build_target($default_target); };
+                    if ($@) {
+                        print "Build failed: $@\n";
+                    } else {
+                        print "Build succeeded.\n";
+                    }
+                } else {
+                    print "No default target found.\n";
+                }
+            } else {
+                # Build specified targets
+                foreach my $target (@words) {
+                    print "Building target: $target\n";
+                    eval { build_target($target); };
+                    if ($@) {
+                        print "Build failed: $@\n";
+                        last;
+                    } else {
+                        print "Build succeeded.\n";
+                    }
+                }
+            }
+
+        } elsif ($cmd eq 'list' || $cmd eq 'ls' || $cmd eq 'l') {
+            my $pattern = @words > 0 ? $words[0] : '';
+            my @targets = list_targets($pattern);
+
+            if (@targets == 0) {
+                print "No targets found.\n";
+            } else {
+                print "Targets:\n";
+                foreach my $target (sort @targets) {
+                    print "  $target\n";
+                }
+                print "\nTotal: " . scalar(@targets) . " targets\n";
+            }
+
+        } elsif ($cmd eq 'status' || $cmd eq 'st') {
+            if ($jobs > 1 && defined $Smak::job_server_socket) {
+                # Request status from job-master
+                print "Job server running with $jobs workers\n";
+                # Could send STATUS request to job-master here
+                print "Use smak-attach to monitor active builds\n";
+            } elsif ($jobs > 1) {
+                print "Job server configured for $jobs jobs but not currently active\n";
+            } else {
+                print "Sequential mode (no job server)\n";
+            }
+
+        } elsif ($cmd eq 'vars' || $cmd eq 'v') {
+            my $pattern = @words > 0 ? $words[0] : '';
+            my @vars = list_variables($pattern);
+
+            if (@vars == 0) {
+                print "No variables found.\n";
+            } else {
+                print "Variables:\n";
+                foreach my $var (sort @vars) {
+                    my $value = get_variable($var);
+                    print "  $var = $value\n";
+                }
+                print "\nTotal: " . scalar(@vars) . " variables\n";
+            }
+
+        } elsif ($cmd eq 'deps' || $cmd eq 'd') {
+            if (@words == 0) {
+                print "Usage: deps <target>\n";
+            } else {
+                my $target = $words[0];
+                show_dependencies($target);
+            }
+
+        } else {
+            print "Unknown command: $cmd\n";
+            print "Type 'help' for available commands.\n";
+        }
+    }
 }
 
 # Set dry-run mode if requested
@@ -320,6 +451,13 @@ unless ($debug || $dry_run) {
 # Execute script file if specified
 if ($script_file) {
     execute_script($script_file);
+}
+
+# If CLI mode, enter interactive loop
+if ($cli) {
+    run_cli();
+    stop_job_server();
+    exit 0;
 }
 
 # If not in debug mode, build targets

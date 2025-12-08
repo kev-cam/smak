@@ -1,0 +1,86 @@
+=== SMAK BUILD REPORT ===
+Timestamp: 20251208-010116
+Makefile: Makefile
+Report directory: /mnt/y/smak/bugs/xyce-build-20251208-010116
+==================================================
+
+... all (the default if no target is provided)
+... clean
+... depend
+... edit_cache
+... install
+... install/local
+... install/strip
+... list_install_components
+... package
+... package_source
+... rebuild_cache
+... TimeStampHeader
+... ADC_DACRunTest
+... DeviceInterfaceTest
+... TestGH19
+... TestIssue29
+... Xyce
+... XyceLib
+... testBlockLinearSystems
+... testFFTInterface
+... testGenCoup
+... twoLevelNewtonLinearDC
+... twoLevelNewtonLinearTran
+... xycecinterface
+cmake -S/mnt/y/Xyce-8/xyce -B/mnt/y/Xyce-8/xyce-build --check-build-system CMakeFiles/Makefile.cmake 0
+cmake -E cmake_progress_start /mnt/y/Xyce-8/xyce-build/CMakeFiles /mnt/y/Xyce-8/xyce-build//CMakeFiles/progress.marks
+/home/dkc/bin/smak  -f CMakeFiles/Makefile2 all
+/home/dkc/bin/smak  -f src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/build.make src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/depend
+Warning: included file not found: src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/compiler_depend.make
+Warning: included file not found: src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/progress.make
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src/UtilityPKG /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src/UtilityPKG /mnt/y/Xyce-8/xyce-build/src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/DependInfo.cmake "--color="
+/home/dkc/bin/smak  -f src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/build.make src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/build
+Warning: included file not found: src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/compiler_depend.make
+Warning: included file not found: src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/src/UtilityPKG/CMakeFiles/TimeStampHeader.dir/progress.make
+[  0%] Updating version string Git SHA and time stamp
+cd /mnt/y/Xyce-8/xyce-build/src/UtilityPKG && /usr/bin/cmake -D Git_FOUND=TRUE -D GIT_EXECUTABLE=/usr/bin/git -D GIVEN_SOURCE_DIR=/mnt/y/Xyce-8/xyce -P /mnt/y/Xyce-8/xyce/src/UtilityPKG/BuildTimeStamp.cmake
+[  0%] Built target TimeStampHeader
+/home/dkc/bin/smak  -f src/CMakeFiles/XyceLib.dir/build.make src/CMakeFiles/XyceLib.dir/depend
+Warning: included file not found: src/CMakeFiles/XyceLib.dir/src/CMakeFiles/XyceLib.dir/depend.make
+Warning: included file not found: src/CMakeFiles/XyceLib.dir/src/CMakeFiles/XyceLib.dir/compiler_depend.make
+Warning: included file not found: src/CMakeFiles/XyceLib.dir/src/CMakeFiles/XyceLib.dir/progress.make
+Warning: included file not found: src/CMakeFiles/XyceLib.dir/src/CMakeFiles/XyceLib.dir/flags.make
+[  0%] [FLEX][XyceReactionLexer] Building scanner with flex 2.6.4
+cd /mnt/y/Xyce-8/xyce-build/src && /usr/bin/flex -+ -o/mnt/y/Xyce-8/xyce-build/src/DeviceModelPKG/Core/N_DEV_ReactionLexer.cxx /mnt/y/Xyce-8/xyce/src/DeviceModelPKG/Core/N_DEV_ReactionLexer.l
+[  0%] [BISON][XyceReactionParser] Building parser with bison 3.8.2
+cd /mnt/y/Xyce-8/xyce-build/src && /usr/bin/bison -d -o /mnt/y/Xyce-8/xyce-build/src/DeviceModelPKG/Core/N_DEV_ReactionParser.cxx /mnt/y/Xyce-8/xyce/src/DeviceModelPKG/Core/N_DEV_ReactionParser.yxx
+[  0%] [FLEX][XyceExpressionLexer] Building scanner with flex 2.6.4
+cd /mnt/y/Xyce-8/xyce-build/src && /usr/bin/flex -i -+ --full --prefix=exp -o/mnt/y/Xyce-8/xyce-build/src/UtilityPKG/ExpressionSrc/ExpressionLexer.cxx /mnt/y/Xyce-8/xyce/src/UtilityPKG/ExpressionSrc/ExpressionLexer.l
+[  0%] [BISON][XyceExpressionParser] Building parser with bison 3.8.2
+cd /mnt/y/Xyce-8/xyce-build/src && /usr/bin/bison -d -o /mnt/y/Xyce-8/xyce-build/src/UtilityPKG/ExpressionSrc/ExpressionParser.cxx /mnt/y/Xyce-8/xyce/src/UtilityPKG/ExpressionSrc/ExpressionParser.yxx
+cd /mnt/y/Xyce-8/xyce-build && /usr/bin/cmake -E cmake_depends "Unix Makefiles" /mnt/y/Xyce-8/xyce /mnt/y/Xyce-8/xyce/src /mnt/y/Xyce-8/xyce-build /mnt/y/Xyce-8/xyce-build/src /mnt/y/Xyce-8/xyce-build/src/CMakeFiles/XyceLib.dir/DependInfo.cmake "--color="
+/home/dkc/bin/smak  -f src/CMakeFiles/XyceLib.dir/build.make src/CMakeFiles/XyceLib.dir/build
+Warning: included file not found: src/CMakeFiles/XyceLib.dir/src/CMakeFiles/XyceLib.dir/depend.make
+Warning: included file not found: src/CMakeFiles/XyceLib.dir/src/CMakeFiles/XyceLib.dir/compiler_depend.make
+Warning: included file not found: src/CMakeFiles/XyceLib.dir/src/CMakeFiles/XyceLib.dir/progress.make
+Warning: included file not found: src/CMakeFiles/XyceLib.dir/src/CMakeFiles/XyceLib.dir/flags.make
+[  0%] [BISON][XyceExpressionParser] Building parser with bison 3.8.2
+cd /mnt/y/Xyce-8/xyce-build/src && /usr/bin/bison -d -o /mnt/y/Xyce-8/xyce-build/src/UtilityPKG/ExpressionSrc/ExpressionParser.cxx /mnt/y/Xyce-8/xyce/src/UtilityPKG/ExpressionSrc/ExpressionParser.yxx
+[  0%] Building CXX object src/CMakeFiles/XyceLib.dir/UtilityPKG/ExpressionSrc/ExpressionParser.cxx.o
+cd /mnt/y/Xyce-8/xyce-build/src && /usr/bin/c++    -MD -MT src/CMakeFiles/XyceLib.dir/UtilityPKG/ExpressionSrc/ExpressionParser.cxx.o -MF CMakeFiles/XyceLib.dir/UtilityPKG/ExpressionSrc/ExpressionParser.cxx.o.d -o CMakeFiles/XyceLib.dir/UtilityPKG/ExpressionSrc/ExpressionParser.cxx.o -c /mnt/y/Xyce-8/xyce-build/src/UtilityPKG/ExpressionSrc/ExpressionParser.cxx
+/mnt/y/Xyce-8/xyce/src/UtilityPKG/ExpressionSrc/ExpressionParser.yxx:63:10: fatal error: ExpressionType.h: No such file or directory
+   63 | #include "ExpressionType.h"
+      |          ^~~~~~~~~~~~~~~~~~
+compilation terminated.
+smak: *** [src/CMakeFiles/XyceLib.dir/UtilityPKG/ExpressionSrc/ExpressionParser.cxx.o] Error 1
+smak: *** [src/CMakeFiles/XyceLib.dir/UtilityPKG/ExpressionSrc/ExpressionParser.cxx.o] Error 1
+smak: *** [src/CMakeFiles/XyceLib.dir/all] Error 1
+smak: *** [src/CMakeFiles/XyceLib.dir/all] Error 1
+smak: *** [all] Error 1
+
+==================================================
+Running dry-run comparison (smak -n vs make)...
+==================================================
+Dry-run outputs saved:
+  smak -n: /mnt/y/smak/bugs/xyce-build-20251208-010116/smak-dryrun.txt
+  make -n: /mnt/y/smak/bugs/xyce-build-20251208-010116/make-dryrun.txt
+
+=== BUILD REPORT COMPLETE ===
+Log saved to: /mnt/y/smak/bugs/xyce-build-20251208-010116/build.log
+Dry-run comparison: smak-dryrun.txt vs make-dryrun.txt

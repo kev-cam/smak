@@ -249,20 +249,31 @@ HELP
                 print $socket ".\n";
                 print $socket "cd . && make $target\n";
 
-                # Wait for completion
-                while (my $response = <$socket>) {
-                    chomp $response;
-                    if ($response =~ /^OUTPUT (.*)$/) {
-                        print "$1\n";
-                    } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
-                        my ($completed_target, $exit_code) = ($1, $2);
-                        if ($exit_code == 0) {
-                            print "Build succeeded: $completed_target\n";
-                        } else {
-                            print "Build failed: $completed_target (exit code $exit_code)\n";
+                # Wait for completion with interruptible reads
+                my $select = IO::Select->new($socket);
+                my $job_done = 0;
+                while (!$exit_requested && !$job_done) {
+                    if ($select->can_read(0.1)) {
+                        my $response = <$socket>;
+                        last unless defined $response;
+                        chomp $response;
+                        if ($response =~ /^OUTPUT (.*)$/) {
+                            print "$1\n";
+                        } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+                            my ($completed_target, $exit_code) = ($1, $2);
+                            if ($exit_code == 0) {
+                                print "Build succeeded: $completed_target\n";
+                            } else {
+                                print "Build failed: $completed_target (exit code $exit_code)\n";
+                            }
+                            $job_done = 1;
                         }
-                        last;
                     }
+                }
+
+                if ($exit_requested) {
+                    print "\nBuild interrupted.\n";
+                    last;
                 }
             }
         }

@@ -301,7 +301,7 @@ if (!$debug) {
     # If in report mode, run dry-run comparison between smak and make
     if ($report) {
         tee_print("\n" . "=" x 50 . "\n");
-        tee_print("Running dry-run comparison (smak -n vs make -n)...\n");
+        tee_print("Running dry-run comparison (smak -n vs make)...\n");
         tee_print("=" x 50 . "\n");
 
         # Build target list for commands
@@ -317,14 +317,67 @@ if (!$debug) {
             close($smak_fh);
         }
 
-        # Run make -n
+        # Prompt for make comparison type
+        my $make_type = 'simple';
+        if (!$yes) {
+            print "\nSelect make comparison type:\n";
+            print "  1) make -n only (fast dry-run)\n";
+            print "  2) make clean ; make -n ; make --trace (complete build log)\n";
+            print "Choice [1]: ";
+            my $choice = <STDIN>;
+            chomp $choice if defined $choice;
+            $make_type = 'full' if $choice eq '2';
+        }
+
+        # Run make comparison based on user choice
         my $make_dryrun_file = "$report_dir/make-dryrun.txt";
-        my $make_cmd = "make -n -f '$makefile' $target_args 2>&1";
-        my $make_result = `$make_cmd`;
-        open(my $make_fh, '>', $make_dryrun_file) or warn "Cannot write to $make_dryrun_file: $!\n";
-        if ($make_fh) {
-            print $make_fh $make_result;
-            close($make_fh);
+        if ($make_type eq 'full') {
+            tee_print("Running full build: make clean ; make -n ; make --trace\n");
+
+            # Run make clean
+            tee_print("Running make clean...\n");
+            my $clean_result = `make clean -f '$makefile' 2>&1`;
+            my $clean_file = "$report_dir/make-clean.txt";
+            open(my $clean_fh, '>', $clean_file) or warn "Cannot write to $clean_file: $!\n";
+            if ($clean_fh) {
+                print $clean_fh $clean_result;
+                close($clean_fh);
+            }
+
+            # Run make -n
+            tee_print("Running make -n...\n");
+            my $make_cmd = "make -n -f '$makefile' $target_args 2>&1";
+            my $make_result = `$make_cmd`;
+            open(my $make_fh, '>', $make_dryrun_file) or warn "Cannot write to $make_dryrun_file: $!\n";
+            if ($make_fh) {
+                print $make_fh $make_result;
+                close($make_fh);
+            }
+
+            # Run make --trace
+            tee_print("Running make --trace (this will actually build)...\n");
+            my $trace_file = "$report_dir/make-trace.txt";
+            my $trace_cmd = "make --trace -f '$makefile' $target_args 2>&1";
+            my $trace_result = `$trace_cmd`;
+            open(my $trace_fh, '>', $trace_file) or warn "Cannot write to $trace_file: $!\n";
+            if ($trace_fh) {
+                print $trace_fh $trace_result;
+                close($trace_fh);
+            }
+
+            tee_print("Full build outputs saved:\n");
+            tee_print("  make clean: $clean_file\n");
+            tee_print("  make -n: $make_dryrun_file\n");
+            tee_print("  make --trace: $trace_file\n");
+        } else {
+            # Simple dry-run only
+            my $make_cmd = "make -n -f '$makefile' $target_args 2>&1";
+            my $make_result = `$make_cmd`;
+            open(my $make_fh, '>', $make_dryrun_file) or warn "Cannot write to $make_dryrun_file: $!\n";
+            if ($make_fh) {
+                print $make_fh $make_result;
+                close($make_fh);
+            }
         }
 
         tee_print("Dry-run outputs saved:\n");

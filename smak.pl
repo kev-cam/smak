@@ -157,6 +157,35 @@ if ($report) {
         push @files_to_tar, @found;
     }
 
+    # Parse Makefile(s) for include directives and add those files
+    my @makefiles_to_scan = grep { -f $_ } @files_to_tar;
+    my %processed_includes;
+    while (@makefiles_to_scan) {
+        my $mf = shift @makefiles_to_scan;
+        next if $processed_includes{$mf}++;
+
+        if (open(my $mf_fh, '<', $mf)) {
+            while (my $line = <$mf_fh>) {
+                # Match include and -include directives
+                if ($line =~ /^-?include\s+(.+)/) {
+                    my $inc = $1;
+                    $inc =~ s/#.*$//;  # Remove comments
+                    $inc =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+                    # Expand $(srcdir) and other simple variables
+                    $inc =~ s/\$\(srcdir\)/./g;
+                    $inc =~ s/\$\{srcdir\}/./g;
+
+                    if (-f $inc) {
+                        push @files_to_tar, $inc;
+                        push @makefiles_to_scan, $inc;  # Recursively scan included files
+                    }
+                }
+            }
+            close($mf_fh);
+        }
+    }
+
     # Remove duplicates and non-existent files
     my %seen;
     @files_to_tar = grep { -f $_ && !$seen{$_}++ } @files_to_tar;

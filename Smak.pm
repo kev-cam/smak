@@ -19,6 +19,9 @@ our @EXPORT_OK = qw(
     set_report_mode
     set_dry_run_mode
     set_silent_mode
+    set_jobs
+    start_job_server
+    stop_job_server
     tee_print
     expand_vars
     add_rule
@@ -65,6 +68,16 @@ our $log_fh;
 our $dry_run_mode = 0;
 our $silent_mode = 0;
 
+# Job server state
+our $jobs = 1;  # Number of parallel jobs
+our $job_server;  # Socket server for workers
+our $job_port;  # Port the server is listening on
+our @workers;  # List of worker sockets
+our %worker_status;  # Track which workers are busy: socket => {busy => 0/1, task_id => N}
+our @job_queue;  # Queue of pending jobs: [{target, command, dir}, ...]
+our %running_jobs;  # Track running jobs: task_id => {target, worker_socket, start_time}
+our $next_task_id = 1;
+
 sub set_report_mode {
     my ($enabled, $fh) = @_;
     $report_mode = $enabled;
@@ -79,6 +92,258 @@ sub set_dry_run_mode {
 sub set_silent_mode {
     my ($enabled) = @_;
     $silent_mode = $enabled;
+}
+
+sub set_jobs {
+    my ($num_jobs) = @_;
+    $jobs = $num_jobs || 1;
+}
+
+sub start_job_server {
+    use IO::Socket::INET;
+    use IO::Select;
+    use FindBin qw($RealBin);
+
+    return if $jobs <= 1;  # No job server needed for sequential builds
+
+    # Create socket server on random available port
+    $job_server = IO::Socket::INET->new(
+        LocalAddr => '127.0.0.1',
+        LocalPort => 0,  # Let OS assign port
+        Proto     => 'tcp',
+        Listen    => $jobs,
+        Reuse     => 1,
+    ) or die "Cannot create job server socket: $!\n";
+
+    $job_port = $job_server->sockport();
+    warn "Job server started on port $job_port\n" if $ENV{SMAK_DEBUG};
+
+    # Spawn worker processes
+    my $worker_script = "$RealBin/smak-worker";
+    die "Worker script not found: $worker_script\n" unless -x $worker_script;
+
+    for (my $i = 0; $i < $jobs; $i++) {
+        my $pid = fork();
+        die "Cannot fork worker: $!\n" unless defined $pid;
+
+        if ($pid == 0) {
+            # Child process - exec worker
+            exec($worker_script, "127.0.0.1:$job_port");
+            die "Failed to exec worker: $!\n";
+        }
+        # Parent continues
+        warn "Spawned worker $i with PID $pid\n" if $ENV{SMAK_DEBUG};
+    }
+
+    # Accept worker connections
+    $job_server->blocking(0);  # Non-blocking accepts
+    my $select = IO::Select->new($job_server);
+    my $workers_connected = 0;
+    my $timeout = 10;  # 10 second timeout
+    my $start_time = time();
+
+    while ($workers_connected < $jobs) {
+        if (time() - $start_time > $timeout) {
+            die "Timeout waiting for workers to connect\n";
+        }
+
+        if ($select->can_read(0.1)) {
+            my $worker = $job_server->accept();
+            if ($worker) {
+                $worker->autoflush(1);
+
+                # Wait for READY signal
+                my $ready_line = <$worker>;
+                chomp $ready_line if defined $ready_line;
+                if ($ready_line eq 'READY') {
+                    push @workers, $worker;
+                    $worker_status{$worker} = {busy => 0, task_id => 0};
+                    $workers_connected++;
+                    warn "Worker connected ($workers_connected/$jobs)\n" if $ENV{SMAK_DEBUG};
+
+                    # Send environment to worker
+                    print $worker "ENV_START\n";
+                    for my $key (keys %ENV) {
+                        # Skip large or problematic environment variables
+                        next if $key =~ /^(BASH_FUNC_|_)/;
+                        my $val = $ENV{$key};
+                        $val =~ s/\n/ /g;  # Remove newlines
+                        print $worker "ENV $key=$val\n";
+                    }
+                    print $worker "ENV_END\n";
+                } else {
+                    warn "Worker sent unexpected ready signal: $ready_line\n";
+                }
+            }
+        }
+    }
+
+    warn "All $jobs workers ready\n" if $ENV{SMAK_DEBUG};
+}
+
+sub stop_job_server {
+    return unless $job_server;
+
+    # Send shutdown signal to all workers
+    for my $worker (@workers) {
+        print $worker "SHUTDOWN\n";
+        close($worker);
+    }
+
+    close($job_server);
+    $job_server = undef;
+    @workers = ();
+    %worker_status = ();
+
+    # Wait for worker processes to exit
+    while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
+        # Reap zombie workers
+    }
+}
+
+sub submit_job {
+    my ($target, $command, $dir) = @_;
+
+    # For sequential builds, execute immediately
+    if ($jobs <= 1) {
+        execute_command_sequential($target, $command, $dir);
+        return;
+    }
+
+    # For parallel builds, add to queue
+    push @job_queue, {
+        target => $target,
+        command => $command,
+        dir => $dir,
+    };
+
+    # Try to dispatch queued jobs
+    dispatch_jobs();
+}
+
+sub dispatch_jobs {
+    use IO::Select;
+
+    return unless $job_server;  # Not in parallel mode
+
+    while (@job_queue) {
+        # Find an available worker
+        my $available_worker;
+        for my $worker (@workers) {
+            if (!$worker_status{$worker}{busy}) {
+                $available_worker = $worker;
+                last;
+            }
+        }
+
+        last unless $available_worker;  # No workers available
+
+        # Get next job from queue
+        my $job = shift @job_queue;
+        my $task_id = $next_task_id++;
+
+        # Send job to worker
+        $worker_status{$available_worker}{busy} = 1;
+        $worker_status{$available_worker}{task_id} = $task_id;
+        $running_jobs{$task_id} = {
+            target => $job->{target},
+            worker_socket => $available_worker,
+            start_time => time(),
+        };
+
+        my $dir = $job->{dir} || '.';
+        print $available_worker "TASK $task_id\n";
+        print $available_worker "DIR $dir\n";
+        print $available_worker "CMD $job->{command}\n";
+
+        warn "Dispatched task $task_id ($job->{target}) to worker\n" if $ENV{SMAK_DEBUG};
+    }
+}
+
+sub wait_for_jobs {
+    use IO::Select;
+
+    return unless $job_server;  # Not in parallel mode
+    return unless %running_jobs;  # No running jobs
+
+    my $select = IO::Select->new(@workers);
+
+    while (%running_jobs) {
+        # Wait for worker output
+        my @ready = $select->can_read(0.1);
+
+        for my $worker (@ready) {
+            my $line = <$worker>;
+            next unless defined $line;
+            chomp $line;
+
+            if ($line =~ /^TASK_START (\d+)$/) {
+                my $task_id = $1;
+                warn "Task $task_id started\n" if $ENV{SMAK_DEBUG};
+
+            } elsif ($line =~ /^OUTPUT (.*)$/) {
+                my $output = $1;
+                tee_print("$output\n") unless $silent_mode;
+
+            } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
+                my ($task_id, $exit_code) = ($1, $2);
+                my $job = $running_jobs{$task_id};
+
+                if ($exit_code != 0) {
+                    my $err_msg = "smak: *** [$job->{target}] Error $exit_code\n";
+                    tee_print($err_msg);
+                    stop_job_server();
+                    die $err_msg;
+                }
+
+                # Mark worker as available
+                $worker_status{$worker}{busy} = 0;
+                $worker_status{$worker}{task_id} = 0;
+                delete $running_jobs{$task_id};
+
+                warn "Task $task_id completed\n" if $ENV{SMAK_DEBUG};
+
+                # Try to dispatch more jobs
+                dispatch_jobs();
+            }
+        }
+    }
+}
+
+sub execute_command_sequential {
+    my ($target, $command, $dir) = @_;
+
+    my $old_dir;
+    if ($dir && $dir ne '.') {
+        use Cwd 'getcwd';
+        $old_dir = getcwd();
+        chdir($dir) or die "Cannot chdir to $dir: $!\n";
+    }
+
+    # Echo command unless silent
+    unless ($silent_mode) {
+        tee_print("$command\n");
+    }
+
+    # Execute command
+    my $exit_code;
+    if ($report_mode) {
+        my $output = `$command 2>&1`;
+        $exit_code = $? >> 8;
+        tee_print($output) if $output;
+    } else {
+        my $status = system($command);
+        $exit_code = $status >> 8;
+    }
+
+    if ($exit_code != 0) {
+        my $err_msg = "smak: *** [$target] Error $exit_code\n";
+        tee_print($err_msg);
+        chdir($old_dir) if $old_dir;
+        die $err_msg;
+    }
+
+    chdir($old_dir) if $old_dir;
 }
 
 sub set_cmd_var {
@@ -1387,6 +1652,10 @@ sub build_target {
         build_target($dep, $visited, $depth + 1);
     }
 
+    # Wait for all pending jobs to complete before executing this target's rule
+    # This ensures dependencies are fully built before we build the target
+    wait_for_jobs();
+
     # Execute rule if it exists
     if ($rule && $rule =~ /\S/) {
         # Convert $MV{VAR} to $(VAR) for expansion
@@ -1463,29 +1732,10 @@ sub build_target {
                 next;
             }
 
-            # Echo command unless silent (like make)
-            # Silent mode (-s) suppresses all command echoing
-            unless ($silent || $silent_mode) {
-                tee_print("$cmd_line\n");
-            }
-
-            # Execute the command (capture output if in report mode)
-            my $exit_code;
-            if ($report_mode) {
-                # Capture both stdout and stderr
-                my $output = `$cmd_line 2>&1`;
-                $exit_code = $? >> 8;  # Extract actual exit code from wait status
-                tee_print($output) if $output;
-            } else {
-                my $status = system($cmd_line);
-                $exit_code = $status >> 8;  # Extract actual exit code from wait status
-            }
-
-            if ($exit_code != 0) {
-                my $err_msg = "smak: *** [$target] Error $exit_code\n";
-                tee_print($err_msg);
-                die $err_msg;
-            }
+            # Use job system for parallel execution
+            use Cwd 'getcwd';
+            my $cwd = getcwd();
+            submit_job($target, $cmd_line, $cwd);
         }
     }
 }

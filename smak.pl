@@ -27,6 +27,7 @@ my $log_fh;
 my $dry_run = 0;
 my $silent = 0;
 my $yes = 0;  # Auto-answer yes to prompts
+my $jobs = 1;  # Number of parallel jobs (default: 1 = sequential)
 
 # Parse environment variable options first
 if (defined $ENV{USR_SMAK_OPT}) {
@@ -45,6 +46,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
         'n|just-print|dry-run|recon' => \$dry_run,
         's|silent|quiet' => \$silent,
         'yes' => \$yes,
+        'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -60,7 +62,19 @@ GetOptions(
     'n|just-print|dry-run|recon' => \$dry_run,
     's|silent|quiet' => \$silent,
     'yes' => \$yes,
+    'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
 ) or die "Error in command line arguments\n";
+
+# Handle -j without number (unlimited jobs, use CPU count)
+if (defined $jobs && $jobs == 0) {
+    # Try to detect CPU count
+    my $cpu_count = 1;
+    if (-f '/proc/cpuinfo') {
+        $cpu_count = `grep -c ^processor /proc/cpuinfo 2>/dev/null` || 1;
+        chomp $cpu_count;
+    }
+    $jobs = $cpu_count;
+}
 
 # Parse variable assignments and targets from remaining arguments
 my @targets;
@@ -226,6 +240,7 @@ Options:
   -n, --just-print            Print commands without executing (dry-run)
   --dry-run, --recon          Same as -n
   -s, --silent, --quiet       Don't print commands being executed
+  -j, --jobs [N]              Run N jobs in parallel (default: 1, -j = CPU count)
   -h, --help                  Display this help message
   --yes                       Auto-answer yes to prompts (for -Kreport)
   -cmake                      Run cmake with remaining arguments (passthrough)
@@ -256,6 +271,15 @@ if ($dry_run) {
 # Set silent mode if requested
 if ($silent) {
     set_silent_mode(1);
+}
+
+# Set number of parallel jobs
+set_jobs($jobs);
+
+# Start job server if parallel builds are requested
+# Skip in debug mode (interactive debugging doesn't work with parallel builds)
+unless ($debug || $dry_run) {
+    start_job_server();
 }
 
 # Parse the makefile
@@ -326,6 +350,9 @@ if (!$debug) {
         $build_failed = 1;
         $build_error = $@;
     }
+
+    # Stop job server and clean up workers
+    stop_job_server();
 
     # If in report mode, run dry-run comparison between smak and make
     if ($report) {

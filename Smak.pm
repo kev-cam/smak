@@ -367,11 +367,19 @@ sub format_output {
 
 sub transform_make_vars {
     my ($text) = @_;
+    # Transform $$ to a placeholder to protect it from further expansion
+    # In Makefiles, $$ means a literal $ that should be passed to the shell
+    $text =~ s/\$\$/\x00DOLLAR\x00/g;
+
     # Transform $(VAR) to $MV{VAR}
     $text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
     # Transform $X (single-letter variables) to $MV{X}, but not automatic vars like $@, $<, $^, $*, $?
     # Automatic variables are handled separately in expand_vars
     $text =~ s/\$([A-Za-z0-9_])(?![A-Za-z0-9_{])/\$MV{$1}/g;
+
+    # Restore $$ as single $ (for shell execution)
+    $text =~ s/\x00DOLLAR\x00/\$/g;
+
     return $text;
 }
 

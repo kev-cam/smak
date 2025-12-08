@@ -1,0 +1,21 @@
+Makefile:204: target 'dep' does not exist
+mkdir dep
+Makefile:255: update target 'main.o' due to: main.cc config.h version_tag.h
+g++ -DHAVE_CONFIG_H -I. -Ilibmisc  -Wall -Wextra -Wshadow   -g -O2 -std=c++11 -MD -c main.cc -o main.o
+In file included from main.cc:22:
+version_tag.h:1:1: error: expected unqualified-id before numeric constant
+    1 | 55768tmp
+      | ^~~~~~~~
+main.cc: In function ‘int main(int, char**)’:
+main.cc:988:40: error: ‘VERSION_TAG’ was not declared in this scope; did you mean ‘VERSION_STR’?
+  988 |                  << VERSION << " (" << VERSION_TAG << ")" << endl << endl;
+      |                                        ^~~~~~~~~~~
+      |                                        VERSION_STR
+main.cc:990:21: error: ‘NOTICE’ was not declared in this scope
+  990 |             cout << NOTICE << endl;
+      |                     ^~~~~~
+main.cc:1001:40: error: ‘VERSION_TAG’ was not declared in this scope; did you mean ‘VERSION_STR’?
+ 1001 |                  << VERSION << " (" << VERSION_TAG << ")"  << endl <<
+      |                                        ^~~~~~~~~~~
+      |                                        VERSION_STR
+make: *** [Makefile:255: main.o] Error 1

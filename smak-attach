@@ -259,12 +259,16 @@ HELP
                         chomp $response;
                         if ($response =~ /^OUTPUT (.*)$/) {
                             print "$1\n";
+                        } elsif ($response =~ /^ERROR (.*)$/) {
+                            print "❌ ERROR: $1\n";
+                        } elsif ($response =~ /^WARN (.*)$/) {
+                            print "⚠️  WARN: $1\n";
                         } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                             my ($completed_target, $exit_code) = ($1, $2);
                             if ($exit_code == 0) {
-                                print "Build succeeded: $completed_target\n";
+                                print "✓ Build succeeded: $completed_target\n";
                             } else {
-                                print "Build failed: $completed_target (exit code $exit_code)\n";
+                                print "✗ Build failed: $completed_target (exit code $exit_code)\n";
                             }
                             $job_done = 1;
                         }

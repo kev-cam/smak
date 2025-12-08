@@ -5,11 +5,13 @@ use IO::Socket::INET;
 use IO::Select;
 use POSIX qw(:sys_wait_h);
 use FindBin qw($RealBin);
+use Cwd 'abs_path';
 
 # Job-master server that manages worker pool
 # Sits in select() loop listening to:
 #   - Master socket (build requests)
 #   - Worker sockets (job results)
+#   - FUSE monitor socket (file system events)
 
 # Usage: smak-jobserver <num_workers>
 my ($num_workers) = @ARGV;
@@ -67,6 +69,73 @@ if ($port_fh) {
 
 my @observers;  # List of connected observers
 
+# Detect and connect to FUSE filesystem monitor
+my $fuse_socket;
+my %inode_cache;  # inode => path
+my %pending_path_requests;  # inode => 1 (waiting for resolution)
+my %file_modifications;  # path => {workers => [pids], last_op => time}
+
+sub detect_fuse_monitor {
+    # Check if we're in a FUSE filesystem
+    my $cwd = abs_path('.');
+
+    # Read /proc/mounts to find FUSE filesystems
+    open(my $mounts, '<', '/proc/mounts') or return undef;
+    my $fuse_pid;
+    while (my $line = <$mounts>) {
+        # Look for fuse.sshfs or similar
+        if ($line =~ /^(\S+)\s+(\S+)\s+fuse\.(\S+)/) {
+            my ($dev, $mountpoint, $fstype) = ($1, $2, $3);
+            # Check if our CWD is under this mount
+            if ($cwd =~ /^\Q$mountpoint\E/) {
+                print STDERR "Detected FUSE filesystem: $fstype at $mountpoint\n";
+                # Try to find the FUSE process - look for sshfs process
+                my $ps_output = `ps aux | grep -E '(sshfs|smak-fuse)' | grep -v grep`;
+                for my $ps_line (split /\n/, $ps_output) {
+                    if ($ps_line =~ /^\S+\s+(\d+).*$mountpoint/) {
+                        $fuse_pid = $1;
+                        last;
+                    }
+                }
+                last if $fuse_pid;
+            }
+        }
+    }
+    close($mounts);
+
+    return undef unless $fuse_pid;
+
+    # Find the listening port using lsof
+    my $lsof_output = `lsof -Pan -p $fuse_pid -i TCP -s TCP:LISTEN 2>/dev/null`;
+    for my $line (split /\n/, $lsof_output) {
+        if ($line =~ /:(\d+)\s+\(LISTEN\)/) {
+            my $port = $1;
+            print STDERR "Found FUSE monitor on port $port (PID $fuse_pid)\n";
+            return $port;
+        }
+    }
+
+    return undef;
+}
+
+if (my $fuse_port = detect_fuse_monitor()) {
+    # Connect to FUSE monitor
+    $fuse_socket = IO::Socket::INET->new(
+        PeerHost => '127.0.0.1',
+        PeerPort => $fuse_port,
+        Proto    => 'tcp',
+        Timeout  => 5,
+    );
+    if ($fuse_socket) {
+        $fuse_socket->autoflush(1);
+        print STDERR "Connected to FUSE monitor\n";
+    } else {
+        print STDERR "Failed to connect to FUSE monitor: $!\n";
+    }
+} else {
+    print STDERR "No FUSE filesystem monitor detected\n";
+}
+
 # Wait for initial master connection
 print STDERR "Waiting for master connection...\n";
 my $master_socket = $master_server->accept();
@@ -104,6 +173,7 @@ $worker_server->blocking(0);
 $observer_server->blocking(0);
 $master_server->blocking(0);
 my $select = IO::Select->new($worker_server, $observer_server, $master_socket, $master_server);
+$select->add($fuse_socket) if $fuse_socket;
 my $workers_connected = 0;
 my $startup_timeout = 10;
 my $start_time = time();
@@ -269,6 +339,21 @@ while (1) {
                     }
                 }
                 print $master_socket "Restarting $new_count workers...\n";
+
+            } elsif ($line =~ /^LIST_FILES$/) {
+                # List tracked file modifications
+                if ($fuse_socket) {
+                    print $master_socket "Tracked file modifications:\n";
+                    for my $path (sort keys %file_modifications) {
+                        my $info = $file_modifications{$path};
+                        my $pids = join(', ', @{$info->{workers}});
+                        print $master_socket "  $path (PIDs: $pids)\n";
+                    }
+                    print $master_socket "FILES_END\n";
+                } else {
+                    print $master_socket "FUSE monitoring not available\n";
+                    print $master_socket "FILES_END\n";
+                }
             }
 
         } elsif ($socket == $worker_server) {
@@ -312,6 +397,54 @@ while (1) {
                 close($socket);
                 $select->remove($socket);
                 @observers = grep { $_ != $socket } @observers;
+            }
+
+        } elsif ($fuse_socket && $socket == $fuse_socket) {
+            # FUSE filesystem event
+            my $line = <$socket>;
+            unless (defined $line) {
+                # FUSE monitor disconnected
+                print STDERR "FUSE monitor disconnected\n";
+                $select->remove($fuse_socket);
+                $fuse_socket = undef;
+                next;
+            }
+            chomp $line;
+
+            # Parse FUSE event: OP:PID:INODE or INO:INODE:PATH
+            if ($line =~ /^(\w+):(\d+):(.+)$/) {
+                my ($op, $arg1, $arg2) = ($1, $2, $3);
+
+                if ($op eq 'INO') {
+                    # Path resolution response: INO:inode:path
+                    my ($inode, $path) = ($arg1, $arg2);
+                    $inode_cache{$inode} = $path;
+                    delete $pending_path_requests{$inode};
+
+                    # Track modification
+                    $file_modifications{$path} ||= {workers => [], last_op => time()};
+                    print STDERR "FUSE: $path (inode $inode)\n";
+
+                } else {
+                    # File operation: OP:pid:inode
+                    my ($pid, $inode) = ($arg1, $arg2);
+
+                    # Request path if we don't have it cached
+                    if (!exists $inode_cache{$inode} && !exists $pending_path_requests{$inode}) {
+                        print $fuse_socket "PATH:$inode\n";
+                        $pending_path_requests{$inode} = 1;
+                    }
+
+                    # Track operation (path will be resolved asynchronously)
+                    if (exists $inode_cache{$inode}) {
+                        my $path = $inode_cache{$inode};
+                        $file_modifications{$path} ||= {workers => [], last_op => time()};
+                        push @{$file_modifications{$path}{workers}}, $pid
+                            unless grep { $_ == $pid } @{$file_modifications{$path}{workers}};
+                        $file_modifications{$path}{last_op} = time();
+                        print STDERR "FUSE: $op $path by PID $pid\n";
+                    }
+                }
             }
 
         } else {

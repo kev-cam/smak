@@ -385,9 +385,9 @@ HELP
         } elsif ($cmd eq 'status' || $cmd eq 'st') {
             if ($jobs > 1 && defined $Smak::job_server_socket) {
                 # Request status from job-master
-                print "Job server running with $jobs workers\n";
+                print "Job server running with $jobs workers (PID $Smak::job_server_pid)\n";
                 # Could send STATUS request to job-master here
-                print "Use smak-attach to monitor active builds\n";
+                print "Use: smak-attach -pid $Smak::job_server_pid\n";
             } elsif ($jobs > 1) {
                 print "Job server configured for $jobs jobs but not currently active\n";
             } else {
@@ -474,7 +474,7 @@ HELP
         print "\nDetached from CLI.\n";
         if ($jobserver_pid) {
             print "Job server still running (PID $jobserver_pid).\n";
-            print "To monitor: ./smak-attach\n";
+            print "To reconnect: ./smak-attach -pid $jobserver_pid\n";
 
             # Fork to keep master connection alive in background
             my $bg_pid = fork();

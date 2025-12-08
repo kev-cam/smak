@@ -1,3 +1,0 @@
-if [ -e ./config.status ]; then 	  echo "./config.status --reconfigure"; 	  ./config.status --reconfigure; 	else 	  echo "config.status is lost, please configure manually" ; 	  exit 1; 	fi
-./config.status
-./config.status

@@ -1,0 +1,22 @@
+gcc -c  -fPIC -DWITH_GNAT_RUN_TIME -g -Wall -g -O -o grt-cgnatrts.o /mnt/y/ghdl/./src/grt/grt-cgnatrts.c
+VER_DESC=tarball; \
+VER_REF=unknown; \
+VER_HASH=unknown; \
+if test -d ./.git && desc=`cd .; git describe --dirty --long`; then \
+  VER_DESC=`echo $desc | sed -e 's/\([^-]*-g\)/r\1/' -e 's/-/./g' -e 's/^v//g'`; \
+  VER_REF=`cd .; git rev-parse --abbrev-ref HEAD`; \
+  VER_HASH=`cd .; git rev-parse HEAD`; \
+fi; \
+sed \
+  -e "s#@VER@#6.0.0-dev#" \
+  -e "s#@DESC@#${GHDL_VER_DESC:-$VER_DESC}#" \
+  -e "s#@REF@#${GHDL_VER_REF:-$VER_REF}#" \
+  -e "s#@HASH@#${GHDL_VER_HASH:-$VER_HASH}#" \
+  < src/version.in > version.tmp;
+if [ ! -r version.ads ] || ! cmp version.tmp version.ads > /dev/null; then cp version.tmp version.ads; fi
+gnatmake -o ghdl_mcode -gnat12 -aI./src -aI./src/vhdl -aI./src/verilog -aI./src/synth -aI./src/grt -aI./src/psl -aI./src/vhdl/translate -aI./src/ghdldrv -aI./src/ortho -aI./src/ortho/mcode -aI./src/synth -aI./src/simul -gnat12 -gnaty3befhkmr -g  -gnatwa -gnatwC -gnatf -O -gnata -gnatw.A ghdl_jit.adb -bargs -static -largs memsegs_c.o jumps.o times.o grt-cstdio.o grt-cgnatrts.o grt-no_sundials_c.o grt-cvpi.o grt-cvhpi.o grt-cdynload.o fstapi.o lz4.o fastlz.o  -ldl -lm -Wl,--version-script=/mnt/y/ghdl/./src/grt/grt.ver -Wl,--export-dynamic  -shared-libgcc
+make -f ./libraries/Makefile.inc LIBSRC_DIR="./libraries" LIBDST_DIR="lib/ghdl" enable_gplcompat="false" LN="ln -s" CP="cp" MKDIR="mkdir" GHDL="/mnt/y/ghdl/ghdl_mcode" XRUN= GHDL_FLAGS="" VHDL_COPY_OBJS=no vhdl.libs.all
+make[1]: Entering directory '/mnt/y/ghdl'
+make[1]: *** No rule to make target '/mnt/y/ghdl/ghdl_mcode', needed by 'lib/ghdl/std/v87/std-obj87.cf'.  Stop.
+make[1]: Leaving directory '/mnt/y/ghdl'
+make: *** [Makefile:225: libs.vhdl.mcode] Error 2

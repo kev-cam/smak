@@ -4,6 +4,11 @@ use warnings;
 use IO::Socket::INET;
 use IO::Select;
 use Cwd 'abs_path';
+use Getopt::Long;
+
+# Parse command-line options
+my $target_pid;
+GetOptions('pid=i' => \$target_pid) or die "Usage: $0 [-pid <process-id>]\n";
 
 # Find smak-jobserver processes using /proc
 sub find_jobservers {
@@ -122,7 +127,18 @@ check_port_files(@jobservers);
 
 my $selected_js;
 
-if (@jobservers > 1) {
+# If -pid was specified, find that specific job-master
+if ($target_pid) {
+    for my $js (@jobservers) {
+        if ($js->{pid} == $target_pid) {
+            $selected_js = $js;
+            last;
+        }
+    }
+    unless ($selected_js) {
+        die "No job-master found with PID $target_pid\n";
+    }
+} elsif (@jobservers > 1) {
     print "Multiple smak instances found:\n";
     for (my $i = 0; $i < @jobservers; $i++) {
         my $js = $jobservers[$i];

@@ -83,8 +83,9 @@ while (my $line = <$socket>) {
         chdir($dir) or do {
             # Send error back
             print $socket "TASK_START $task_id\n";
-            print $socket "ERROR: Cannot chdir to $dir: $!\n";
+            print $socket "OUTPUT ERROR: Cannot chdir to $dir: $!\n";
             print $socket "TASK_END $task_id 1\n";
+            print $socket "READY\n";
             next;
         };
 
@@ -102,6 +103,9 @@ while (my $line = <$socket>) {
 
         # Send completion
         print $socket "TASK_END $task_id $exit_code\n";
+
+        # Send ready for next task
+        print $socket "READY\n";
 
         # Restore directory
         chdir($old_dir);

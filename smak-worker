@@ -92,13 +92,23 @@ while (my $line = <$socket>) {
         # Signal task start
         print $socket "TASK_START $task_id\n";
 
-        # Execute command and capture output
-        my $output = `$command 2>&1`;
-        my $exit_code = $? >> 8;
+        # Execute command and stream output in real-time
+        my $exit_code = 0;
 
-        # Send output
-        for my $out_line (split /\n/, $output) {
-            print $socket "OUTPUT $out_line\n";
+        # Use pipe to capture output incrementally
+        my $pid = open(my $cmd_fh, '-|', "$command 2>&1");
+        if ($pid) {
+            # Parent: read output line by line and send immediately
+            while (my $line = <$cmd_fh>) {
+                chomp $line;
+                print $socket "OUTPUT $line\n";
+            }
+            close($cmd_fh);
+            $exit_code = $? >> 8;
+        } else {
+            # Fork failed
+            print $socket "OUTPUT ERROR: Failed to execute command: $!\n";
+            $exit_code = 1;
         }
 
         # Send completion

@@ -275,15 +275,25 @@ sub run_cli {
     print "Parallel jobs: $jobs\n";
 
     # Start job server now if parallel builds are configured
+    my $jobserver_pid;
     if ($jobs > 1) {
         print "Starting job server...\n";
         start_job_server();
+        $jobserver_pid = $Smak::job_server_pid;
     }
     print "\n";
 
+    # Set up signal handlers for detach
+    my $detached = 0;
+    my $detach_handler = sub {
+        $detached = 1;
+    };
+    local $SIG{INT} = $detach_handler;  # Ctrl-C
+
     my $term = Term::ReadLine->new('smak');
 
-    while (defined(my $line = $term->readline('smak> '))) {
+    my $line;
+    while (defined($line = $term->readline('smak> '))) {
         chomp $line;
         $line =~ s/^\s+|\s+$//g;  # Trim whitespace
 
@@ -295,7 +305,11 @@ sub run_cli {
         my $cmd = shift @words;
 
         if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') {
-            print "Exiting...\n";
+            print "Shutting down and exiting...\n";
+            return 1;  # Return 1 = stop job server
+
+        } elsif ($cmd eq 'detach') {
+            $detached = 1;
             last;
 
         } elsif ($cmd eq 'help' || $cmd eq 'h' || $cmd eq '?') {
@@ -306,8 +320,12 @@ Available commands:
   status              Show job server status (if parallel builds enabled)
   vars [pattern]      Show all variables (optionally matching pattern)
   deps <target>       Show dependencies for target
+  detach              Detach from CLI, leave job server running
   help, h, ?          Show this help
-  quit, exit, q       Exit CLI
+  quit, exit, q       Shut down job server and exit
+
+Keyboard shortcuts:
+  Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)
 
 Examples:
   build all           Build the 'all' target
@@ -398,7 +416,43 @@ HELP
             print "Unknown command: $cmd\n";
             print "Type 'help' for available commands.\n";
         }
+
+        # Check if detached by Ctrl-C
+        if ($detached) {
+            last;
+        }
     }
+
+    # After loop: check if we detached or quit normally
+    # If $detached was set, it was explicit detach or Ctrl-C
+    # If loop ended without $detached, it was Ctrl-D (EOF) - also treat as detach
+    if ($detached || !defined($line)) {
+        print "\nDetached from CLI.\n";
+        if ($jobserver_pid) {
+            print "Job server still running (PID $jobserver_pid).\n";
+            print "To monitor: ./smak-attach\n";
+
+            # Fork to keep master connection alive in background
+            my $bg_pid = fork();
+            if ($bg_pid == 0) {
+                # Child process: keep master connection alive
+                # Close STDIN/STDOUT/STDERR to fully detach
+                close(STDIN);
+                close(STDOUT);
+                close(STDERR);
+
+                # Just wait for job server to finish or be killed
+                # The socket connection to job-master stays alive
+                sleep while 1;
+                exit 0;
+            }
+            # Parent continues to exit
+        }
+        return 0;  # Return 0 = don't stop job server
+    }
+
+    # Normal quit command
+    return 1;  # Return 1 = stop job server
 }
 
 # Set dry-run mode if requested
@@ -462,8 +516,10 @@ if ($script_file) {
 
 # If CLI mode, enter interactive loop
 if ($cli) {
-    run_cli();
-    stop_job_server();
+    my $should_stop = run_cli();
+    if ($should_stop) {
+        stop_job_server();
+    }
     exit 0;
 }
 

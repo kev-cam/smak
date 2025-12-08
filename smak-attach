@@ -1,0 +1,138 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use IO::Socket::INET;
+use IO::Select;
+
+# Find running job-master instances
+my @port_files = glob("/tmp/smak-jobserver-*.port");
+
+unless (@port_files) {
+    die "No running smak job-master instances found.\n";
+}
+
+if (@port_files > 1) {
+    print "Multiple smak instances found:\n";
+    for (my $i = 0; $i < @port_files; $i++) {
+        my $file = $port_files[$i];
+        my ($pid) = $file =~ /smak-jobserver-(\d+)\.port/;
+        print "  [$i] PID $pid\n";
+    }
+    print "Select instance (0-" . ($#port_files) . "): ";
+    my $choice = <STDIN>;
+    chomp $choice;
+    @port_files = ($port_files[$choice]) if $choice =~ /^\d+$/ && $choice <= $#port_files;
+}
+
+my $port_file = $port_files[0];
+my ($jobserver_pid) = $port_file =~ /smak-jobserver-(\d+)\.port/;
+
+# Read port number
+open(my $fh, '<', $port_file) or die "Cannot read port file $port_file: $!\n";
+my $port = <$fh>;
+chomp $port;
+close($fh);
+
+print "Connecting to job-master (PID $jobserver_pid) on port $port...\n";
+
+# Connect to observer socket
+my $socket = IO::Socket::INET->new(
+    PeerHost => '127.0.0.1',
+    PeerPort => $port,
+    Proto    => 'tcp',
+    Timeout  => 5,
+) or die "Cannot connect to job-master: $!\n";
+
+$socket->autoflush(1);
+print "Connected to job-master observer.\n";
+print "Commands: [s]tatus, [q]uit, [h]elp\n\n";
+
+# Set up select for non-blocking I/O
+my $select = IO::Select->new($socket, \*STDIN);
+
+# Request initial status
+print $socket "STATUS\n";
+
+my $in_status = 0;
+
+while (1) {
+    my @ready = $select->can_read(0.1);
+
+    for my $handle (@ready) {
+        if ($handle == $socket) {
+            # Message from job-master
+            my $line = <$socket>;
+            unless (defined $line) {
+                print "\nJob-master disconnected.\n";
+                exit 0;
+            }
+            chomp $line;
+
+            if ($line eq 'STATUS_START') {
+                $in_status = 1;
+                print "\n=== Build Status ===\n";
+
+            } elsif ($line eq 'STATUS_END') {
+                $in_status = 0;
+                print "==================\n\n";
+
+            } elsif ($line =~ /^QUEUED (\d+)$/) {
+                print "Queued jobs: $1\n";
+
+            } elsif ($line =~ /^RUNNING (\d+)$/) {
+                print "Running jobs: $1\n";
+
+            } elsif ($line =~ /^WORKERS (\d+)$/) {
+                print "Total workers: $1\n\n";
+
+            } elsif ($line =~ /^QUEUE_ITEM (.*)$/) {
+                print "  [Queued] $1\n";
+
+            } elsif ($line =~ /^RUNNING_ITEM (\d+) (.*)$/) {
+                print "  [Running] Task $1: $2\n";
+
+            } elsif ($line =~ /^WORKER_STATUS (\w+) (\d+)$/) {
+                my ($status, $task_id) = ($1, $2);
+                if ($status eq 'READY') {
+                    print "  Worker: READY (idle)\n";
+                } else {
+                    print "  Worker: BUSY (task $task_id)\n";
+                }
+
+            } elsif ($line =~ /^QUEUED (.*)$/) {
+                print "[Queued] $1\n";
+
+            } else {
+                print "$line\n" if $line;
+            }
+
+        } elsif ($handle == \*STDIN) {
+            # User input
+            my $input = <STDIN>;
+            unless (defined $input) {
+                print "\nExiting...\n";
+                print $socket "QUIT\n";
+                exit 0;
+            }
+            chomp $input;
+
+            if ($input =~ /^s(tatus)?$/i) {
+                print $socket "STATUS\n";
+
+            } elsif ($input =~ /^q(uit)?$/i) {
+                print "Disconnecting...\n";
+                print $socket "QUIT\n";
+                exit 0;
+
+            } elsif ($input =~ /^h(elp)?$/i) {
+                print "\nCommands:\n";
+                print "  s, status - Request current build status\n";
+                print "  q, quit   - Disconnect and exit\n";
+                print "  h, help   - Show this help\n\n";
+
+            } elsif ($input ne '') {
+                print "Unknown command. Type 'h' for help.\n";
+            }
+        }
+    }
+}

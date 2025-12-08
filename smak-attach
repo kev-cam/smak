@@ -225,6 +225,7 @@ Available commands:
   build <target>      Build the specified target
   tasks, t            List pending and active tasks
   status              Show job server status
+  files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
   deps <target>       Show dependencies for target
@@ -309,6 +310,14 @@ HELP
         my $response = <$socket>;
         chomp $response if $response;
         print "$response\n" if $response;
+
+    } elsif ($cmd eq 'files' || $cmd eq 'f') {
+        print $socket "LIST_FILES\n";
+        while (my $response = <$socket>) {
+            chomp $response;
+            last if $response eq 'FILES_END';
+            print "$response\n";
+        }
 
     } elsif ($cmd eq 'list' || $cmd eq 'ls' || $cmd eq 'l') {
         print "list command not yet implemented in attach mode\n";

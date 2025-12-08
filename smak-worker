@@ -94,20 +94,40 @@ while (my $line = <$socket>) {
 
         # Execute command and stream output in real-time
         my $exit_code = 0;
+        my @errors;
+        my @warnings;
 
         # Use pipe to capture output incrementally
         my $pid = open(my $cmd_fh, '-|', "$command 2>&1");
         if ($pid) {
-            # Parent: read output line by line and send immediately
+            # Parent: read output line by line, analyze, and send
             while (my $line = <$cmd_fh>) {
                 chomp $line;
-                print $socket "OUTPUT $line\n";
+
+                # Detect errors and warnings
+                if ($line =~ /\berror\b/i || $line =~ /\bfailed\b/i) {
+                    push @errors, $line;
+                    print $socket "ERROR $line\n";
+                } elsif ($line =~ /\bwarning\b/i) {
+                    push @warnings, $line;
+                    print $socket "WARN $line\n";
+                } else {
+                    print $socket "OUTPUT $line\n";
+                }
             }
             close($cmd_fh);
             $exit_code = $? >> 8;
+
+            # Send summary if there were errors or warnings
+            if (@errors || @warnings) {
+                my $err_count = scalar(@errors);
+                my $warn_count = scalar(@warnings);
+                print $socket "OUTPUT \n";
+                print $socket "OUTPUT Summary: $err_count error(s), $warn_count warning(s)\n";
+            }
         } else {
             # Fork failed
-            print $socket "OUTPUT ERROR: Failed to execute command: $!\n";
+            print $socket "ERROR Failed to execute command: $!\n";
             $exit_code = 1;
         }
 

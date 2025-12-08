@@ -345,6 +345,16 @@ while (1) {
                 # Forward to master
                 print $master_socket "OUTPUT $output\n";
 
+            } elsif ($line =~ /^ERROR (.*)$/) {
+                my $error = $1;
+                # Forward error to master
+                print $master_socket "ERROR $error\n";
+
+            } elsif ($line =~ /^WARN (.*)$/) {
+                my $warning = $1;
+                # Forward warning to master
+                print $master_socket "WARN $warning\n";
+
             } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
                 my ($task_id, $exit_code) = ($1, $2);
                 my $job = $running_jobs{$task_id};

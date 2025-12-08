@@ -318,15 +318,15 @@ if (!$debug) {
         }
 
         # Prompt for make comparison type
-        my $make_type = 'simple';
+        my $make_type = 'full';  # Default to full build log
         if (!$yes) {
             print "\nSelect make comparison type:\n";
             print "  1) make -n only (fast dry-run)\n";
             print "  2) make clean ; make -n ; make --trace (complete build log)\n";
-            print "Choice [1]: ";
+            print "Choice [2]: ";
             my $choice = <STDIN>;
             chomp $choice if defined $choice;
-            $make_type = 'full' if $choice eq '2';
+            $make_type = 'simple' if $choice eq '1';
         }
 
         # Run make comparison based on user choice

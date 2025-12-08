@@ -408,23 +408,28 @@ sub parse_makefile {
 
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
-    my $current_target;
+    my @current_targets;  # Array to handle multiple targets (e.g., "target1 target2:")
     my $current_rule = '';
     my $current_type;  # 'fixed', 'pattern', or 'pseudo'
 
     my $save_current_rule = sub {
-        return unless $current_target;
+        return unless @current_targets;
 
-        my $key = "$makefile\t$current_target";
-        if ($current_type eq 'fixed') {
-            $fixed_rule{$key} = $current_rule;
-        } elsif ($current_type eq 'pattern') {
-            $pattern_rule{$key} = $current_rule;
-        } elsif ($current_type eq 'pseudo') {
-            $pseudo_rule{$key} = $current_rule;
+        # Save rule for all targets in the current rule
+        for my $target (@current_targets) {
+            my $key = "$makefile\t$target";
+            my $type = classify_target($target);
+
+            if ($type eq 'fixed') {
+                $fixed_rule{$key} = $current_rule;
+            } elsif ($type eq 'pattern') {
+                $pattern_rule{$key} = $current_rule;
+            } elsif ($type eq 'pseudo') {
+                $pseudo_rule{$key} = $current_rule;
+            }
         }
 
-        $current_target = undef;
+        @current_targets = ();
         $current_rule = '';
         $current_type = undef;
     };
@@ -442,7 +447,7 @@ sub parse_makefile {
         }
 
         # Skip comments and empty lines (but not inside rules)
-        if (!defined $current_target && ($line =~ /^\s*#/ || $line =~ /^\s*$/)) {
+        if (!@current_targets && ($line =~ /^\s*#/ || $line =~ /^\s*$/)) {
             next;
         }
 
@@ -502,11 +507,11 @@ sub parse_makefile {
         if ($line =~ /^([^:]+):\s*(.*)$/) {
             $save_current_rule->();
 
-            my $target = $1;
+            my $targets_str = $1;
             my $deps_str = $2;
 
             # Trim whitespace
-            $target =~ s/^\s+|\s+$//g;
+            $targets_str =~ s/^\s+|\s+$//g;
             $deps_str =~ s/^\s+|\s+$//g;
 
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X} in dependencies
@@ -515,44 +520,55 @@ sub parse_makefile {
             my @deps = split /\s+/, $deps_str;
             @deps = grep { $_ ne '' } @deps;
 
-            $current_target = $target;
-            $current_type = classify_target($target);
+            # Handle multiple targets (e.g., "target1 target2: deps")
+            # Make creates the same rule for each target
+            my @targets = split /\s+/, $targets_str;
+            @targets = grep { $_ ne '' } @targets;
+
+            # Store all targets for rule accumulation
+            @current_targets = @targets;
+            $current_type = classify_target($current_targets[0]) if @current_targets;
             $current_rule = '';
 
-            my $key = "$makefile\t$target";
-            if ($current_type eq 'fixed') {
-                # Append dependencies if target already exists (like gmake)
-                if (exists $fixed_deps{$key}) {
-                    push @{$fixed_deps{$key}}, @deps;
-                } else {
-                    $fixed_deps{$key} = \@deps;
-                }
-            } elsif ($current_type eq 'pattern') {
-                # Append dependencies if target already exists (like gmake)
-                if (exists $pattern_deps{$key}) {
-                    push @{$pattern_deps{$key}}, @deps;
-                } else {
-                    $pattern_deps{$key} = \@deps;
-                }
-            } elsif ($current_type eq 'pseudo') {
-                # Append dependencies if target already exists (like gmake)
-                if (exists $pseudo_deps{$key}) {
-                    push @{$pseudo_deps{$key}}, @deps;
-                } else {
-                    $pseudo_deps{$key} = \@deps;
-                }
-            }
+            # Store dependencies for all targets
+            for my $target (@targets) {
+                my $key = "$makefile\t$target";
+                my $type = classify_target($target);
 
-            # Set default target to first non-pseudo target (like gmake)
-            if (!defined $default_target && $current_type ne 'pseudo') {
-                $default_target = $target;
+                if ($type eq 'fixed') {
+                    # Append dependencies if target already exists (like gmake)
+                    if (exists $fixed_deps{$key}) {
+                        push @{$fixed_deps{$key}}, @deps;
+                    } else {
+                        $fixed_deps{$key} = \@deps;
+                    }
+                } elsif ($type eq 'pattern') {
+                    # Append dependencies if target already exists (like gmake)
+                    if (exists $pattern_deps{$key}) {
+                        push @{$pattern_deps{$key}}, @deps;
+                    } else {
+                        $pattern_deps{$key} = \@deps;
+                    }
+                } elsif ($type eq 'pseudo') {
+                    # Append dependencies if target already exists (like gmake)
+                    if (exists $pseudo_deps{$key}) {
+                        push @{$pseudo_deps{$key}}, @deps;
+                    } else {
+                        $pseudo_deps{$key} = \@deps;
+                    }
+                }
+
+                # Set default target to first non-pseudo target (like gmake)
+                if (!defined $default_target && $type ne 'pseudo') {
+                    $default_target = $target;
+                }
             }
 
             next;
         }
 
         # Rule command (starts with tab)
-        if ($line =~ /^\t(.*)$/ && defined $current_target) {
+        if ($line =~ /^\t(.*)$/ && @current_targets) {
             my $cmd = $1;
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
             $cmd = transform_make_vars($cmd);
@@ -561,7 +577,7 @@ sub parse_makefile {
         }
 
         # If we get here with a current target, save it
-        $save_current_rule->() if defined $current_target;
+        $save_current_rule->() if @current_targets;
     }
 
     # Save the last rule if any
@@ -585,23 +601,28 @@ sub parse_included_makefile {
     my $saved_makefile = $makefile;
     $makefile = $include_path;
 
-    my $current_target;
+    my @current_targets;  # Array to handle multiple targets
     my $current_rule = '';
     my $current_type;
 
     my $save_current_rule = sub {
-        return unless $current_target;
+        return unless @current_targets;
 
-        my $key = "$saved_makefile\t$current_target";  # Use original makefile for keys
-        if ($current_type eq 'fixed') {
-            $fixed_rule{$key} = $current_rule;
-        } elsif ($current_type eq 'pattern') {
-            $pattern_rule{$key} = $current_rule;
-        } elsif ($current_type eq 'pseudo') {
-            $pseudo_rule{$key} = $current_rule;
+        # Save rule for all targets in the current rule
+        for my $target (@current_targets) {
+            my $key = "$saved_makefile\t$target";  # Use original makefile for keys
+            my $type = classify_target($target);
+
+            if ($type eq 'fixed') {
+                $fixed_rule{$key} = $current_rule;
+            } elsif ($type eq 'pattern') {
+                $pattern_rule{$key} = $current_rule;
+            } elsif ($type eq 'pseudo') {
+                $pseudo_rule{$key} = $current_rule;
+            }
         }
 
-        $current_target = undef;
+        @current_targets = ();
         $current_rule = '';
         $current_type = undef;
     };
@@ -619,7 +640,7 @@ sub parse_included_makefile {
         }
 
         # Skip comments and empty lines
-        if (!defined $current_target && ($line =~ /^\s*#/ || $line =~ /^\s*$/)) {
+        if (!@current_targets && ($line =~ /^\s*#/ || $line =~ /^\s*$/)) {
             next;
         }
 
@@ -636,38 +657,47 @@ sub parse_included_makefile {
         if ($line =~ /^([^:]+):\s*(.*)$/) {
             $save_current_rule->();
 
-            my $target = $1;
+            my $targets_str = $1;
             my $deps_str = $2;
 
-            $target =~ s/^\s+|\s+$//g;
+            $targets_str =~ s/^\s+|\s+$//g;
             $deps_str =~ s/^\s+|\s+$//g;
             $deps_str = transform_make_vars($deps_str);
 
             my @deps = split /\s+/, $deps_str;
             @deps = grep { $_ ne '' } @deps;
 
-            $current_target = $target;
-            $current_type = classify_target($target);
+            # Handle multiple targets
+            my @targets = split /\s+/, $targets_str;
+            @targets = grep { $_ ne '' } @targets;
+
+            @current_targets = @targets;
+            $current_type = classify_target($current_targets[0]) if @current_targets;
             $current_rule = '';
 
-            my $key = "$saved_makefile\t$target";
-            if ($current_type eq 'fixed') {
-                if (exists $fixed_deps{$key}) {
-                    push @{$fixed_deps{$key}}, @deps;
-                } else {
-                    $fixed_deps{$key} = \@deps;
-                }
-            } elsif ($current_type eq 'pattern') {
-                if (exists $pattern_deps{$key}) {
-                    push @{$pattern_deps{$key}}, @deps;
-                } else {
-                    $pattern_deps{$key} = \@deps;
-                }
-            } elsif ($current_type eq 'pseudo') {
-                if (exists $pseudo_deps{$key}) {
-                    push @{$pseudo_deps{$key}}, @deps;
-                } else {
-                    $pseudo_deps{$key} = \@deps;
+            # Store dependencies for all targets
+            for my $target (@targets) {
+                my $key = "$saved_makefile\t$target";
+                my $type = classify_target($target);
+
+                if ($type eq 'fixed') {
+                    if (exists $fixed_deps{$key}) {
+                        push @{$fixed_deps{$key}}, @deps;
+                    } else {
+                        $fixed_deps{$key} = \@deps;
+                    }
+                } elsif ($type eq 'pattern') {
+                    if (exists $pattern_deps{$key}) {
+                        push @{$pattern_deps{$key}}, @deps;
+                    } else {
+                        $pattern_deps{$key} = \@deps;
+                    }
+                } elsif ($type eq 'pseudo') {
+                    if (exists $pseudo_deps{$key}) {
+                        push @{$pseudo_deps{$key}}, @deps;
+                    } else {
+                        $pseudo_deps{$key} = \@deps;
+                    }
                 }
             }
 
@@ -675,7 +705,7 @@ sub parse_included_makefile {
         }
 
         # Rule command
-        if ($line =~ /^\t(.*)$/ && defined $current_target) {
+        if ($line =~ /^\t(.*)$/ && @current_targets) {
             my $cmd = $1;
             $cmd = transform_make_vars($cmd);
             $current_rule .= "$cmd\n";
@@ -683,7 +713,7 @@ sub parse_included_makefile {
         }
 
         # If we get here with a current target, save it
-        $save_current_rule->() if defined $current_target;
+        $save_current_rule->() if @current_targets;
     }
 
     # Save the last rule if any

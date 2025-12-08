@@ -1220,11 +1220,33 @@ sub build_target {
     my $key = "$makefile\t$target";
     my @deps;
     my $rule = '';
+    my $stem = '';  # Track stem for $* automatic variable
 
     # Find target in fixed, pattern, or pseudo rules
     if (exists $fixed_deps{$key}) {
         @deps = @{$fixed_deps{$key} || []};
         $rule = $fixed_rule{$key} || '';
+
+        # If fixed rule has no command, try to find pattern rule
+        if (!$rule || $rule !~ /\S/) {
+            for my $pkey (keys %pattern_rule) {
+                if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                    my $pattern = $1;
+                    my $pattern_re = $pattern;
+                    $pattern_re =~ s/%/(.+)/g;
+                    if ($target =~ /^$pattern_re$/) {
+                        # Use pattern rule's command
+                        $rule = $pattern_rule{$pkey} || '';
+                        # Add pattern rule's dependencies to fixed dependencies
+                        my @pattern_deps = @{$pattern_deps{$pkey} || []};
+                        $stem = $1;  # Save stem for $* expansion
+                        @pattern_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @pattern_deps;
+                        push @deps, @pattern_deps;
+                        last;
+                    }
+                }
+            }
+        }
     } elsif (exists $pattern_deps{$key}) {
         @deps = @{$pattern_deps{$key} || []};
         $rule = $pattern_rule{$key} || '';
@@ -1242,7 +1264,7 @@ sub build_target {
                     @deps = @{$pattern_deps{$pkey} || []};
                     $rule = $pattern_rule{$pkey} || '';
                     # Expand % in dependencies
-                    my $stem = $1;
+                    $stem = $1;  # Save stem for $* expansion
                     @deps = map { s/%/$stem/g; $_ } @deps;
                     last;
                 }
@@ -1251,6 +1273,7 @@ sub build_target {
     }
 
     # Expand variables in dependencies (which are in $MV{VAR} format)
+    # Note: Variables like $O can expand to multiple space-separated values
     @deps = map {
         my $dep = $_;
         # Expand $MV{VAR} references
@@ -1259,8 +1282,15 @@ sub build_target {
             my $val = $MV{$var} // '';
             $dep =~ s/\$MV\{\Q$var\E\}/$val/;
         }
-        $dep;
+        # If expansion resulted in multiple space-separated values, split them
+        if ($dep =~ /\s/) {
+            split /\s+/, $dep;
+        } else {
+            $dep;
+        }
     } @deps;
+    # Flatten and filter empty strings
+    @deps = grep { $_ ne '' } @deps;
 
     # Debug: show dependencies and rule status
     if ($ENV{SMAK_DEBUG}) {
@@ -1290,6 +1320,7 @@ sub build_target {
         $expanded =~ s/\$@/$target/g;                     # $@ = target name
         $expanded =~ s/\$</$deps[0] || ''/ge;            # $< = first prerequisite
         $expanded =~ s/\$\^/join(' ', @deps)/ge;         # $^ = all prerequisites
+        $expanded =~ s/\$\*/$stem/g;                     # $* = stem (part matching %)
 
         # Execute each command line
         for my $cmd_line (split /\n/, $expanded) {
@@ -1412,11 +1443,33 @@ sub dry_run_target {
     my $key = "$makefile\t$target";
     my @deps;
     my $rule = '';
+    my $stem = '';  # Track stem for $* automatic variable
 
     # Find target in fixed, pattern, or pseudo rules
     if (exists $fixed_deps{$key}) {
         @deps = @{$fixed_deps{$key} || []};
         $rule = $fixed_rule{$key} || '';
+
+        # If fixed rule has no command, try to find pattern rule
+        if (!$rule || $rule !~ /\S/) {
+            for my $pkey (keys %pattern_rule) {
+                if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                    my $pattern = $1;
+                    my $pattern_re = $pattern;
+                    $pattern_re =~ s/%/(.+)/g;
+                    if ($target =~ /^$pattern_re$/) {
+                        # Use pattern rule's command
+                        $rule = $pattern_rule{$pkey} || '';
+                        # Add pattern rule's dependencies to fixed dependencies
+                        my @pattern_deps = @{$pattern_deps{$pkey} || []};
+                        $stem = $1;  # Save stem for $* expansion
+                        @pattern_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @pattern_deps;
+                        push @deps, @pattern_deps;
+                        last;
+                    }
+                }
+            }
+        }
     } elsif (exists $pattern_deps{$key}) {
         @deps = @{$pattern_deps{$key} || []};
         $rule = $pattern_rule{$key} || '';
@@ -1434,13 +1487,33 @@ sub dry_run_target {
                     @deps = @{$pattern_deps{$pkey} || []};
                     $rule = $pattern_rule{$pkey} || '';
                     # Expand % in dependencies
-                    my $stem = $1;
+                    $stem = $1;  # Save stem for $* expansion
                     @deps = map { s/%/$stem/g; $_ } @deps;
                     last;
                 }
             }
         }
     }
+
+    # Expand variables in dependencies (which are in $MV{VAR} format)
+    # Note: Variables like $O can expand to multiple space-separated values
+    @deps = map {
+        my $dep = $_;
+        # Expand $MV{VAR} references
+        while ($dep =~ /\$MV\{([^}]+)\}/) {
+            my $var = $1;
+            my $val = $MV{$var} // '';
+            $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+        }
+        # If expansion resulted in multiple space-separated values, split them
+        if ($dep =~ /\s/) {
+            split /\s+/, $dep;
+        } else {
+            $dep;
+        }
+    } @deps;
+    # Flatten and filter empty strings
+    @deps = grep { $_ ne '' } @deps;
 
     # Print dependencies
     if (@deps) {

@@ -136,7 +136,9 @@ while (1) {
 
             } elsif ($line eq 'STATUS_END') {
                 $in_status = 0;
-                print "==================\n\n";
+                print "==================\n";
+                print "smak-attach> ";
+                STDOUT->flush();
 
             } elsif ($line =~ /^QUEUED (\d+)$/) {
                 print "Queued jobs: $1\n";
@@ -150,8 +152,9 @@ while (1) {
             } elsif ($line =~ /^QUEUE_ITEM (.*)$/) {
                 print "  [Queued] $1\n";
 
-            } elsif ($line =~ /^RUNNING_ITEM (\d+) (.*)$/) {
-                print "  [Running] Task $1: $2\n";
+            } elsif ($line =~ /^RUNNING_ITEM (\d+) (\w+) (.*)$/) {
+                my ($task_id, $state, $target) = ($1, $2, $3);
+                print "  [$state] Task $task_id: $target\n";
 
             } elsif ($line =~ /^WORKER_STATUS (\w+) (\d+)$/) {
                 my ($status, $task_id) = ($1, $2);

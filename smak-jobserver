@@ -186,6 +186,57 @@ while (1) {
 
                 # Try to dispatch
                 dispatch_jobs();
+
+            } elsif ($line =~ /^LIST_TASKS$/) {
+                # Send task list to master
+                print $master_socket "Queued tasks: " . scalar(@job_queue) . "\n";
+                for my $job (@job_queue) {
+                    print $master_socket "  [QUEUED] $job->{target}\n";
+                }
+                print $master_socket "Running tasks: " . scalar(keys %running_jobs) . "\n";
+                for my $task_id (sort { $a <=> $b } keys %running_jobs) {
+                    my $job = $running_jobs{$task_id};
+                    my $state = $job->{started} ? 'RUNNING' : 'DISPATCHED';
+                    print $master_socket "  [$state] Task $task_id: $job->{target}\n";
+                }
+                print $master_socket "TASKS_END\n";
+
+            } elsif ($line =~ /^KILL_WORKERS$/) {
+                # Kill all workers
+                print STDERR "Killing all workers\n";
+                for my $worker (@workers) {
+                    print $worker "SHUTDOWN\n";
+                    close($worker);
+                    $select->remove($worker);
+                }
+                @workers = ();
+                %worker_status = ();
+                %running_jobs = ();
+                print $master_socket "All workers killed\n";
+
+            } elsif ($line =~ /^RESTART_WORKERS (\d+)$/) {
+                my $new_count = $1;
+                # Kill existing workers
+                print STDERR "Restarting workers ($new_count)\n";
+                for my $worker (@workers) {
+                    print $worker "SHUTDOWN\n";
+                    close($worker);
+                    $select->remove($worker);
+                }
+                @workers = ();
+                %worker_status = ();
+                %running_jobs = ();
+
+                # Spawn new workers
+                my $worker_port = $worker_server->sockport();
+                for (my $i = 0; $i < $new_count; $i++) {
+                    my $worker_pid = fork();
+                    if ($worker_pid == 0) {
+                        exec($worker_script, "127.0.0.1:$worker_port");
+                        die "Failed to exec worker: $!\n";
+                    }
+                }
+                print $master_socket "Restarting $new_count workers...\n";
             }
 
         } elsif ($socket == $worker_server) {
@@ -251,6 +302,10 @@ while (1) {
 
             } elsif ($line =~ /^TASK_START (\d+)$/) {
                 my $task_id = $1;
+                # Mark task as actually running (not just dispatched)
+                if (exists $running_jobs{$task_id}) {
+                    $running_jobs{$task_id}{started} = 1;
+                }
                 print STDERR "Task $task_id started\n";
 
             } elsif ($line =~ /^OUTPUT (.*)$/) {
@@ -341,7 +396,8 @@ sub send_status {
     # Send running jobs
     for my $task_id (sort { $a <=> $b } keys %running_jobs) {
         my $job = $running_jobs{$task_id};
-        print $observer "RUNNING_ITEM $task_id $job->{target}\n";
+        my $state = $job->{started} ? 'RUNNING' : 'DISPATCHED';
+        print $observer "RUNNING_ITEM $task_id $state $job->{target}\n";
     }
 
     # Send worker status

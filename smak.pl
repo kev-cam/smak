@@ -317,9 +317,12 @@ sub run_cli {
 Available commands:
   build <target>      Build the specified target
   list [pattern]      List all targets (optionally matching pattern)
+  tasks, t            List pending and active tasks
   status              Show job server status (if parallel builds enabled)
   vars [pattern]      Show all variables (optionally matching pattern)
   deps <target>       Show dependencies for target
+  kill                Kill all workers
+  restart [N]         Restart workers (optionally specify count)
   detach              Detach from CLI, leave job server running
   help, h, ?          Show this help
   quit, exit, q       Shut down job server and exit
@@ -332,6 +335,8 @@ Examples:
   build clean         Build the 'clean' target
   list task           List targets matching 'task'
   deps foo.o          Show dependencies for foo.o
+  tasks               List active and queued tasks
+  restart 8           Restart workers with 8 workers
 HELP
 
         } elsif ($cmd eq 'build' || $cmd eq 'b') {
@@ -410,6 +415,45 @@ HELP
             } else {
                 my $target = $words[0];
                 show_dependencies($target);
+            }
+
+        } elsif ($cmd eq 'tasks' || $cmd eq 't') {
+            if ($jobs > 1 && defined $Smak::job_server_socket) {
+                # Request task list from job-master
+                print $Smak::job_server_socket "LIST_TASKS\n";
+                # Wait for response
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'TASKS_END';
+                    print "$response\n";
+                }
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'kill') {
+            if ($jobs > 1 && defined $Smak::job_server_socket) {
+                print "Killing all workers...\n";
+                print $Smak::job_server_socket "KILL_WORKERS\n";
+                # Wait for response
+                my $response = <$Smak::job_server_socket>;
+                chomp $response if $response;
+                print "$response\n" if $response;
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'restart') {
+            if ($jobs > 1 && defined $Smak::job_server_socket) {
+                my $count = @words > 0 ? $words[0] : $jobs;
+                print "Restarting workers ($count workers)...\n";
+                print $Smak::job_server_socket "RESTART_WORKERS $count\n";
+                # Wait for response
+                my $response = <$Smak::job_server_socket>;
+                chomp $response if $response;
+                print "$response\n" if $response;
+            } else {
+                print "Job server not running.\n";
             }
 
         } else {

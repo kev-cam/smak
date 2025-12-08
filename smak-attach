@@ -159,7 +159,7 @@ unless ($port) {
 
 print "Connecting to job-master (PID $jobserver_pid) on port $port...\n";
 
-# Connect to observer socket
+# Connect to master port
 my $socket = IO::Socket::INET->new(
     PeerHost => '127.0.0.1',
     PeerPort => $port,
@@ -168,98 +168,158 @@ my $socket = IO::Socket::INET->new(
 ) or die "Cannot connect to job-master: $!\n";
 
 $socket->autoflush(1);
-print "Connected to job-master observer.\n";
-print "Commands: [s]tatus, [q]uit, [h]elp\n\n";
+print "Connected to job-master\n";
 
-# Set up select for non-blocking I/O
-my $select = IO::Select->new($socket, \*STDIN);
+# Send environment variables
+for my $key (keys %ENV) {
+    next if $key =~ /^(BASH_FUNC_|_)/;
+    my $val = $ENV{$key};
+    $val =~ s/\n/ /g;
+    print $socket "ENV $key=$val\n";
+}
+print $socket "ENV_END\n";
 
-# Request initial status
-print $socket "STATUS\n";
+# Wait for ready signal
+my $ready = <$socket>;
+chomp $ready if defined $ready;
+unless ($ready && $ready eq 'JOBSERVER_WORKERS_READY') {
+    die "Job-master not ready (got: " . ($ready || "EOF") . ")\n";
+}
 
-my $in_status = 0;
+print "Job-master ready. Entering CLI mode.\n";
+print "Working directory: $selected_js->{cwd}\n" if $selected_js->{cwd};
+print "Workers: $selected_js->{workers}\n\n";
 
-while (1) {
-    my @ready = $select->can_read(0.1);
+# Enter CLI mode
+use Term::ReadLine;
+my $term = Term::ReadLine->new('smak-attach');
 
-    for my $handle (@ready) {
-        if ($handle == $socket) {
-            # Message from job-master
-            my $line = <$socket>;
-            unless (defined $line) {
-                print "\nJob-master disconnected.\n";
-                exit 0;
-            }
-            chomp $line;
+# Set up signal handler for graceful exit
+my $exit_requested = 0;
+local $SIG{INT} = sub { $exit_requested = 1; };
 
-            if ($line eq 'STATUS_START') {
-                $in_status = 1;
-                print "\n=== Build Status ===\n";
+my $line;
+while (!$exit_requested && defined($line = $term->readline('smak> '))) {
+    chomp $line;
+    $line =~ s/^\s+|\s+$//g;
 
-            } elsif ($line eq 'STATUS_END') {
-                $in_status = 0;
-                print "==================\n";
-                print "smak-attach> ";
-                STDOUT->flush();
+    next if $line eq '';
+    $term->addhistory($line) if $line =~ /\S/;
 
-            } elsif ($line =~ /^QUEUED (\d+)$/) {
-                print "Queued jobs: $1\n";
+    my @words = split(/\s+/, $line);
+    my $cmd = shift @words;
 
-            } elsif ($line =~ /^RUNNING (\d+)$/) {
-                print "Running jobs: $1\n";
+    if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') {
+        print "Shutting down job server...\n";
+        print $socket "SHUTDOWN\n";
+        my $ack = <$socket>;
+        last;
 
-            } elsif ($line =~ /^WORKERS (\d+)$/) {
-                print "Total workers: $1\n\n";
+    } elsif ($cmd eq 'detach') {
+        print "Detaching from job server...\n";
+        last;
 
-            } elsif ($line =~ /^QUEUE_ITEM (.*)$/) {
-                print "  [Queued] $1\n";
+    } elsif ($cmd eq 'help' || $cmd eq 'h' || $cmd eq '?') {
+        print <<'HELP';
+Available commands:
+  build <target>      Build the specified target
+  tasks, t            List pending and active tasks
+  status              Show job server status
+  list [pattern]      List all targets (optionally matching pattern)
+  vars [pattern]      Show all variables (optionally matching pattern)
+  deps <target>       Show dependencies for target
+  kill                Kill all workers
+  restart [N]         Restart workers (optionally specify count)
+  detach              Detach from job server (leave it running)
+  help, h, ?          Show this help
+  quit, exit, q       Shut down job server and exit
 
-            } elsif ($line =~ /^RUNNING_ITEM (\d+) (\w+) (.*)$/) {
-                my ($task_id, $state, $target) = ($1, $2, $3);
-                print "  [$state] Task $task_id: $target\n";
+Keyboard shortcuts:
+  Ctrl-C              Detach from job server
 
-            } elsif ($line =~ /^WORKER_STATUS (\w+) (\d+)$/) {
-                my ($status, $task_id) = ($1, $2);
-                if ($status eq 'READY') {
-                    print "  Worker: READY (idle)\n";
-                } else {
-                    print "  Worker: BUSY (task $task_id)\n";
+HELP
+
+    } elsif ($cmd eq 'build' || $cmd eq 'b') {
+        if (@words == 0) {
+            print "Usage: build <target>\n";
+        } else {
+            for my $target (@words) {
+                print $socket "SUBMIT_JOB\n";
+                print $socket "$target\n";
+                print $socket ".\n";
+                print $socket "cd . && make $target\n";
+
+                # Wait for completion
+                while (my $response = <$socket>) {
+                    chomp $response;
+                    if ($response =~ /^OUTPUT (.*)$/) {
+                        print "$1\n";
+                    } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+                        my ($completed_target, $exit_code) = ($1, $2);
+                        if ($exit_code == 0) {
+                            print "Build succeeded: $completed_target\n";
+                        } else {
+                            print "Build failed: $completed_target (exit code $exit_code)\n";
+                        }
+                        last;
+                    }
                 }
-
-            } elsif ($line =~ /^QUEUED (.*)$/) {
-                print "[Queued] $1\n";
-
-            } else {
-                print "$line\n" if $line;
-            }
-
-        } elsif ($handle == \*STDIN) {
-            # User input
-            my $input = <STDIN>;
-            unless (defined $input) {
-                print "\nExiting...\n";
-                print $socket "QUIT\n";
-                exit 0;
-            }
-            chomp $input;
-
-            if ($input =~ /^s(tatus)?$/i) {
-                print $socket "STATUS\n";
-
-            } elsif ($input =~ /^q(uit)?$/i) {
-                print "Disconnecting...\n";
-                print $socket "QUIT\n";
-                exit 0;
-
-            } elsif ($input =~ /^h(elp)?$/i) {
-                print "\nCommands:\n";
-                print "  s, status - Request current build status\n";
-                print "  q, quit   - Disconnect and exit\n";
-                print "  h, help   - Show this help\n\n";
-
-            } elsif ($input ne '') {
-                print "Unknown command. Type 'h' for help.\n";
             }
         }
+
+    } elsif ($cmd eq 'tasks' || $cmd eq 't') {
+        print $socket "LIST_TASKS\n";
+        while (my $response = <$socket>) {
+            chomp $response;
+            last if $response eq 'TASKS_END';
+            print "$response\n";
+        }
+
+    } elsif ($cmd eq 'status' || $cmd eq 'st') {
+        print "Job server PID: $jobserver_pid\n";
+        print "Workers: $selected_js->{workers}\n";
+        print "Working directory: $selected_js->{cwd}\n" if $selected_js->{cwd};
+
+    } elsif ($cmd eq 'kill') {
+        print "Killing all workers...\n";
+        print $socket "KILL_WORKERS\n";
+        my $response = <$socket>;
+        chomp $response if $response;
+        print "$response\n" if $response;
+
+    } elsif ($cmd eq 'restart') {
+        my $count = @words > 0 ? $words[0] : $selected_js->{workers};
+        print "Restarting workers ($count workers)...\n";
+        print $socket "RESTART_WORKERS $count\n";
+        my $response = <$socket>;
+        chomp $response if $response;
+        print "$response\n" if $response;
+
+    } elsif ($cmd eq 'list' || $cmd eq 'ls' || $cmd eq 'l') {
+        print "list command not yet implemented in attach mode\n";
+
+    } elsif ($cmd eq 'vars' || $cmd eq 'v') {
+        print "vars command not yet implemented in attach mode\n";
+
+    } elsif ($cmd eq 'deps' || $cmd eq 'd') {
+        print "deps command not yet implemented in attach mode\n";
+
+    } else {
+        print "Unknown command: $cmd\n";
+        print "Type 'help' for available commands.\n";
+    }
+
+    # Check for exit request from Ctrl-C
+    if ($exit_requested) {
+        last;
     }
 }
+
+if ($exit_requested || !defined($line)) {
+    print "\nDetaching from job server.\n";
+    print "Job server still running (PID $jobserver_pid).\n";
+    print "To reattach: ./smak-attach\n";
+}
+
+close($socket);
+exit 0;

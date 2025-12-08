@@ -106,7 +106,7 @@ unless (@jobservers) {
     print STDERR "No running smak job-master instances found.\n";
     print STDERR "Checking for smak.pl processes...\n";
 
-    my $smak_procs = `pgrep -lfa 'smak-jobserver' 2>/dev/null`;
+    my $smak_procs = `pgrep -lfa 'smak.pl' 2>/dev/null`;
     if ($smak_procs) {
         print STDERR "Found smak.pl processes:\n$smak_procs";
         print STDERR "\nThe job-master may have crashed. Check for errors in:\n";

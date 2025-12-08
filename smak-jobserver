@@ -11,45 +11,27 @@ use FindBin qw($RealBin);
 #   - Master socket (build requests)
 #   - Worker sockets (job results)
 
-# Usage: smak-jobserver <num_workers> <master_host:port>
-my ($num_workers, $master_addr) = @ARGV;
-die "Usage: $0 <num_workers> <master_host:port>\n" unless $num_workers && $master_addr;
-
-# Parse master address
-my ($master_host, $master_port) = split(/:/, $master_addr);
-die "Invalid master address. Use host:port\n" unless defined $master_port;
-
-# Connect to master
-print STDERR "Job-master connecting to master at $master_host:$master_port...\n";
-my $master_socket = IO::Socket::INET->new(
-    PeerHost => $master_host,
-    PeerPort => $master_port,
-    Proto    => 'tcp',
-    Timeout  => 10,
-) or die "Cannot connect to master: $!\n";
-
-$master_socket->autoflush(1);
-print STDERR "Job-master connected to master\n";
-
-# Send ready signal
-print $master_socket "JOBSERVER_READY\n";
-
-# Receive environment from master
-my %worker_env;
-while (my $line = <$master_socket>) {
-    chomp $line;
-    last if $line eq 'ENV_END';
-    if ($line =~ /^ENV (\w+)=(.*)$/) {
-        $worker_env{$1} = $2;
-    }
-}
-print STDERR "Job-master received environment\n";
+# Usage: smak-jobserver <num_workers>
+my ($num_workers) = @ARGV;
+die "Usage: $0 <num_workers>\n" unless $num_workers;
 
 # Create worker pool
 my @workers;
 my %worker_status;  # socket => {busy => 0/1, task_id => N}
 my $worker_script = "$RealBin/smak-worker";
 die "Worker script not found: $worker_script\n" unless -x $worker_script;
+
+# Create socket server for master connections
+my $master_server = IO::Socket::INET->new(
+    LocalAddr => '127.0.0.1',
+    LocalPort => 0,  # Let OS assign port
+    Proto     => 'tcp',
+    Listen    => 1,
+    Reuse     => 1,
+) or die "Cannot create master server: $!\n";
+
+my $master_port = $master_server->sockport();
+print STDERR "Job-master master server on port $master_port\n";
 
 # Create socket server for workers
 my $worker_server = IO::Socket::INET->new(
@@ -75,14 +57,34 @@ my $observer_server = IO::Socket::INET->new(
 my $observer_port = $observer_server->sockport();
 print STDERR "Job-master observer server on port $observer_port\n";
 
-# Write observer port to file for smak-attach to find
+# Write ports to file for smak-attach to find
 open(my $port_fh, '>', "/tmp/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
 if ($port_fh) {
     print $port_fh "$observer_port\n";
+    print $port_fh "$master_port\n";
     close($port_fh);
 }
 
 my @observers;  # List of connected observers
+
+# Wait for initial master connection
+print STDERR "Waiting for master connection...\n";
+my $master_socket = $master_server->accept();
+die "Failed to accept master connection\n" unless $master_socket;
+$master_socket->autoflush(1);
+print STDERR "Master connected\n";
+
+# Send environment to master and receive it back
+# (Master will send us the environment variables)
+my %worker_env;
+while (my $line = <$master_socket>) {
+    chomp $line;
+    last if $line eq 'ENV_END';
+    if ($line =~ /^ENV (\w+)=(.*)$/) {
+        $worker_env{$1} = $2;
+    }
+}
+print STDERR "Job-master received environment\n";
 
 # Spawn workers
 for (my $i = 0; $i < $num_workers; $i++) {
@@ -100,7 +102,8 @@ for (my $i = 0; $i < $num_workers; $i++) {
 # Accept worker connections
 $worker_server->blocking(0);
 $observer_server->blocking(0);
-my $select = IO::Select->new($worker_server, $observer_server, $master_socket);
+$master_server->blocking(0);
+my $select = IO::Select->new($worker_server, $observer_server, $master_socket, $master_server);
 my $workers_connected = 0;
 my $startup_timeout = 10;
 my $start_time = time();
@@ -152,13 +155,42 @@ while (1) {
     my @ready = $select->can_read(0.1);
 
     for my $socket (@ready) {
-        if ($socket == $master_socket) {
+        if ($socket == $master_server) {
+            # New master connecting
+            my $new_master = $master_server->accept();
+            if ($new_master) {
+                if ($master_socket) {
+                    print STDERR "New master connecting, closing old connection\n";
+                    $select->remove($master_socket);
+                    close($master_socket);
+                }
+                $master_socket = $new_master;
+                $master_socket->autoflush(1);
+                $select->add($master_socket);
+                print STDERR "New master connected\n";
+
+                # Receive environment from new master
+                %worker_env = ();
+                while (my $line = <$master_socket>) {
+                    chomp $line;
+                    last if $line eq 'ENV_END';
+                    if ($line =~ /^ENV (\w+)=(.*)$/) {
+                        $worker_env{$1} = $2;
+                    }
+                }
+                print $master_socket "JOBSERVER_WORKERS_READY\n";
+                print STDERR "New master ready\n";
+            }
+
+        } elsif ($socket == $master_socket) {
             # Master sent us something
             my $line = <$socket>;
             unless (defined $line) {
-                print STDERR "Master disconnected. Shutting down.\n";
-                shutdown_workers();
-                exit 0;
+                print STDERR "Master disconnected. Waiting for reconnection...\n";
+                $select->remove($master_socket);
+                close($master_socket);
+                $master_socket = undef;
+                next;
             }
             chomp $line;
 

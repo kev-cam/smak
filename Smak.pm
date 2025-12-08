@@ -104,18 +104,6 @@ sub start_job_server {
 
     return if $jobs <= 1;  # No job server needed for sequential builds
 
-    # Create socket server for job-master to connect to
-    my $server = IO::Socket::INET->new(
-        LocalAddr => '127.0.0.1',
-        LocalPort => 0,  # Let OS assign port
-        Proto     => 'tcp',
-        Listen    => 1,
-        Reuse     => 1,
-    ) or die "Cannot create socket for job-master: $!\n";
-
-    my $port = $server->sockport();
-    warn "Master listening on port $port for job-master\n" if $ENV{SMAK_DEBUG};
-
     # Spawn job-master process
     my $jobserver_script = "$RealBin/smak-jobserver";
     die "Job-master script not found: $jobserver_script\n" unless -x $jobserver_script;
@@ -125,26 +113,42 @@ sub start_job_server {
 
     if ($job_server_pid == 0) {
         # Child - exec job-master
-        exec($jobserver_script, $jobs, "127.0.0.1:$port");
+        exec($jobserver_script, $jobs);
         die "Failed to exec job-master: $!\n";
     }
 
     warn "Spawned job-master with PID $job_server_pid\n" if $ENV{SMAK_DEBUG};
 
-    # Wait for job-master to connect
-    $server->timeout(10);
-    $job_server_socket = $server->accept();
-    die "Job-master failed to connect\n" unless $job_server_socket;
+    # Wait for job-master to create port file
+    my $port_file = "/tmp/smak-jobserver-$job_server_pid.port";
+    my $timeout = 10;
+    my $start = time();
+    while (! -f $port_file) {
+        if (time() - $start > $timeout) {
+            die "Job-master failed to start (no port file)\n";
+        }
+        select(undef, undef, undef, 0.1);
+    }
+
+    # Read master port from file
+    open(my $fh, '<', $port_file) or die "Cannot read port file: $!\n";
+    my $observer_port = <$fh>;
+    my $master_port = <$fh>;
+    close($fh);
+    chomp($observer_port, $master_port);
+
+    warn "Job-master master port: $master_port\n" if $ENV{SMAK_DEBUG};
+
+    # Connect to job-master
+    $job_server_socket = IO::Socket::INET->new(
+        PeerHost => '127.0.0.1',
+        PeerPort => $master_port,
+        Proto    => 'tcp',
+        Timeout  => 10,
+    ) or die "Cannot connect to job-master: $!\n";
 
     $job_server_socket->autoflush(1);
-    close($server);  # Don't need listener anymore
-
-    # Wait for READY signal
-    my $ready = <$job_server_socket>;
-    chomp $ready if defined $ready;
-    die "Job-master didn't send READY\n" unless $ready eq 'JOBSERVER_READY';
-
-    warn "Job-master connected and ready\n" if $ENV{SMAK_DEBUG};
+    warn "Connected to job-master\n" if $ENV{SMAK_DEBUG};
 
     # Send environment to job-master
     for my $key (keys %ENV) {

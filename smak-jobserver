@@ -63,6 +63,27 @@ my $worker_server = IO::Socket::INET->new(
 my $worker_port = $worker_server->sockport();
 print STDERR "Job-master worker server on port $worker_port\n";
 
+# Create socket server for observers (monitoring/attach)
+my $observer_server = IO::Socket::INET->new(
+    LocalAddr => '127.0.0.1',
+    LocalPort => 0,  # Let OS assign port
+    Proto     => 'tcp',
+    Listen    => 5,  # Allow multiple observers
+    Reuse     => 1,
+) or die "Cannot create observer server: $!\n";
+
+my $observer_port = $observer_server->sockport();
+print STDERR "Job-master observer server on port $observer_port\n";
+
+# Write observer port to file for smak-attach to find
+open(my $port_fh, '>', "/tmp/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
+if ($port_fh) {
+    print $port_fh "$observer_port\n";
+    close($port_fh);
+}
+
+my @observers;  # List of connected observers
+
 # Spawn workers
 for (my $i = 0; $i < $num_workers; $i++) {
     my $pid = fork();
@@ -78,7 +99,8 @@ for (my $i = 0; $i < $num_workers; $i++) {
 
 # Accept worker connections
 $worker_server->blocking(0);
-my $select = IO::Select->new($worker_server, $master_socket);
+$observer_server->blocking(0);
+my $select = IO::Select->new($worker_server, $observer_server, $master_socket);
 my $workers_connected = 0;
 my $startup_timeout = 10;
 my $start_time = time();
@@ -100,7 +122,7 @@ while ($workers_connected < $num_workers) {
                 chomp $ready if defined $ready;
                 if ($ready eq 'READY') {
                     push @workers, $worker;
-                    $worker_status{$worker} = {busy => 0, task_id => 0};
+                    $worker_status{$worker} = {ready => 1, task_id => 0};
                     $select->add($worker);
                     $workers_connected++;
                     print STDERR "Worker connected ($workers_connected/$num_workers)\n";
@@ -160,9 +182,53 @@ while (1) {
                 };
 
                 print STDERR "Queued job: $target\n";
+                broadcast_observers("QUEUED $target");
 
                 # Try to dispatch
                 dispatch_jobs();
+            }
+
+        } elsif ($socket == $worker_server) {
+            # New worker connecting
+            my $worker = $worker_server->accept();
+            if ($worker) {
+                $worker->autoflush(1);
+                $select->add($worker);
+                push @workers, $worker;
+                $worker_status{$worker} = {ready => 0, task_id => 0};
+                print STDERR "Worker connected during runtime\n";
+            }
+
+        } elsif ($socket == $observer_server) {
+            # New observer connecting
+            my $observer = $observer_server->accept();
+            if ($observer) {
+                $observer->autoflush(1);
+                $select->add($observer);
+                push @observers, $observer;
+                print STDERR "Observer connected\n";
+                # Send current status
+                send_status($observer);
+            }
+
+        } elsif (grep { $_ == $socket } @observers) {
+            # Observer sent command
+            my $line = <$socket>;
+            unless (defined $line) {
+                # Observer disconnected
+                print STDERR "Observer disconnected\n";
+                $select->remove($socket);
+                @observers = grep { $_ != $socket } @observers;
+                next;
+            }
+            chomp $line;
+
+            if ($line eq 'STATUS') {
+                send_status($socket);
+            } elsif ($line eq 'QUIT') {
+                close($socket);
+                $select->remove($socket);
+                @observers = grep { $_ != $socket } @observers;
             }
 
         } else {
@@ -176,7 +242,14 @@ while (1) {
             }
             chomp $line;
 
-            if ($line =~ /^TASK_START (\d+)$/) {
+            if ($line eq 'READY') {
+                # Worker is ready for a job
+                $worker_status{$socket}{ready} = 1;
+                print STDERR "Worker ready\n";
+                # Try to dispatch queued jobs
+                dispatch_jobs();
+
+            } elsif ($line =~ /^TASK_START (\d+)$/) {
                 my $task_id = $1;
                 print STDERR "Task $task_id started\n";
 
@@ -189,18 +262,13 @@ while (1) {
                 my ($task_id, $exit_code) = ($1, $2);
                 my $job = $running_jobs{$task_id};
 
-                # Mark worker as available
-                $worker_status{$socket}{busy} = 0;
-                $worker_status{$socket}{task_id} = 0;
+                # Don't mark ready here - wait for READY message
                 delete $running_jobs{$task_id};
 
                 print STDERR "Task $task_id completed (exit=$exit_code)\n";
 
                 # Report to master
                 print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n";
-
-                # Dispatch more jobs
-                dispatch_jobs();
             }
         }
     }
@@ -208,29 +276,30 @@ while (1) {
 
 sub dispatch_jobs {
     while (@job_queue) {
-        # Find available worker
-        my $available_worker;
+        # Find ready worker
+        my $ready_worker;
         for my $worker (@workers) {
-            if (!$worker_status{$worker}{busy}) {
-                $available_worker = $worker;
+            if ($worker_status{$worker}{ready}) {
+                $ready_worker = $worker;
                 last;
             }
         }
 
-        last unless $available_worker;
+        last unless $ready_worker;  # No ready workers
 
         # Dispatch job
         my $job = shift @job_queue;
         my $task_id = $next_task_id++;
 
-        $worker_status{$available_worker}{busy} = 1;
-        $worker_status{$available_worker}{task_id} = $task_id;
+        # Mark worker as no longer ready (will send READY when done)
+        $worker_status{$ready_worker}{ready} = 0;
+        $worker_status{$ready_worker}{task_id} = $task_id;
         $running_jobs{$task_id} = $job;
-        $running_jobs{$task_id}{worker} = $available_worker;
+        $running_jobs{$task_id}{worker} = $ready_worker;
 
-        print $available_worker "TASK $task_id\n";
-        print $available_worker "DIR $job->{dir}\n";
-        print $available_worker "CMD $job->{command}\n";
+        print $ready_worker "TASK $task_id\n";
+        print $ready_worker "DIR $job->{dir}\n";
+        print $ready_worker "CMD $job->{command}\n";
 
         print STDERR "Dispatched task $task_id to worker\n";
     }
@@ -246,4 +315,42 @@ sub shutdown_workers {
     while ((my $pid = waitpid(-1, WNOHANG)) > 0) {
         # Zombie reaper
     }
+}
+
+sub broadcast_observers {
+    my ($message) = @_;
+    for my $observer (@observers) {
+        print $observer "$message\n";
+    }
+}
+
+sub send_status {
+    my ($observer) = @_;
+
+    # Send queue status
+    print $observer "STATUS_START\n";
+    print $observer "QUEUED " . scalar(@job_queue) . "\n";
+    print $observer "RUNNING " . scalar(keys %running_jobs) . "\n";
+    print $observer "WORKERS " . scalar(@workers) . "\n";
+
+    # Send queued jobs
+    for my $job (@job_queue) {
+        print $observer "QUEUE_ITEM $job->{target}\n";
+    }
+
+    # Send running jobs
+    for my $task_id (sort { $a <=> $b } keys %running_jobs) {
+        my $job = $running_jobs{$task_id};
+        print $observer "RUNNING_ITEM $task_id $job->{target}\n";
+    }
+
+    # Send worker status
+    for my $worker (@workers) {
+        my $status = $worker_status{$worker};
+        my $ready = $status->{ready} ? 'READY' : 'BUSY';
+        my $task_id = $status->{task_id} || 0;
+        print $observer "WORKER_STATUS $ready $task_id\n";
+    }
+
+    print $observer "STATUS_END\n";
 }

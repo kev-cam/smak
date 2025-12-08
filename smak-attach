@@ -111,7 +111,7 @@ unless (@jobservers) {
         print STDERR "Found smak.pl processes:\n$smak_procs";
         print STDERR "\nThe job-master may have crashed. Check for errors in:\n";
         print STDERR "  - stderr output from smak.pl\n";
-        print STDERR "  - Try running: SMAK_DEBUG=1 smak.pl -cli -j 4\n";
+        print STDERR "  - Try running: SMAK_DEBUG=1 smak -cli -j 4\n";
     }
 
     exit 1;

@@ -8,100 +8,85 @@ use Getopt::Long;
 
 # Parse command-line options
 my $target_pid;
-GetOptions('pid=i' => \$target_pid) or die "Usage: $0 [-pid <process-id>]\n";
+my $target_port;
+my $pid_arg;
+GetOptions('pid=s' => \$pid_arg) or die "Usage: $0 [-pid <process-id>[:<port>]]\n";
 
-# Find smak-jobserver processes using /proc
+# Parse PID and optional port from -pid argument
+if ($pid_arg) {
+    if ($pid_arg =~ /^(\d+):(\d+)$/) {
+        ($target_pid, $target_port) = ($1, $2);
+    } elsif ($pid_arg =~ /^(\d+)$/) {
+        $target_pid = $1;
+        $target_port = undef;
+    } else {
+        die "Invalid -pid format. Use: -pid <process-id>[:<port>]\n";
+    }
+}
+
+# Find smak-jobserver processes using port files
 sub find_jobservers {
     my @jobservers;
 
-    # Scan /proc for smak-jobserver processes
-    opendir(my $proc_dir, '/proc') or die "Cannot open /proc: $!\n";
-    my @pids = grep { /^\d+$/ } readdir($proc_dir);
-    closedir($proc_dir);
+    # Scan /tmp for port files - this is the source of truth
+    my @port_files = glob("/tmp/smak-jobserver-*.port");
 
-    for my $pid (@pids) {
-        my $cmdline_file = "/proc/$pid/cmdline";
-        next unless -f $cmdline_file;
+    for my $port_file (@port_files) {
+        my ($pid) = $port_file =~ /smak-jobserver-(\d+)\.port/;
+        next unless $pid;
 
-        open(my $fh, '<', $cmdline_file) or next;
-        my $cmdline = <$fh>;
-        close($fh);
-        next unless $cmdline;
 
-        $cmdline =~ s/\0/ /g;
-        $cmdline =~ s/\s+$//;
-
-        # Check if it's a smak-jobserver process
-        if ($cmdline =~ /smak.pl\s+(\d+)/) {
-            my $num_workers = $1;
-
-            # Get working directory
-            my $cwd = readlink("/proc/$pid/cwd");
-
-            # Get listening ports using lsof
-            my @ports;
-            my $lsof_output = `lsof -Pan -p $pid -i TCP -s TCP:LISTEN 2>/dev/null`;
-            for my $line (split /\n/, $lsof_output) {
-                if ($line =~ /:(\d+)\s+\(LISTEN\)/) {
-                    push @ports, $1;
-                }
-            }
-
-            # Expect 3 ports: master, worker, observer
-            if (@ports >= 2) {
-                push @jobservers, {
-                    pid => $pid,
-                    workers => $num_workers,
-                    cwd => $cwd,
-                    ports => \@ports,
-                    cmdline => $cmdline,
-                };
-            }
+        # Check if process is still alive
+        unless (-d "/proc/$pid") {
+            # Stale port file
+            print STDERR "Removing stale port file: $port_file\n";
+            unlink $port_file;
+            next;
         }
+
+        # Read port information
+        open(my $fh, '<', $port_file) or next;
+        my @ports;
+        while (my $line = <$fh>) {
+            chomp $line;
+            push @ports, $line if $line =~ /^\d+$/;
+        }
+        close($fh);
+
+        next unless @ports >= 2;  # Need at least observer and master ports
+        my ($observer_port, $master_port) = @ports;
+
+        # Get process info
+        my $cmdline_file = "/proc/$pid/cmdline";
+        my $cmdline = '';
+        if (open(my $cmd_fh, '<', $cmdline_file)) {
+            $cmdline = <$cmd_fh>;
+            close($cmd_fh);
+            $cmdline =~ s/\0/ /g;
+            $cmdline =~ s/\s+$//;
+        }
+
+        # Get working directory
+        my $cwd = readlink("/proc/$pid/cwd");
+
+        # Try to determine number of workers from lsof (count worker connections)
+        my $num_workers = 0;
+        my $lsof_output = `lsof -Pan -p $pid -i TCP 2>/dev/null`;
+        for my $line (split /\n/, $lsof_output) {
+            $num_workers++ if $line =~ /ESTABLISHED/;
+        }
+
+        push @jobservers, {
+            pid => $pid,
+            workers => $num_workers,
+            cwd => $cwd,
+            cmdline => $cmdline,
+            observer_port => $observer_port,
+            master_port => $master_port,
+        };
     }
 
     return @jobservers;
-}
-
-# Verify and update port files
-sub check_port_files {
-    my (@jobservers) = @_;
-
-    # Get existing port files
-    my @port_files = glob("/tmp/smak-jobserver-*.port");
-
-    # Build hash of valid PIDs
-    my %valid_pids = map { $_->{pid} => 1 } @jobservers;
-
-    # Clean up stale port files
-    for my $file (@port_files) {
-        my ($pid) = $file =~ /smak-jobserver-(\d+)\.port/;
-        unless ($pid && $valid_pids{$pid}) {
-            print STDERR "Removing stale port file: $file\n";
-            unlink $file;
-        }
-    }
-
-    # Verify port files are consistent
-    for my $js (@jobservers) {
-        my $port_file = "/tmp/smak-jobserver-$js->{pid}.port";
-        if (-f $port_file) {
-            # Read and verify
-            open(my $fh, '<', $port_file) or next;
-            my @file_ports;
-            while (my $line = <$fh>) {
-                chomp $line;
-                push @file_ports, $line if $line =~ /^\d+$/;
-            }
-            close($fh);
-
-            # Check if ports match (at least observer and master)
-            if (@file_ports >= 2) {
-                $js->{observer_port} = $file_ports[0];
-                $js->{master_port} = $file_ports[1];
-            }
-        }
-    }
 }
 
 # Find running job-master instances
@@ -109,21 +94,10 @@ my @jobservers = find_jobservers();
 
 unless (@jobservers) {
     print STDERR "No running smak job-master instances found.\n";
-    print STDERR "Checking for smak.pl processes...\n";
-
-    my $smak_procs = `pgrep -lfa 'smak.pl' 2>/dev/null`;
-    if ($smak_procs) {
-        print STDERR "Found smak.pl processes:\n$smak_procs";
-        print STDERR "\nThe job-master may have crashed. Check for errors in:\n";
-        print STDERR "  - stderr output from smak.pl\n";
-        print STDERR "  - Try running: SMAK_DEBUG=1 smak -cli -j 4\n";
-    }
-
+    print STDERR "Check that smak is running with -j option:\n";
+    print STDERR "  smak -cli -j 4\n";
     exit 1;
 }
-
-# Clean up stale port files and verify consistency
-check_port_files(@jobservers);
 
 my $selected_js;
 
@@ -167,8 +141,13 @@ my $jobserver_pid = $selected_js->{pid};
 my $master_port = $selected_js->{master_port};
 my $observer_port = $selected_js->{observer_port};
 
-# Prefer master port for CLI mode, fall back to observer
-my $port = $master_port || $observer_port;
+# Use specified port if provided, otherwise prefer master port for CLI mode
+my $port;
+if ($target_port) {
+    $port = $target_port;
+} else {
+    $port = $master_port || $observer_port;
+}
 unless ($port) {
     die "Cannot determine port for job-master (PID $jobserver_pid)\n";
 }

@@ -387,7 +387,11 @@ HELP
                 # Request status from job-master
                 print "Job server running with $jobs workers (PID $Smak::job_server_pid)\n";
                 # Could send STATUS request to job-master here
-                print "Use: smak-attach -pid $Smak::job_server_pid\n";
+                if ($Smak::job_server_master_port) {
+                    print "Use: smak-attach -pid $Smak::job_server_pid:$Smak::job_server_master_port\n";
+                } else {
+                    print "Use: smak-attach -pid $Smak::job_server_pid\n";
+                }
             } elsif ($jobs > 1) {
                 print "Job server configured for $jobs jobs but not currently active\n";
             } else {
@@ -473,8 +477,12 @@ HELP
     if ($detached || !defined($line)) {
         print "\nDetached from CLI.\n";
         if ($jobserver_pid) {
-            print "Job server still running\n";
-            print "To reconnect: smak-attach -pid $jobserver_pid\n";
+            print "Job server still running (PID $jobserver_pid).\n";
+            if ($Smak::job_server_master_port) {
+                print "To reconnect: ./smak-attach -pid $jobserver_pid:$Smak::job_server_master_port\n";
+            } else {
+                print "To reconnect: ./smak-attach -pid $jobserver_pid\n";
+            }
 
             # Fork to keep master connection alive in background
             my $bg_pid = fork();

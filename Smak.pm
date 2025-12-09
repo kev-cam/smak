@@ -598,7 +598,7 @@ sub build_target {
     $visited->{$visit_key} = 1;
 
     # Debug: show what we're building
-    warn "DEBUG: Building target '$target' (depth=$depth, makefile=$makefile)\n" if $ENV{SMAK_DEBUG};
+    warn "DEBUG[" . __LINE__ . "]: Building target '$target' (depth=$depth, makefile=$makefile)\n" if $ENV{SMAK_DEBUG};
 
     my $key = "$makefile\t$target";
     my @deps;
@@ -648,12 +648,12 @@ sub build_target {
     # Debug: show dependencies and rule status
     if ($ENV{SMAK_DEBUG}) {
         if (@deps) {
-            warn "DEBUG:   Dependencies: " . join(', ', @deps) . "\n";
+            warn "DEBUG[" . __LINE__ . "]:   Dependencies: " . join(', ', @deps) . "\n";
         }
         if ($rule && $rule =~ /\S/) {
-            warn "DEBUG:   Has rule: yes\n";
+            warn "DEBUG[" . __LINE__ . "]:   Has rule: yes\n";
         } else {
-            warn "DEBUG:   Has rule: no\n";
+            warn "DEBUG[" . __LINE__ . "]:   Has rule: no\n";
         }
     }
 
@@ -686,12 +686,12 @@ sub build_target {
                 # Check if this is a recursive make/smak invocation
                 if ($cmd_line =~ /\b(make|smak)\s/ || $cmd_line =~ m{/smak(?:\s|$)}) {
                     # Debug: show what we detected
-                    warn "DEBUG: Detected recursive make/smak: $cmd_line\n" if $ENV{SMAK_DEBUG};
+                    warn "DEBUG[" . __LINE__ . "]: Detected recursive make/smak: $cmd_line\n" if $ENV{SMAK_DEBUG};
 
                     # Parse the make/smak command line to extract -f and targets
                     my ($sub_makefile, @sub_targets) = parse_make_command($cmd_line);
 
-                    warn "DEBUG: Parsed makefile='$sub_makefile' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
+                    warn "DEBUG[" . __LINE__ . "]: Parsed makefile='$sub_makefile' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
 
                     if ($sub_makefile) {
                         # Save current makefile state

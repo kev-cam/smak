@@ -1648,8 +1648,11 @@ sub build_target {
     }
 
     # Recursively build dependencies
-    for my $dep (@deps) {
-        build_target($dep, $visited, $depth + 1);
+    # In parallel mode, skip this - let job-master handle dependency expansion
+    unless ($job_server_socket) {
+        for my $dep (@deps) {
+            build_target($dep, $visited, $depth + 1);
+        }
     }
 
     # Execute rule if it exists (submit_job is blocking, so no need to wait)
@@ -2781,6 +2784,8 @@ sub run_job_master {
     my @job_queue;
     my %running_jobs;  # task_id => {target, worker, dir, command, started}
     my %completed_targets;  # target => 1 (successfully built targets)
+    my %pending_composite;  # composite targets waiting for dependencies
+                            # target => {deps => [list], master_socket => socket}
     my $next_task_id = 1;
 
     # Helper functions
@@ -2987,13 +2992,26 @@ sub run_job_master {
                                     print STDERR "Skipping main target '$target' (already handled)\n";
                                     $target_has_command = 1;  # Already queued
                                 }
-                            }
+                            } else {
+                                # Composite target with no command
+                                # Track it as pending and send JOB_COMPLETE when deps finish
+                                my @pending_deps;
+                                for my $dep (@deps) {
+                                    next if $dep =~ /^\.PHONY$/;
+                                    push @pending_deps, $dep unless exists $completed_targets{$dep};
+                                }
 
-                            # If target has no command, it's a composite target
-                            # Send JOB_COMPLETE immediately (dependencies will be built)
-                            unless ($target_has_command) {
-                                print STDERR "Composite target '$target' has no command, completing immediately\n";
-                                print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket;
+                                if (@pending_deps) {
+                                    print STDERR "Composite target '$target' waiting for " . scalar(@pending_deps) . " dependencies\n";
+                                    $pending_composite{$target} = {
+                                        deps => \@pending_deps,
+                                        master_socket => $master_socket,
+                                    };
+                                } else {
+                                    # All dependencies already complete
+                                    print STDERR "Composite target '$target' has no pending dependencies, completing\n";
+                                    print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket;
+                                }
                             }
                         } else {
                             # No dependencies, queue the job as-is (if not already handled)
@@ -3311,6 +3329,20 @@ sub run_job_master {
                     if ($exit_code == 0 && $job->{target}) {
                         $completed_targets{$job->{target}} = 1;
                         print STDERR "Task $task_id completed successfully: $job->{target}\n";
+
+                        # Check if any pending composite targets can now complete
+                        for my $comp_target (keys %pending_composite) {
+                            my $comp = $pending_composite{$comp_target};
+                            # Remove this completed target from pending deps
+                            $comp->{deps} = [grep { $_ ne $job->{target} } @{$comp->{deps}}];
+
+                            # If all dependencies done, complete the composite target
+                            if (@{$comp->{deps}} == 0) {
+                                print STDERR "All dependencies complete for composite target '$comp_target'\n";
+                                print $comp->{master_socket} "JOB_COMPLETE $comp_target 0\n" if $comp->{master_socket};
+                                delete $pending_composite{$comp_target};
+                            }
+                        }
                     } else {
                         print STDERR "Task $task_id completed with exit=$exit_code\n";
                     }

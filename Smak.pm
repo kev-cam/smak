@@ -2821,14 +2821,66 @@ sub run_job_master {
                     my $dir = <$socket>; chomp $dir if defined $dir;
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
-                    # Queue the job
-                    push @job_queue, {
-                        target => $target,
-                        dir => $dir,
-                        command => $cmd,
-                    };
+                    print STDERR "Received job request for target: $target\n";
 
-                    print STDERR "Queued job: $target\n";
+                    # Check if target has dependencies that should be parallelized
+                    # Access inherited Makefile data: %rules, %pseudo_rule, %variables
+                    if (exists $Smak::rules{$target} && ref($Smak::rules{$target}) eq 'ARRAY') {
+                        my @deps = @{$Smak::rules{$target}};
+
+                        if (@deps > 0) {
+                            print STDERR "Target '$target' has " . scalar(@deps) . " dependencies\n";
+                            print STDERR "Dependencies: " . join(', ', @deps) . "\n";
+
+                            # Queue each dependency as a separate job
+                            for my $dep (@deps) {
+                                # Skip phony dependencies or those without build commands
+                                next if $dep =~ /^\.PHONY$/;
+
+                                # Get the build command for this dependency
+                                my $dep_cmd;
+                                if (exists $Smak::pseudo_rule{$dep}) {
+                                    $dep_cmd = $Smak::pseudo_rule{$dep};
+                                } else {
+                                    # Try to build with make
+                                    $dep_cmd = "cd $dir && make $dep";
+                                }
+
+                                push @job_queue, {
+                                    target => $dep,
+                                    dir => $dir,
+                                    command => $dep_cmd,
+                                };
+                                print STDERR "Queued dependency: $dep\n";
+                            }
+
+                            # Also queue the main target if it has its own command
+                            if (exists $Smak::pseudo_rule{$target}) {
+                                push @job_queue, {
+                                    target => $target,
+                                    dir => $dir,
+                                    command => $Smak::pseudo_rule{$target},
+                                };
+                                print STDERR "Queued main target: $target\n";
+                            }
+                        } else {
+                            # No dependencies, queue the job as-is
+                            push @job_queue, {
+                                target => $target,
+                                dir => $dir,
+                                command => $cmd,
+                            };
+                        }
+                    } else {
+                        # Target not in rules, queue as-is
+                        push @job_queue, {
+                            target => $target,
+                            dir => $dir,
+                            command => $cmd,
+                        };
+                    }
+
+                    print STDERR "Job queue now has " . scalar(@job_queue) . " jobs\n";
                     broadcast_observers("QUEUED $target");
 
                     # Try to dispatch

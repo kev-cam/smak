@@ -1,0 +1,332 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use FindBin qw($RealBin);
+use lib $RealBin;
+use Smak;
+use File::Path qw(make_path);
+use POSIX qw(strftime);
+
+# smak-ninja: Work with ninja build files using smak
+# Usage: smak-ninja [build.ninja] [-o output.make] [-Kreport] [-clean]
+
+my $ninja_file = 'build.ninja';
+my $output_file = '';  # Empty means build mode (not generate mode)
+my $report_mode = 0;
+my $clean_mode = 0;
+my $auto_yes = 0;
+
+# Parse command line arguments
+while (@ARGV) {
+    my $arg = shift @ARGV;
+
+    if ($arg eq '-o' || $arg eq '--output') {
+        $output_file = shift @ARGV || die "Error: -o requires an argument\n";
+    }
+    elsif ($arg eq '-Kreport') {
+        $report_mode = 1;
+    }
+    elsif ($arg eq '-clean') {
+        $clean_mode = 1;
+    }
+    elsif ($arg eq '-yes' || $arg eq '--yes') {
+        $auto_yes = 1;
+    }
+    elsif ($arg eq '-h' || $arg eq '--help') {
+        print_help();
+        exit 0;
+    }
+    elsif ($arg =~ /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/) {
+        # Variable assignment (VAR=VALUE)
+        Smak::set_cmd_var($1, $2);
+    }
+    elsif ($arg !~ /^-/) {
+        $ninja_file = $arg;
+    }
+    else {
+        die "Unknown option: $arg\n";
+    }
+}
+
+# Check if ninja file exists (not needed for clean mode if no outputs)
+unless ($clean_mode || -f $ninja_file) {
+    die "Error: Cannot find ninja file: $ninja_file\n";
+}
+
+if ($report_mode) {
+    # Report mode: Compare smak with ninja -v
+    run_report_mode($ninja_file, $auto_yes);
+} elsif ($clean_mode) {
+    # Clean mode: List and remove generated files
+    run_clean_mode($ninja_file);
+} elsif ($output_file) {
+    # Generate Makefile only (when -o is specified)
+    print "Reading ninja file: $ninja_file\n";
+    Smak::parse_ninja($ninja_file);
+
+    print "Converting to Makefile format...\n";
+    Smak::write_makefile($output_file);
+
+    print "Done! You can now use: make -f $output_file\n";
+} else {
+    # Build mode (default): generate temp Makefile and run make
+    print "Reading ninja file: $ninja_file\n";
+    Smak::parse_ninja($ninja_file);
+
+    my $temp_makefile = ".smak-ninja-temp.make";
+    print "Generating temporary Makefile...\n";
+    Smak::write_makefile($temp_makefile);
+
+    print "Building with make...\n";
+    my $ret = system("make -f $temp_makefile");
+
+    unlink($temp_makefile);
+
+    if ($ret == 0) {
+        print "Build completed successfully.\n";
+        exit 0;
+    } else {
+        exit($ret >> 8);
+    }
+}
+
+sub run_report_mode {
+    my ($ninja_file, $auto_yes) = @_;
+
+    # Get project name from current directory
+    use Cwd 'getcwd';
+    my $cwd = getcwd();
+    my $project_name = (split(/\//, $cwd))[-1];
+
+    # Create bug report directory
+    my $timestamp = strftime("%Y%m%d-%H%M%S", localtime);
+    my $report_dir = "$RealBin/bugs/$project_name-$timestamp";
+    make_path($report_dir) or die "Cannot create report directory $report_dir: $!\n";
+
+    # Open log file
+    my $log_file = "$report_dir/build.log";
+    open(my $log_fh, '>', $log_file) or die "Cannot open log file $log_file: $!\n";
+    $log_fh->autoflush(1);
+
+    # Print header
+    my $header = "=== SMAK-NINJA BUILD REPORT ===\n" .
+                 "Timestamp: $timestamp\n" .
+                 "Ninja file: $ninja_file\n" .
+                 "Report directory: $report_dir\n" .
+                 "=" x 50 . "\n\n";
+    print STDOUT $header;
+    print $log_fh $header;
+
+    # Parse ninja file
+    print "Parsing ninja file...\n";
+    print $log_fh "Parsing ninja file...\n";
+    Smak::parse_ninja($ninja_file);
+
+    # Build with smak (dry-run)
+    print "Running smak dry-run...\n";
+    print $log_fh "Running smak dry-run...\n";
+
+    # Capture smak output
+    my $smak_output_file = "$report_dir/smak-dryrun.txt";
+    open(my $smak_fh, '>', $smak_output_file) or die "Cannot write $smak_output_file: $!\n";
+
+    # TODO: Actually run smak build in dry-run mode
+    # For now, just note that this would be implemented
+    print $smak_fh "# Smak dry-run output would go here\n";
+    close($smak_fh);
+
+    # Run ninja -v for comparison
+    print "Running ninja -v for comparison...\n";
+    print $log_fh "Running ninja -v for comparison...\n";
+
+    my $ninja_output_file = "$report_dir/ninja-verbose.txt";
+    system("ninja -v -n > $ninja_output_file 2>&1");
+
+    # Copy ninja file
+    system("cp $ninja_file $report_dir/");
+
+    # Print summary
+    my $summary = "\n" . "=" x 50 . "\n" .
+                  "Report complete!\n" .
+                  "Log saved to: $report_dir/build.log\n" .
+                  "Comparison: smak-dryrun.txt vs ninja-verbose.txt\n" .
+                  "=" x 50 . "\n";
+    print STDOUT $summary;
+    print $log_fh $summary;
+
+    close($log_fh);
+
+    # Offer to commit if in git repo and auto_yes is set
+    if ($auto_yes) {
+        prompt_commit_report($report_dir, $auto_yes);
+    }
+}
+
+sub prompt_commit_report {
+    my ($report_dir, $auto_yes) = @_;
+
+    # Change to smak directory
+    chdir($RealBin) or return;
+
+    # Check if in git repo
+    my $in_git_repo = system("git rev-parse --git-dir >/dev/null 2>&1") == 0;
+    return unless $in_git_repo;
+
+    if ($auto_yes) {
+        print "\nAuto-committing bug report (--yes flag set)...\n";
+
+        my $dir_name = (split(/\//, $report_dir))[-1];
+        my $git_path = "bugs/$dir_name";
+
+        system("git add -f $git_path");
+        my $commit_msg = "Add bug report $dir_name\n\nGenerated by smak-ninja -Kreport\n";
+        system("git", "commit", "-m", $commit_msg);
+
+        print "Bug report committed successfully.\n";
+        print "\nAuto-pushing to remote (--yes flag set)...\n";
+
+        my $branch = `git branch --show-current`;
+        chomp($branch);
+        system("git push origin $branch");
+    }
+}
+
+sub run_clean_mode {
+    my ($ninja_file) = @_;
+
+    unless (-f $ninja_file) {
+        die "Error: Cannot find ninja file: $ninja_file\n";
+    }
+
+    print "Reading ninja file: $ninja_file\n";
+    Smak::parse_ninja($ninja_file);
+
+    # Collect all output files from ninja builds
+    my @outputs = Smak::get_all_ninja_outputs();
+
+    if (@outputs == 0) {
+        print "No generated files found in ninja file.\n";
+        return;
+    }
+
+    # Separate existing files from non-existing
+    my @existing = grep { -e $_ && !-d $_ } @outputs;
+    my @missing = grep { !-e $_ } @outputs;
+    my @dirs = grep { -d $_ } @outputs;
+
+    # Show all potential outputs
+    print "\nGenerated files from ninja:\n";
+    print "=" x 70 . "\n\n";
+
+    if (@existing) {
+        print "Files that exist (will be removed):\n";
+        for my $file (sort @existing) {
+            my $size = -s $file;
+            printf "  %-50s (%d bytes)\n", $file, $size;
+        }
+        print "\n";
+    }
+
+    if (@dirs) {
+        print "Directories (will NOT be removed):\n";
+        for my $dir (sort @dirs) {
+            print "  $dir/\n";
+        }
+        print "\n";
+    }
+
+    if (@missing) {
+        my $count = scalar(@missing);
+        print "Files that don't exist yet: $count\n";
+        if ($count <= 20) {
+            for my $file (sort @missing) {
+                print "  $file\n";
+            }
+        }
+        print "\n";
+    }
+
+    if (@existing == 0) {
+        print "No files to remove.\n";
+        return;
+    }
+
+    # Prompt for confirmation
+    print "Remove " . scalar(@existing) . " existing file(s)? [y/N] ";
+
+    # Handle non-interactive mode
+    my $response = '';
+    if (-t STDIN) {
+        $response = <STDIN>;
+        chomp($response) if defined $response;
+    } else {
+        print "N (non-interactive mode)\n";
+        return;
+    }
+
+    if ($response =~ /^[yY]/) {
+        my $removed = 0;
+        for my $file (@existing) {
+            if (unlink($file)) {
+                $removed++;
+                print "  Removed: $file\n";
+            } else {
+                warn "  Failed to remove $file: $!\n";
+            }
+        }
+        print "\nRemoved $removed file(s).\n";
+    } else {
+        print "Cancelled.\n";
+    }
+}
+
+sub print_help {
+    print <<'HELP';
+smak-ninja - Work with ninja build files using smak
+
+Usage:
+    smak-ninja [build.ninja] [OPTIONS]
+
+Modes:
+    Default mode: Build the project (generate temp Makefile and run make)
+    -o FILE:      Generate Makefile to FILE without building
+    -Kreport:     Generate bug report comparing smak with ninja -v
+    -clean:       List and remove generated files
+
+Options:
+    -o, --output FILE   Generate Makefile to FILE (don't build)
+    -Kreport            Generate bug report (compare with ninja -v)
+    -clean              List and remove all generated files (with confirmation)
+    -yes, --yes         Auto-commit and push bug reports (with -Kreport)
+    -h, --help          Show this help message
+
+Examples:
+    # Build the project (default)
+    smak-ninja
+
+    # Build using a specific ninja file
+    smak-ninja my-build.ninja
+
+    # Generate Makefile without building
+    smak-ninja -o Makefile.generated
+
+    # Generate bug report comparing smak vs ninja
+    smak-ninja -Kreport
+
+    # Generate and auto-commit bug report
+    smak-ninja -Kreport -yes
+
+    # Clean all generated files
+    smak-ninja -clean
+
+Features:
+    - Converts ninja rules to make targets
+    - Default target is 'all' (like ninja)
+    - Tracks dependency files (gcc .d files)
+    - Preserves build commands and variables
+    - Handles ninja $in, $out variable expansion
+    - Bug reports compare with ninja -v instead of make -n
+
+HELP
+}

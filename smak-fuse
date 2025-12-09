@@ -1,0 +1,13 @@
+#!/bin/bash
+# Smak/Fuse - launch fuse commands using the version of libfuse here
+
+FUSE_SO=$(readlink libfuse3.so)
+FUSE_DIR=$(dirname $FUSE_SO)
+
+export LD_LIBRARY_PATH=${FUSE_DIR}:{LD_LIBRARY_PATH}
+
+#export LD_PRELOAD=${FUSE_DIR}/libfuse3.so
+
+export FUSE_ENABLE_SOCKET=${SMAK_FUSE_DEBUG:-1}
+
+exec "$@"

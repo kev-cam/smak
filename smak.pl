@@ -544,20 +544,23 @@ unless ($debug || $dry_run) {
     }
 
     if ($makefile_has_rule && -f $makefile) {
-        # Get current modification time
-        my $old_mtime = (stat($makefile))[9];
+        # Only rebuild if Makefile is out of date (like GNU make)
+        if (Smak::needs_rebuild($makefile)) {
+            # Get current modification time
+            my $old_mtime = (stat($makefile))[9];
 
-        # Try to build the makefile
-        eval {
-            build_target($makefile);
-        };
+            # Try to build the makefile
+            eval {
+                build_target($makefile);
+            };
 
-        # Check if makefile was modified
-        if (-f $makefile) {
-            my $new_mtime = (stat($makefile))[9];
-            if ($new_mtime > $old_mtime) {
-                # Makefile was remade, re-parse it
-                parse_makefile($makefile);
+            # Check if makefile was modified
+            if (-f $makefile) {
+                my $new_mtime = (stat($makefile))[9];
+                if ($new_mtime > $old_mtime) {
+                    # Makefile was remade, re-parse it
+                    parse_makefile($makefile);
+                }
             }
         }
     }

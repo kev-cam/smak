@@ -2816,7 +2816,8 @@ sub run_job_master {
             push @lines, $line if $line =~ /\S/;
         }
 
-        return join("\n", @lines);
+        # Join multiple commands with && so they execute as one line
+        return join(" && ", @lines);
     }
 
     sub is_target_pending {

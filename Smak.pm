@@ -1429,6 +1429,66 @@ sub get_first_target {
     return undef;
 }
 
+# Check if a target needs rebuilding based on timestamp comparison
+# Returns 1 if target needs rebuilding, 0 if up-to-date
+sub needs_rebuild {
+    my ($target) = @_;
+
+    # If target doesn't exist, it needs to be built
+    return 1 unless -e $target;
+
+    # Get target's modification time
+    my $target_mtime = (stat($target))[9];
+    return 1 unless defined $target_mtime;
+
+    # Find target's dependencies
+    my $key = "$makefile\t$target";
+    my @deps;
+
+    if (exists $fixed_deps{$key}) {
+        @deps = @{$fixed_deps{$key} || []};
+    } elsif (exists $pattern_deps{$key}) {
+        @deps = @{$pattern_deps{$key} || []};
+    } elsif (exists $pseudo_deps{$key}) {
+        @deps = @{$pseudo_deps{$key} || []};
+    }
+
+    # Expand variables in dependencies
+    @deps = map {
+        my $dep = $_;
+        # Expand $MV{VAR} references
+        while ($dep =~ /\$MV\{([^}]+)\}/) {
+            my $var = $1;
+            my $val = $MV{$var} // '';
+            $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+        }
+        # If expansion resulted in multiple space-separated values, split them
+        if ($dep =~ /\s/) {
+            split /\s+/, $dep;
+        } else {
+            $dep;
+        }
+    } @deps;
+    # Flatten and filter empty strings
+    @deps = grep { $_ ne '' } @deps;
+
+    # Check if any dependency is newer than target
+    for my $dep (@deps) {
+        # Skip .PHONY and other special targets
+        next if $dep =~ /^\.PHONY$/;
+
+        # If dependency doesn't exist, target needs rebuild
+        return 1 unless -e $dep;
+
+        # Compare modification times
+        my $dep_mtime = (stat($dep))[9];
+        return 1 if $dep_mtime > $target_mtime;
+    }
+
+    # Target is up-to-date
+    return 0;
+}
+
 sub build_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
@@ -1567,6 +1627,23 @@ sub build_target {
             warn "DEBUG:   Has rule: yes\n";
         } else {
             warn "DEBUG:   Has rule: no\n";
+        }
+    }
+
+    # Check if target is .PHONY or needs rebuilding
+    my $is_phony = 0;
+    for my $dep (@deps) {
+        if ($dep eq '.PHONY') {
+            $is_phony = 1;
+            last;
+        }
+    }
+
+    # If not .PHONY and target is up-to-date, skip building
+    unless ($is_phony) {
+        if (-e $target && !needs_rebuild($target)) {
+            warn "DEBUG:   Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
+            return;
         }
     }
 

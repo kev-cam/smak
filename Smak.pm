@@ -2703,9 +2703,29 @@ sub run_job_master {
     # Job queue and dependency tracking
     my @job_queue;
     my %running_jobs;  # task_id => {target, worker, dir, command, started}
+    my %completed_targets;  # target => 1 (successfully built targets)
     my $next_task_id = 1;
 
     # Helper functions
+    sub is_target_pending {
+        my ($target) = @_;
+
+        # Check if already completed
+        return 1 if exists $completed_targets{$target};
+
+        # Check if already in queue
+        for my $job (@job_queue) {
+            return 1 if $job->{target} eq $target;
+        }
+
+        # Check if currently running
+        for my $task_id (keys %running_jobs) {
+            return 1 if $running_jobs{$task_id}{target} eq $target;
+        }
+
+        return 0;
+    }
+
     sub broadcast_observers {
         my ($msg) = @_;
         for my $obs (@observers) {
@@ -2852,6 +2872,12 @@ sub run_job_master {
                                 # Skip phony dependencies or those without build commands
                                 next if $dep =~ /^\.PHONY$/;
 
+                                # Skip if already completed, queued, or running
+                                if (is_target_pending($dep)) {
+                                    print STDERR "Skipping dependency '$dep' (already handled)\n";
+                                    next;
+                                }
+
                                 # Get the build command for this dependency
                                 my $dep_cmd;
                                 if (exists $Smak::pseudo_rule{$dep}) {
@@ -2871,28 +2897,40 @@ sub run_job_master {
 
                             # Also queue the main target if it has its own command
                             if (exists $Smak::pseudo_rule{$target}) {
+                                unless (is_target_pending($target)) {
+                                    push @job_queue, {
+                                        target => $target,
+                                        dir => $dir,
+                                        command => $Smak::pseudo_rule{$target},
+                                    };
+                                    print STDERR "Queued main target: $target\n";
+                                } else {
+                                    print STDERR "Skipping main target '$target' (already handled)\n";
+                                }
+                            }
+                        } else {
+                            # No dependencies, queue the job as-is (if not already handled)
+                            unless (is_target_pending($target)) {
                                 push @job_queue, {
                                     target => $target,
                                     dir => $dir,
-                                    command => $Smak::pseudo_rule{$target},
+                                    command => $cmd,
                                 };
-                                print STDERR "Queued main target: $target\n";
+                            } else {
+                                print STDERR "Skipping target '$target' (already handled)\n";
                             }
-                        } else {
-                            # No dependencies, queue the job as-is
+                        }
+                    } else {
+                        # Target not in rules, queue as-is (if not already handled)
+                        unless (is_target_pending($target)) {
                             push @job_queue, {
                                 target => $target,
                                 dir => $dir,
                                 command => $cmd,
                             };
+                        } else {
+                            print STDERR "Skipping target '$target' (already handled)\n";
                         }
-                    } else {
-                        # Target not in rules, queue as-is
-                        push @job_queue, {
-                            target => $target,
-                            dir => $dir,
-                            command => $cmd,
-                        };
                     }
 
                     print STDERR "Job queue now has " . scalar(@job_queue) . " jobs\n";
@@ -3182,7 +3220,13 @@ sub run_job_master {
                     # Don't mark ready here - wait for READY message
                     delete $running_jobs{$task_id};
 
-                    print STDERR "Task $task_id completed (exit=$exit_code)\n";
+                    # Track successfully completed targets to avoid rebuilding
+                    if ($exit_code == 0 && $job->{target}) {
+                        $completed_targets{$job->{target}} = 1;
+                        print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                    } else {
+                        print STDERR "Task $task_id completed with exit=$exit_code\n";
+                    }
 
                     # Report to master
                     print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n" if $master_socket;

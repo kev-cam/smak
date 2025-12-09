@@ -2801,6 +2801,24 @@ sub run_job_master {
     my $next_task_id = 1;
 
     # Helper functions
+    sub process_command {
+        my ($cmd) = @_;
+        return '' unless defined $cmd;
+
+        # Process each line of multi-line commands
+        my @lines;
+        for my $line (split /\n/, $cmd) {
+            next unless $line =~ /\S/;  # Skip empty lines
+
+            # Strip @ (silent) and - (ignore errors) prefixes
+            $line =~ s/^\s*[@-]+//;
+
+            push @lines, $line if $line =~ /\S/;
+        }
+
+        return join("\n", @lines);
+    }
+
     sub is_target_pending {
         my ($target) = @_;
 
@@ -2982,6 +3000,10 @@ sub run_job_master {
                             # Skip phony dependencies
                             next if $dep =~ /^\.PHONY$/;
 
+                            # Skip invalid dependencies (empty, just quotes, etc.)
+                            next if $dep !~ /\S/;  # Empty or whitespace only
+                            next if $dep =~ /^["']+$/;  # Just quotes
+
                             # Skip if already completed, queued, or running
                             if (is_target_pending($dep)) {
                                 print STDERR "Skipping dependency '$dep' (already handled)\n";
@@ -3008,6 +3030,9 @@ sub run_job_master {
                                 $dep_cmd = "cd $dir && make $dep";
                             }
 
+                            # Process command to strip @ and - prefixes
+                            $dep_cmd = process_command($dep_cmd);
+
                             push @job_queue, {
                                 target => $dep,
                                 dir => $dir,
@@ -3020,10 +3045,13 @@ sub run_job_master {
                         my $target_has_command = 0;
                         if ($rule && $rule =~ /\S/) {
                             unless (is_target_pending($target)) {
+                                # Process command to strip @ and - prefixes
+                                my $processed_rule = process_command($rule);
+
                                 push @job_queue, {
                                     target => $target,
                                     dir => $dir,
-                                    command => $rule,
+                                    command => $processed_rule,
                                 };
                                 print STDERR "Queued main target: $target\n";
                                 $target_has_command = 1;

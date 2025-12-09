@@ -2586,10 +2586,10 @@ sub run_job_master {
     use Cwd 'abs_path';
 
     # Job-master has access to all parsed Makefile data:
-    # - %rules: target dependencies
-    # - %pseudo_rule: build commands
-    # - %variables: makefile variables
-    # This enables dependency-aware task dispatch
+    # Bring package-level variables into scope
+    our %rules;
+    our %pseudo_rule;
+    our %variables;
 
     my @workers;
     my %worker_status;  # socket => {ready => 0/1, task_id => N}

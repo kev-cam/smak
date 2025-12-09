@@ -2973,6 +2973,7 @@ sub run_job_master {
                             }
 
                             # Also queue the main target if it has its own command
+                            my $target_has_command = 0;
                             if (exists $Smak::pseudo_rule{$target}) {
                                 unless (is_target_pending($target)) {
                                     push @job_queue, {
@@ -2981,9 +2982,18 @@ sub run_job_master {
                                         command => $Smak::pseudo_rule{$target},
                                     };
                                     print STDERR "Queued main target: $target\n";
+                                    $target_has_command = 1;
                                 } else {
                                     print STDERR "Skipping main target '$target' (already handled)\n";
+                                    $target_has_command = 1;  # Already queued
                                 }
+                            }
+
+                            # If target has no command, it's a composite target
+                            # Send JOB_COMPLETE immediately (dependencies will be built)
+                            unless ($target_has_command) {
+                                print STDERR "Composite target '$target' has no command, completing immediately\n";
+                                print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket;
                             }
                         } else {
                             # No dependencies, queue the job as-is (if not already handled)

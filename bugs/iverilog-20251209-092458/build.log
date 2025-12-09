@@ -1,0 +1,21 @@
+=== SMAK BUILD REPORT ===
+Timestamp: 20251209-092458
+Makefile: Makefile
+Report directory: /mnt/y/smak/bugs/iverilog-20251209-092458
+==================================================
+
+g++ -DHAVE_CONFIG_H -I. -I. -I./libmisc  -Wall -Wextra -Wshadow   -g -O2 -std=c++11 -MD -c LineInfo.cc -o LineInfo.o
+cc1plus: fatal error: LineInfo.cc: No such file or directory
+compilation terminated.
+smak: *** [LineInfo.o] Error 1
+
+==================================================
+Running dry-run comparison (smak -n vs make)...
+==================================================
+Dry-run outputs saved:
+  smak -n: /mnt/y/smak/bugs/iverilog-20251209-092458/smak-dryrun.txt
+  make -n: /mnt/y/smak/bugs/iverilog-20251209-092458/make-dryrun.txt
+
+=== BUILD REPORT COMPLETE ===
+Log saved to: /mnt/y/smak/bugs/iverilog-20251209-092458/build.log
+Dry-run comparison: smak-dryrun.txt vs make-dryrun.txt

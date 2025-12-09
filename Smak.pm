@@ -2822,6 +2822,21 @@ sub run_job_master {
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
                     print STDERR "Received job request for target: $target\n";
+                    print STDERR "DEBUG: Checking \%Smak::rules for '$target'\n";
+                    print STDERR "DEBUG: %Smak::rules has " . scalar(keys %Smak::rules) . " entries\n";
+
+                    if (exists $Smak::rules{$target}) {
+                        print STDERR "DEBUG: Found '$target' in \%Smak::rules\n";
+                        print STDERR "DEBUG: Type: " . ref($Smak::rules{$target}) . "\n";
+                        if (ref($Smak::rules{$target}) eq 'ARRAY') {
+                            print STDERR "DEBUG: Dependencies: " . join(', ', @{$Smak::rules{$target}}) . "\n";
+                        }
+                    } else {
+                        print STDERR "DEBUG: '$target' NOT found in \%Smak::rules\n";
+                        my @available = sort keys %Smak::rules;
+                        my $show_count = scalar(@available) > 20 ? 20 : scalar(@available);
+                        print STDERR "DEBUG: First $show_count targets: " . join(', ', @available[0..$show_count-1]) . "\n";
+                    }
 
                     # Check if target has dependencies that should be parallelized
                     # Access inherited Makefile data: %rules, %pseudo_rule, %variables

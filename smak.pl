@@ -520,14 +520,16 @@ if ($silent) {
 # Set number of parallel jobs
 set_jobs($jobs);
 
+# Parse the makefile FIRST (before forking job-master)
+# This ensures %rules is populated when job-master inherits it
+parse_makefile($makefile);
+
 # Start job server if parallel builds are requested
-# Skip in debug, dry-run, or CLI mode
-unless ($debug || $dry_run || $cli) {
+# Skip in debug or dry-run mode
+# Now also start in CLI mode so dependency expansion works
+unless ($debug || $dry_run) {
     start_job_server();
 }
-
-# Parse the makefile
-parse_makefile($makefile);
 
 # Handle Makefile remaking (like GNU make)
 # Check if the makefile itself has a rule and needs to be remade

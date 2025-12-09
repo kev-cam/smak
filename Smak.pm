@@ -2586,10 +2586,15 @@ sub run_job_master {
     use Cwd 'abs_path';
 
     # Job-master has access to all parsed Makefile data:
-    # - %rules: target dependencies
-    # - %pseudo_rule: build commands
-    # - %variables: makefile variables
-    # This enables dependency-aware task dispatch
+    # Bring package-level variables into scope
+    our %fixed_deps;
+    our %pattern_deps;
+    our %pseudo_deps;
+    our %fixed_rule;
+    our %pattern_rule;
+    our %pseudo_rule;
+    our %MV;  # Variables
+    our $makefile;  # Current makefile path
 
     my @workers;
     my %worker_status;  # socket => {ready => 0/1, task_id => N}
@@ -2931,75 +2936,83 @@ sub run_job_master {
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
                     print STDERR "Received job request for target: $target\n";
-                    print STDERR "DEBUG: Checking \%rules for '$target'\n";
-                    print STDERR "DEBUG: %rules has " . scalar(keys %rules) . " entries\n";
 
-                    if (exists $rules{$target}) {
-                        print STDERR "DEBUG: Found '$target' in \%rules\n";
-                        print STDERR "DEBUG: Type: " . ref($rules{$target}) . "\n";
-                        if (ref($rules{$target}) eq 'ARRAY') {
-                            print STDERR "DEBUG: Dependencies: " . join(', ', @{$rules{$target}}) . "\n";
-                        }
+                    # Lookup dependencies using the key format "makefile\ttarget"
+                    my $key = "$makefile\t$target";
+                    my @deps;
+                    my $rule = '';
+
+                    # Find target in fixed, pattern, or pseudo rules
+                    if (exists $fixed_deps{$key}) {
+                        @deps = @{$fixed_deps{$key} || []};
+                        $rule = $fixed_rule{$key} || '';
+                        print STDERR "DEBUG: Found '$target' in fixed_deps\n";
+                    } elsif (exists $pattern_deps{$key}) {
+                        @deps = @{$pattern_deps{$key} || []};
+                        $rule = $pattern_rule{$key} || '';
+                        print STDERR "DEBUG: Found '$target' in pattern_deps\n";
+                    } elsif (exists $pseudo_deps{$key}) {
+                        @deps = @{$pseudo_deps{$key} || []};
+                        $rule = $pseudo_rule{$key} || '';
+                        print STDERR "DEBUG: Found '$target' in pseudo_deps\n";
                     } else {
-                        print STDERR "DEBUG: '$target' NOT found in \%rules\n";
-                        my @available = sort keys %rules;
-                        my $show_count = scalar(@available) > 20 ? 20 : scalar(@available);
-                        print STDERR "DEBUG: First $show_count targets: " . join(', ', @available[0..$show_count-1]) . "\n" if $show_count > 0;
+                        print STDERR "DEBUG: '$target' NOT found in any dependency tables\n";
                     }
 
+                    print STDERR "DEBUG: Target '$target' has " . scalar(@deps) . " dependencies\n";
+                    print STDERR "DEBUG: Dependencies: " . join(', ', @deps) . "\n" if @deps;
+
                     # Check if target has dependencies that should be parallelized
-                    # Access inherited Makefile data: %rules, %pseudo_rule, %variables
-                    if (exists $rules{$target} && ref($rules{$target}) eq 'ARRAY') {
-                        my @deps = @{$rules{$target}};
+                    if (@deps > 0) {
+                        # Queue each dependency as a separate job
+                        for my $dep (@deps) {
+                            # Skip phony dependencies
+                            next if $dep =~ /^\.PHONY$/;
 
-                        if (@deps > 0) {
-                            print STDERR "Target '$target' has " . scalar(@deps) . " dependencies\n";
-                            print STDERR "Dependencies: " . join(', ', @deps) . "\n";
-
-                            # Queue each dependency as a separate job
-                            for my $dep (@deps) {
-                                # Skip phony dependencies or those without build commands
-                                next if $dep =~ /^\.PHONY$/;
-
-                                # Skip if already completed, queued, or running
-                                if (is_target_pending($dep)) {
-                                    print STDERR "Skipping dependency '$dep' (already handled)\n";
-                                    next;
-                                }
-
-                                # Get the build command for this dependency
-                                my $dep_cmd;
-                                if (exists $pseudo_rule{$dep}) {
-                                    $dep_cmd = $pseudo_rule{$dep};
-                                } else {
-                                    # Try to build with make
-                                    $dep_cmd = "cd $dir && make $dep";
-                                }
-
-                                push @job_queue, {
-                                    target => $dep,
-                                    dir => $dir,
-                                    command => $dep_cmd,
-                                };
-                                print STDERR "Queued dependency: $dep\n";
+                            # Skip if already completed, queued, or running
+                            if (is_target_pending($dep)) {
+                                print STDERR "Skipping dependency '$dep' (already handled)\n";
+                                next;
                             }
 
-                            # Also queue the main target if it has its own command
-                            my $target_has_command = 0;
-                            if (exists $pseudo_rule{$target}) {
-                                unless (is_target_pending($target)) {
-                                    push @job_queue, {
-                                        target => $target,
-                                        dir => $dir,
-                                        command => $pseudo_rule{$target},
-                                    };
-                                    print STDERR "Queued main target: $target\n";
-                                    $target_has_command = 1;
-                                } else {
-                                    print STDERR "Skipping main target '$target' (already handled)\n";
-                                    $target_has_command = 1;  # Already queued
-                                }
+                            # Get the build command for this dependency
+                            my $dep_key = "$makefile\t$dep";
+                            my $dep_cmd;
+                            if (exists $pseudo_rule{$dep_key}) {
+                                $dep_cmd = $pseudo_rule{$dep_key};
+                            } elsif (exists $fixed_rule{$dep_key}) {
+                                $dep_cmd = $fixed_rule{$dep_key};
+                            } elsif (exists $pattern_rule{$dep_key}) {
+                                $dep_cmd = $pattern_rule{$dep_key};
                             } else {
+                                # Try to build with make
+                                $dep_cmd = "cd $dir && make $dep";
+                            }
+
+                            push @job_queue, {
+                                target => $dep,
+                                dir => $dir,
+                                command => $dep_cmd,
+                            };
+                            print STDERR "Queued dependency: $dep\n";
+                        }
+
+                        # Also queue the main target if it has its own command
+                        my $target_has_command = 0;
+                        if ($rule && $rule =~ /\S/) {
+                            unless (is_target_pending($target)) {
+                                push @job_queue, {
+                                    target => $target,
+                                    dir => $dir,
+                                    command => $rule,
+                                };
+                                print STDERR "Queued main target: $target\n";
+                                $target_has_command = 1;
+                            } else {
+                                print STDERR "Skipping main target '$target' (already handled)\n";
+                                $target_has_command = 1;  # Already queued
+                            }
+                        } else {
                                 # Composite target with no command
                                 # Track it as pending and send JOB_COMPLETE when deps finish
                                 my @pending_deps;
@@ -3297,9 +3310,14 @@ sub run_job_master {
                             # Queue each subtarget
                             for my $subtarget (@subtargets) {
                                 # Get build command for subtarget
+                                my $sub_key = "$makefile\t$subtarget";
                                 my $sub_cmd;
-                                if (exists $pseudo_rule{$subtarget}) {
-                                    $sub_cmd = $pseudo_rule{$subtarget};
+                                if (exists $pseudo_rule{$sub_key}) {
+                                    $sub_cmd = $pseudo_rule{$sub_key};
+                                } elsif (exists $fixed_rule{$sub_key}) {
+                                    $sub_cmd = $fixed_rule{$sub_key};
+                                } elsif (exists $pattern_rule{$sub_key}) {
+                                    $sub_cmd = $pattern_rule{$sub_key};
                                 } else {
                                     $sub_cmd = "cd $job->{dir} && make $subtarget";
                                 }

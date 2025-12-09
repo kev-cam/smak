@@ -3339,7 +3339,7 @@ sub run_job_master {
                             # If all dependencies done, complete the composite target
                             if (@{$comp->{deps}} == 0) {
                                 print STDERR "All dependencies complete for composite target '$comp_target'\n";
-                                print $comp->{master_socket} "JOB_COMPLETE $comp_target 0\n" if $comp->{master_socket};
+                                print ($comp->{master_socket},"JOB_COMPLETE $comp_target 0\n") if $comp->{master_socket};
                                 delete $pending_composite{$comp_target};
                             }
                         }

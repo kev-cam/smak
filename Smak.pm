@@ -2797,7 +2797,7 @@ sub run_job_master {
                     print STDERR "New master ready\n";
                 }
 
-            } elsif ($socket == $master_socket) {
+            } elsif (defined $master_socket && $socket == $master_socket) {
                 # Master sent us something
                 my $line = <$socket>;
                 unless (defined $line) {

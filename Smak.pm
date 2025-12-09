@@ -2964,6 +2964,19 @@ sub run_job_master {
 
                     # Check if target has dependencies that should be parallelized
                     if (@deps > 0) {
+                        # Expand variables in dependencies
+                        my @expanded_deps;
+                        for my $dep (@deps) {
+                            # Expand $MV{VAR} references
+                            while ($dep =~ /\$MV\{([^}]+)\}/) {
+                                my $var = $1;
+                                my $val = $MV{$var} // '';
+                                $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+                            }
+                            push @expanded_deps, $dep;
+                        }
+                        @deps = @expanded_deps;
+
                         # Queue each dependency as a separate job
                         for my $dep (@deps) {
                             # Skip phony dependencies
@@ -2985,7 +2998,13 @@ sub run_job_master {
                             } elsif (exists $pattern_rule{$dep_key}) {
                                 $dep_cmd = $pattern_rule{$dep_key};
                             } else {
-                                # Try to build with make
+                                # No explicit rule - check if file exists
+                                if (-e $dep) {
+                                    print STDERR "Skipping dependency '$dep' (file exists, no rule)\n";
+                                    $completed_targets{$dep} = 1;
+                                    next;
+                                }
+                                # File doesn't exist and no rule - try recursive make
                                 $dep_cmd = "cd $dir && make $dep";
                             }
 

@@ -479,9 +479,9 @@ HELP
         if ($jobserver_pid) {
             print "Job server still running (PID $jobserver_pid).\n";
             if ($Smak::job_server_master_port) {
-                print "To reconnect: ./smak-attach -pid $jobserver_pid:$Smak::job_server_master_port\n";
+                print "To reconnect: smak-attach -pid $jobserver_pid:$Smak::job_server_master_port\n";
             } else {
-                print "To reconnect: ./smak-attach -pid $jobserver_pid\n";
+                print "To reconnect: smak-attach -pid $jobserver_pid\n";
             }
 
             # Fork to keep master connection alive in background

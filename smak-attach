@@ -337,7 +337,7 @@ HELP
 if ($exit_requested || !defined($line)) {
     print "\nDetaching from job server.\n";
     print "Job server still running (PID $jobserver_pid).\n";
-    print "To reattach: ./smak-attach\n";
+    print "To reattach: smak-attach\n";
 }
 
 close($socket);

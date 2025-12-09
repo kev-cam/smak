@@ -1736,6 +1736,13 @@ sub build_target {
             my $cwd = getcwd();
             submit_job($target, $cmd_line, $cwd);
         }
+    } elsif ($job_server_socket && @deps > 0) {
+        # In parallel mode with no rule but has dependencies
+        # Submit to job-master for dependency expansion
+        use Cwd 'getcwd';
+        my $cwd = getcwd();
+        warn "DEBUG: Submitting composite target '$target' to job-master\n" if $ENV{SMAK_DEBUG};
+        submit_job($target, "true", $cwd);
     }
 }
 

@@ -2821,14 +2821,66 @@ sub run_job_master {
                     my $dir = <$socket>; chomp $dir if defined $dir;
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
-                    # Queue the job
-                    push @job_queue, {
-                        target => $target,
-                        dir => $dir,
-                        command => $cmd,
-                    };
+                    print STDERR "Received job request for target: $target\n";
 
-                    print STDERR "Queued job: $target\n";
+                    # Check if target has dependencies that should be parallelized
+                    # Access inherited Makefile data: %rules, %pseudo_rule, %variables
+                    if (exists $Smak::rules{$target} && ref($Smak::rules{$target}) eq 'ARRAY') {
+                        my @deps = @{$Smak::rules{$target}};
+
+                        if (@deps > 0) {
+                            print STDERR "Target '$target' has " . scalar(@deps) . " dependencies\n";
+                            print STDERR "Dependencies: " . join(', ', @deps) . "\n";
+
+                            # Queue each dependency as a separate job
+                            for my $dep (@deps) {
+                                # Skip phony dependencies or those without build commands
+                                next if $dep =~ /^\.PHONY$/;
+
+                                # Get the build command for this dependency
+                                my $dep_cmd;
+                                if (exists $Smak::pseudo_rule{$dep}) {
+                                    $dep_cmd = $Smak::pseudo_rule{$dep};
+                                } else {
+                                    # Try to build with make
+                                    $dep_cmd = "cd $dir && make $dep";
+                                }
+
+                                push @job_queue, {
+                                    target => $dep,
+                                    dir => $dir,
+                                    command => $dep_cmd,
+                                };
+                                print STDERR "Queued dependency: $dep\n";
+                            }
+
+                            # Also queue the main target if it has its own command
+                            if (exists $Smak::pseudo_rule{$target}) {
+                                push @job_queue, {
+                                    target => $target,
+                                    dir => $dir,
+                                    command => $Smak::pseudo_rule{$target},
+                                };
+                                print STDERR "Queued main target: $target\n";
+                            }
+                        } else {
+                            # No dependencies, queue the job as-is
+                            push @job_queue, {
+                                target => $target,
+                                dir => $dir,
+                                command => $cmd,
+                            };
+                        }
+                    } else {
+                        # Target not in rules, queue as-is
+                        push @job_queue, {
+                            target => $target,
+                            dir => $dir,
+                            command => $cmd,
+                        };
+                    }
+
+                    print STDERR "Job queue now has " . scalar(@job_queue) . " jobs\n";
                     broadcast_observers("QUEUED $target");
 
                     # Try to dispatch
@@ -3032,6 +3084,81 @@ sub run_job_master {
                     my $warning = $1;
                     # Forward warning to master
                     print $master_socket "WARN $warning\n" if $master_socket;
+
+                } elsif ($line =~ /^TASK_RETURN (\d+)(.*)$/) {
+                    my $task_id = $1;
+                    my $reason = $2 || '';
+                    $reason =~ s/^\s+//;  # Trim leading whitespace
+
+                    # Worker is returning a task (doesn't want to execute it)
+                    if (exists $running_jobs{$task_id}) {
+                        my $job = $running_jobs{$task_id};
+                        print STDERR "Worker returning task $task_id ($job->{target}): $reason\n";
+
+                        # Re-queue the job
+                        unshift @job_queue, $job;  # Add to front of queue
+
+                        # Remove from running jobs
+                        delete $running_jobs{$task_id};
+
+                        # Mark worker as ready
+                        $worker_status{$socket}{ready} = 1;
+
+                        # Try to dispatch to another worker
+                        dispatch_jobs();
+                    }
+
+                } elsif ($line =~ /^TASK_DECOMPOSE (\d+)$/) {
+                    my $task_id = $1;
+
+                    # Worker wants to decompose this task into subtasks
+                    if (exists $running_jobs{$task_id}) {
+                        my $job = $running_jobs{$task_id};
+                        my $target = $job->{target};
+
+                        print STDERR "Worker decomposing task $task_id ($target)\n";
+
+                        # Read subtargets from worker
+                        my @subtargets;
+                        while (my $sub_line = <$socket>) {
+                            chomp $sub_line;
+                            last if $sub_line eq 'DECOMPOSE_END';
+                            push @subtargets, $sub_line;
+                        }
+
+                        if (@subtargets) {
+                            print STDERR "  Decomposed into " . scalar(@subtargets) . " subtargets\n";
+
+                            # Queue each subtarget
+                            for my $subtarget (@subtargets) {
+                                # Get build command for subtarget
+                                my $sub_cmd;
+                                if (exists $Smak::pseudo_rule{$subtarget}) {
+                                    $sub_cmd = $Smak::pseudo_rule{$subtarget};
+                                } else {
+                                    $sub_cmd = "cd $job->{dir} && make $subtarget";
+                                }
+
+                                push @job_queue, {
+                                    target => $subtarget,
+                                    dir => $job->{dir},
+                                    command => $sub_cmd,
+                                };
+                                print STDERR "    Queued: $subtarget\n";
+                            }
+
+                            # Remove original task from running jobs
+                            delete $running_jobs{$task_id};
+
+                            # Mark worker as ready
+                            $worker_status{$socket}{ready} = 1;
+
+                            # Dispatch the new subtasks
+                            dispatch_jobs();
+                        } else {
+                            print STDERR "  Warning: No subtargets provided, task will continue\n";
+                        }
+                    }
 
                 } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
                     my ($task_id, $exit_code) = ($1, $2);

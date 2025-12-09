@@ -35,7 +35,6 @@ sub find_jobservers {
         my ($pid) = $port_file =~ /smak-jobserver-(\d+)\.port/;
         next unless $pid;
 
-
         # Check if process is still alive
         unless (-d "/proc/$pid") {
             # Stale port file

@@ -2931,26 +2931,26 @@ sub run_job_master {
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
                     print STDERR "Received job request for target: $target\n";
-                    print STDERR "DEBUG: Checking \%Smak::rules for '$target'\n";
-                    print STDERR "DEBUG: %Smak::rules has " . scalar(keys %Smak::rules) . " entries\n";
+                    print STDERR "DEBUG: Checking \%rules for '$target'\n";
+                    print STDERR "DEBUG: %rules has " . scalar(keys %rules) . " entries\n";
 
-                    if (exists $Smak::rules{$target}) {
-                        print STDERR "DEBUG: Found '$target' in \%Smak::rules\n";
-                        print STDERR "DEBUG: Type: " . ref($Smak::rules{$target}) . "\n";
-                        if (ref($Smak::rules{$target}) eq 'ARRAY') {
-                            print STDERR "DEBUG: Dependencies: " . join(', ', @{$Smak::rules{$target}}) . "\n";
+                    if (exists $rules{$target}) {
+                        print STDERR "DEBUG: Found '$target' in \%rules\n";
+                        print STDERR "DEBUG: Type: " . ref($rules{$target}) . "\n";
+                        if (ref($rules{$target}) eq 'ARRAY') {
+                            print STDERR "DEBUG: Dependencies: " . join(', ', @{$rules{$target}}) . "\n";
                         }
                     } else {
-                        print STDERR "DEBUG: '$target' NOT found in \%Smak::rules\n";
-                        my @available = sort keys %Smak::rules;
+                        print STDERR "DEBUG: '$target' NOT found in \%rules\n";
+                        my @available = sort keys %rules;
                         my $show_count = scalar(@available) > 20 ? 20 : scalar(@available);
-                        print STDERR "DEBUG: First $show_count targets: " . join(', ', @available[0..$show_count-1]) . "\n";
+                        print STDERR "DEBUG: First $show_count targets: " . join(', ', @available[0..$show_count-1]) . "\n" if $show_count > 0;
                     }
 
                     # Check if target has dependencies that should be parallelized
                     # Access inherited Makefile data: %rules, %pseudo_rule, %variables
-                    if (exists $Smak::rules{$target} && ref($Smak::rules{$target}) eq 'ARRAY') {
-                        my @deps = @{$Smak::rules{$target}};
+                    if (exists $rules{$target} && ref($rules{$target}) eq 'ARRAY') {
+                        my @deps = @{$rules{$target}};
 
                         if (@deps > 0) {
                             print STDERR "Target '$target' has " . scalar(@deps) . " dependencies\n";
@@ -2969,8 +2969,8 @@ sub run_job_master {
 
                                 # Get the build command for this dependency
                                 my $dep_cmd;
-                                if (exists $Smak::pseudo_rule{$dep}) {
-                                    $dep_cmd = $Smak::pseudo_rule{$dep};
+                                if (exists $pseudo_rule{$dep}) {
+                                    $dep_cmd = $pseudo_rule{$dep};
                                 } else {
                                     # Try to build with make
                                     $dep_cmd = "cd $dir && make $dep";
@@ -2986,12 +2986,12 @@ sub run_job_master {
 
                             # Also queue the main target if it has its own command
                             my $target_has_command = 0;
-                            if (exists $Smak::pseudo_rule{$target}) {
+                            if (exists $pseudo_rule{$target}) {
                                 unless (is_target_pending($target)) {
                                     push @job_queue, {
                                         target => $target,
                                         dir => $dir,
-                                        command => $Smak::pseudo_rule{$target},
+                                        command => $pseudo_rule{$target},
                                     };
                                     print STDERR "Queued main target: $target\n";
                                     $target_has_command = 1;
@@ -3298,8 +3298,8 @@ sub run_job_master {
                             for my $subtarget (@subtargets) {
                                 # Get build command for subtarget
                                 my $sub_cmd;
-                                if (exists $Smak::pseudo_rule{$subtarget}) {
-                                    $sub_cmd = $Smak::pseudo_rule{$subtarget};
+                                if (exists $pseudo_rule{$subtarget}) {
+                                    $sub_cmd = $pseudo_rule{$subtarget};
                                 } else {
                                     $sub_cmd = "cd $job->{dir} && make $subtarget";
                                 }

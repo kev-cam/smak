@@ -33,4 +33,4 @@ export SMAK_INVOKED_AS="$0"
 export SMAK_LAUNCHER="$SCRIPT_DIR/smak"
 
 # Execute the Perl script with all arguments passed through
-exec perl "$SCRIPT_DIR/$script.pl" "$@"
+exec perl ${SMAK_PERL_DEBUG} "$SCRIPT_DIR/$script.pl" "$@"

@@ -2780,8 +2780,8 @@ sub run_job_master {
     our %MV;  # Variables
     our $makefile;  # Current makefile path
 
-    my @workers;
-    my %worker_status;  # socket => {ready => 0/1, task_id => N}
+    our @workers;
+    our %worker_status;  # socket => {ready => 0/1, task_id => N}
     my $worker_script = "$bin_dir/smak-worker";
     die "Worker script not found: $worker_script\n" unless -x $worker_script;
 
@@ -2829,7 +2829,7 @@ sub run_job_master {
         close($port_fh);
     }
 
-    my @observers;  # List of connected observers
+    our @observers;  # List of connected observers
 
     # Detect and connect to FUSE filesystem monitor
     my $fuse_socket;
@@ -2906,7 +2906,7 @@ sub run_job_master {
     print STDERR "Master connected\n";
 
     # Receive environment from master
-    my %worker_env;
+    our %worker_env;
     while (my $line = <$master_socket>) {
         chomp $line;
         last if $line eq 'ENV_END';
@@ -2980,12 +2980,13 @@ sub run_job_master {
     print STDERR "All workers ready. Job-master entering listen loop.\n";
     print $master_socket "JOBSERVER_WORKERS_READY\n";
 
-    # Job queue and dependency tracking
-    my %running_jobs;  # task_id => {target, worker, dir, command, started}
-    my %completed_targets;  # target => 1 (successfully built targets)
-    my %pending_composite;  # composite targets waiting for dependencies
+    # Job queue and dependency tracking - use 'our' to avoid closure warnings
+    our @job_queue;  # Queue of jobs to dispatch
+    our %running_jobs;  # task_id => {target, worker, dir, command, started}
+    our %completed_targets;  # target => 1 (successfully built targets)
+    our %pending_composite;  # composite targets waiting for dependencies
                             # target => {deps => [list], master_socket => socket}
-    my $next_task_id = 1;
+    our $next_task_id = 1;
 
     # Helper functions
     sub process_command {
@@ -3718,10 +3719,10 @@ sub wait_for_jobs
     my $sts = 0;
     
     open(TREE,"pstree -p $$ 2>&1 |");
-    while (<TREE>) {
+    while (defined(my $line = <TREE>)) {
 	my $p=0;
 	my @pid;
-	while (s/\((\d+)\)//) {
+	while ($line =~ s/\((\d+)\)//) {
 	    if ($$ != $1) { $pid[$p++] = $1; }
 	}
 	for $p (@pid) {

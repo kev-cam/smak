@@ -276,7 +276,6 @@ sub run_cli {
 
     # Start job server now if parallel builds are configured
     my $jobserver_pid;
-    my $jobserver_pid;
     if ($jobs > 1) {
         print "Starting job server...\n";
         start_job_server();

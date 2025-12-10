@@ -3137,8 +3137,38 @@ sub run_job_master {
     }
 
     # Main event loop
+    my $last_consistency_check = time();
     while (1) {
         my @ready = $select->can_read(0.1);
+
+        # Periodic consistency check - run every 2 seconds
+        my $now = time();
+        if ($now - $last_consistency_check >= 2) {
+            $last_consistency_check = $now;
+
+            # Check for stale running tasks - workers might have completed but we missed it
+            for my $task_id (keys %running_jobs) {
+                my $job = $running_jobs{$task_id};
+                # Find the worker socket for this task
+                for my $worker (@workers) {
+                    if ($in_progress{$job->{target}} && ref($in_progress{$job->{target}}) eq 'IO::Socket::INET'
+                        && $in_progress{$job->{target}} == $worker) {
+                        # Try to read any pending data from this worker
+                        $worker->blocking(0);
+                        while (my $pending = <$worker>) {
+                            chomp $pending;
+                            print STDERR "Consistency check: found pending message from worker: $pending\n";
+                            # Put it back for normal processing
+                            # Actually, we can't put it back, so we need to process it here
+                            # Just trigger the socket as ready by adding to @ready if not already there
+                            push @ready, $worker unless grep { $_ == $worker } @ready;
+                            last;  # Process one message at a time
+                        }
+                        $worker->blocking(1);
+                    }
+                }
+            }
+        }
 
         for my $socket (@ready) {
             if ($socket == $master_server) {

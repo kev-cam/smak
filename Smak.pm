@@ -2837,7 +2837,7 @@ sub run_job_master {
     my %pending_path_requests;  # inode => 1 (waiting for resolution)
     my %file_modifications;  # path => {workers => [pids], last_op => time}
 
-    my %worker_env;
+    our %worker_env;
 
     sub send_env {
 	my ($worker) = @_;
@@ -2918,7 +2918,6 @@ sub run_job_master {
     print STDERR "Master connected\n";
 
     # Receive environment from master
-    our %worker_env;
     while (my $line = <$master_socket>) {
         chomp $line;
         last if $line eq 'ENV_END';
@@ -3714,7 +3713,8 @@ sub wait_for_jobs
 	for $p (@pid) {
 	    my $msg = "process: $p";
 	    if (open(CMD,"tr \\0 ' ' </proc/$p/cmdline 2>&1 |")) {
-		if (my $cmd = <CMD>) {
+		my $cmd = <CMD>;
+		if (defined $cmd) {
 		    $msg = " command: $cmd [$p]";
 		}
 	    }

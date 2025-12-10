@@ -115,31 +115,97 @@ while (my $line = <$socket>) {
     if ($line =~ /^TASK (\d+)$/) {
 	get_task($1,$env_done);
 
-        # Execute command and stream output in real-time
+        # Execute command with non-blocking I/O to remain responsive
+        use IO::Select;
+        use POSIX ":sys_wait_h";
+
         my $exit_code = 0;
         my @errors;
         my @warnings;
 
-        # Use pipe to capture output incrementally
+        # Fork to execute command, keep parent responsive
         my $pid = open(my $cmd_fh, '-|', "$command 2>&1");
         if ($pid) {
-            # Parent: read output line by line, analyze, and send
-            while (my $line = <$cmd_fh>) {
-                chomp $line;
+            # Make command output non-blocking
+            $cmd_fh->blocking(0);
 
-                # Detect errors and warnings
-                if ($line =~ /\berror\b/i || $line =~ /\bfailed\b/i) {
-                    push @errors, $line;
-                    print $socket "ERROR $line\n";
-                } elsif ($line =~ /\bwarning\b/i) {
-                    push @warnings, $line;
-                    print $socket "WARN $line\n";
-                } else {
-                    print $socket "OUTPUT $line\n";
+            # Use select to multiplex socket and command output
+            my $select = IO::Select->new($socket, $cmd_fh);
+            my $command_done = 0;
+
+            while (!$command_done || $select->count() > 1) {
+                my @ready = $select->can_read(0.1);
+
+                for my $fh (@ready) {
+                    if ($fh == $socket) {
+                        # Handle socket messages while command runs
+                        my $msg = <$socket>;
+                        if (!defined $msg) {
+                            # Socket closed
+                            kill 'TERM', $pid if $pid;
+                            exit 1;
+                        }
+                        chomp $msg;
+
+                        if ($msg eq 'SHUTDOWN') {
+                            kill 'TERM', $pid if $pid;
+                            print STDERR "Worker shutting down during task\n";
+                            exit 0;
+                        } elsif ($msg eq 'STATUS') {
+                            print $socket "RUNNING $task_id\n";
+                        }
+                        # Ignore other messages during execution
+
+                    } elsif ($fh == $cmd_fh) {
+                        # Read command output
+                        my $line = <$cmd_fh>;
+                        if (defined $line) {
+                            chomp $line;
+
+                            # Detect errors and warnings
+                            if ($line =~ /\berror\b/i || $line =~ /\bfailed\b/i) {
+                                push @errors, $line;
+                                print $socket "ERROR $line\n";
+                            } elsif ($line =~ /\bwarning\b/i) {
+                                push @warnings, $line;
+                                print $socket "WARN $line\n";
+                            } else {
+                                print $socket "OUTPUT $line\n";
+                            }
+                        } else {
+                            # EOF on command output
+                            $select->remove($cmd_fh);
+                            close($cmd_fh);
+                            $exit_code = $? >> 8;
+                            $command_done = 1;
+                        }
+                    }
+                }
+
+                # Check if command exited
+                if ($pid && !$command_done) {
+                    my $result = waitpid($pid, WNOHANG);
+                    if ($result > 0) {
+                        $exit_code = $? >> 8;
+                        # Drain any remaining output
+                        while (my $line = <$cmd_fh>) {
+                            chomp $line;
+                            if ($line =~ /\berror\b/i || $line =~ /\bfailed\b/i) {
+                                push @errors, $line;
+                                print $socket "ERROR $line\n";
+                            } elsif ($line =~ /\bwarning\b/i) {
+                                push @warnings, $line;
+                                print $socket "WARN $line\n";
+                            } else {
+                                print $socket "OUTPUT $line\n";
+                            }
+                        }
+                        close($cmd_fh);
+                        $select->remove($cmd_fh);
+                        $command_done = 1;
+                    }
                 }
             }
-            close($cmd_fh);
-            $exit_code = $? >> 8;
 
             # Send summary if there were errors or warnings
             if (@errors || @warnings) {

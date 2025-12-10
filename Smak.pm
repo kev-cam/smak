@@ -3194,14 +3194,14 @@ sub run_job_master {
                             if ($job->{target}) {
                                 $in_progress{$job->{target}} = "failed";
                             }
-                            print STDERR "Task $task_id completed with exit=$exit_code\n";
+                            print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 
                             # Check if this failed task is a dependency of any composite target
                             for my $comp_target (keys %pending_composite) {
                                 my $comp = $pending_composite{$comp_target};
                                 # Check if this failed target is in the composite's dependencies
                                 if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
-                                    print STDERR "Dependency '$job->{target}' failed for composite target '$comp_target', marking as failed\n";
+                                    print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
                                     if ($comp->{master_socket}) {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                     }
@@ -3797,14 +3797,14 @@ sub run_job_master {
                         if ($job->{target}) {
                             $in_progress{$job->{target}} = "failed";
                         }
-                        print STDERR "Task $task_id completed with exit=$exit_code\n";
+                        print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 
                         # Check if this failed task is a dependency of any composite target
                         for my $comp_target (keys %pending_composite) {
                             my $comp = $pending_composite{$comp_target};
                             # Check if this failed target is in the composite's dependencies
                             if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
-                                print STDERR "Dependency '$job->{target}' failed for composite target '$comp_target', marking as failed\n";
+                                print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
                                 if ($comp->{master_socket}) {
                                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                 }

@@ -26,11 +26,60 @@ print STDERR "Worker connected to master\n";
 # Send ready signal
 print $socket "READY\n";
 
+our $command;
+our $dir;
+our $old_dir;
+our $task_id;
+
+sub get_task {
+    my ($tid,$env_set) = @_;
+
+    $task_id = $tid;
+    
+    # Get directory
+    my $dir_line = <$socket>;
+    chomp $dir_line;
+    die "Expected DIR line, got: $dir_line\n" unless $dir_line =~ /^DIR (.*)$/;
+    $dir = $1;
+    
+    # Get command
+    my $cmd_line = <$socket>;
+    chomp $cmd_line;
+    die "Expected CMD line, got: $cmd_line\n" unless $cmd_line =~ /^CMD (.*)$/;
+    $command = $1;
+
+    if ($env_set) {    
+	# Execute command
+	print STDERR "Worker executing task $task_id: $command\n";
+	
+	# Change to directory
+	$old_dir = `pwd`;
+	chomp $old_dir;
+	chdir($dir) or do {
+	    # Send error back
+	    print $socket "TASK_START $task_id\n";
+	    print $socket "OUTPUT ERROR: Cannot chdir to $dir: $!\n";
+	    print $socket "TASK_END $task_id 1\n";
+	    print $socket "READY\n";
+	    next;
+	};
+	
+	# Signal task start
+	print $socket "TASK_START $task_id\n";
+    }
+    else {
+	print $socket "TASK_REFUSED $task_id\n";
+    }
+    
+}
+
 # Receive environment
 my $env_done = 0;
+
 while (my $line = <$socket>) {
     chomp $line;
-
+    my $last = "";
+    
     if ($line eq 'ENV_START') {
         next;
     } elsif ($line eq 'ENV_END') {
@@ -41,8 +90,12 @@ while (my $line = <$socket>) {
         # Set environment variable
         $ENV{$1} = $2;
     } else {
-        die "Unexpected line during environment setup: $line\n";
+        warn "Unexpected line during environment setup: '$line' (after '$last')\n";	
+	if ($line =~ /^TASK (\d+)$/) {
+	    get_task($1,0);
+	}
     }
+    $last = $line;
 }
 
 die "Connection closed before environment received\n" unless $env_done;
@@ -60,37 +113,7 @@ while (my $line = <$socket>) {
     # Parse command format: "task <#> ; cd <dir> ; <command>"
     # Or simplified: "TASK <#>\nDIR <dir>\nCMD <command>\n"
     if ($line =~ /^TASK (\d+)$/) {
-        my $task_id = $1;
-
-        # Get directory
-        my $dir_line = <$socket>;
-        chomp $dir_line;
-        die "Expected DIR line, got: $dir_line\n" unless $dir_line =~ /^DIR (.*)$/;
-        my $dir = $1;
-
-        # Get command
-        my $cmd_line = <$socket>;
-        chomp $cmd_line;
-        die "Expected CMD line, got: $cmd_line\n" unless $cmd_line =~ /^CMD (.*)$/;
-        my $command = $1;
-
-        # Execute command
-        print STDERR "Worker executing task $task_id: $command\n";
-
-        # Change to directory
-        my $old_dir = `pwd`;
-        chomp $old_dir;
-        chdir($dir) or do {
-            # Send error back
-            print $socket "TASK_START $task_id\n";
-            print $socket "OUTPUT ERROR: Cannot chdir to $dir: $!\n";
-            print $socket "TASK_END $task_id 1\n";
-            print $socket "READY\n";
-            next;
-        };
-
-        # Signal task start
-        print $socket "TASK_START $task_id\n";
+	get_task($1,$env_done);
 
         # Execute command and stream output in real-time
         my $exit_code = 0;

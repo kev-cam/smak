@@ -276,6 +276,7 @@ sub run_cli {
 
     # Start job server now if parallel builds are configured
     my $jobserver_pid;
+    my $jobserver_pid;
     if ($jobs > 1) {
         print "Starting job server...\n";
         start_job_server();
@@ -285,15 +286,16 @@ sub run_cli {
 
     # Set up signal handlers for detach
     my $detached = 0;
+    my $prompt = 'smak> ';
     my $detach_handler = sub {
         $detached = 1;
     };
     local $SIG{INT} = $detach_handler;  # Ctrl-C
 
-    my $term = Term::ReadLine->new('smak');
+    my $term = Term::ReadLine->new($prompt);
 
     my $line;
-    while (defined($line = $term->readline('smak> '))) {
+    while (defined($line = $term->readline($prompt))) {
         chomp $line;
         $line =~ s/^\s+|\s+$//g;  # Trim whitespace
 
@@ -319,6 +321,7 @@ Available commands:
   list [pattern]      List all targets (optionally matching pattern)
   tasks, t            List pending and active tasks
   status              Show job server status (if parallel builds enabled)
+  server-cli          Switch to server CLI
   vars [pattern]      Show all variables (optionally matching pattern)
   deps <target>       Show dependencies for target
   kill                Kill all workers
@@ -435,6 +438,8 @@ HELP
                 print "Job server not running.\n";
             }
 
+        } elsif ($cmd eq 'server-cli') {
+	    server_cli($Smak::job_server_pid,$Smak::job_server_socket,$prompt,$term);
         } elsif ($cmd eq 'kill') {
             if ($jobs > 1 && defined $Smak::job_server_socket) {
                 print "Killing all workers...\n";
@@ -602,6 +607,8 @@ if (!$debug) {
             }
         }
     };
+
+    my $sts = wait_for_jobs();
 
     # Check if build failed
     if ($@) {

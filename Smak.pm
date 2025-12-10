@@ -1714,10 +1714,16 @@ sub build_target {
                 next;
             }
 
-            # Use job system for parallel execution
+            # Execute command - use job system if available, otherwise sequential
             use Cwd 'getcwd';
             my $cwd = getcwd();
-            submit_job($target, $cmd_line, $cwd);
+            if ($job_server_socket) {
+                # Parallel mode - submit to job server
+                submit_job($target, $cmd_line, $cwd);
+            } else {
+                # Sequential mode - execute directly
+                execute_command_sequential($target, $cmd_line, $cwd);
+            }
         }
     } elsif ($job_server_socket && @deps > 0) {
         # In parallel mode with no rule but has dependencies
@@ -2951,7 +2957,7 @@ sub run_job_master {
                     chomp $ready if defined $ready;
                     if ($ready eq 'READY') {
                         push @workers, $worker;
-                        $worker_status{$worker} = {ready => 1, task_id => 0};
+                        $worker_status{$worker} = {ready => 0, task_id => 0};  # Not ready until env sent
                         $select->add($worker);
                         $workers_connected++;
                         print STDERR "Worker connected ($workers_connected/$num_workers)\n";
@@ -2962,6 +2968,10 @@ sub run_job_master {
                             print $worker "ENV $key=$worker_env{$key}\n";
                         }
                         print $worker "ENV_END\n";
+
+                        # Now worker is ready to receive tasks
+                        $worker_status{$worker}{ready} = 1;
+                        print STDERR "Worker $workers_connected environment sent, now ready\n";
                     }
                 }
             }

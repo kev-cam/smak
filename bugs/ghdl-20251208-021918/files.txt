@@ -1,4 +1,0 @@
-Files archived in files.tar:
-Makefile
-Makefile.in
-./src/grt/Makefile.inc

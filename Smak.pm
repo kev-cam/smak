@@ -3402,10 +3402,30 @@ sub run_job_master {
                 my $worker = $worker_server->accept();
                 if ($worker) {
                     $worker->autoflush(1);
-                    $select->add($worker);
-                    push @workers, $worker;
-                    $worker_status{$worker} = {ready => 0, task_id => 0};
-                    print STDERR "Worker connected during runtime\n";
+
+                    # Read READY signal from worker
+                    my $ready_msg = <$worker>;
+                    chomp $ready_msg if defined $ready_msg;
+                    if ($ready_msg eq 'READY') {
+                        $select->add($worker);
+                        push @workers, $worker;
+                        $worker_status{$worker} = {ready => 0, task_id => 0};
+                        print STDERR "Worker connected during runtime\n";
+
+                        # Send environment to new worker
+                        print $worker "ENV_START\n";
+                        for my $key (keys %worker_env) {
+                            print $worker "ENV $key=$worker_env{$key}\n";
+                        }
+                        print $worker "ENV_END\n";
+
+                        # Now worker is ready
+                        $worker_status{$worker}{ready} = 1;
+                        print STDERR "Runtime worker environment sent, now ready\n";
+                    } else {
+                        warn "Worker connected but didn't send READY, got: $ready_msg\n";
+                        close($worker);
+                    }
                 }
 
             } elsif ($socket == $observer_server) {

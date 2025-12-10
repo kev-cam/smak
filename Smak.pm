@@ -3128,12 +3128,19 @@ sub run_job_master {
                         $expanded_dep =~ s/\$MV\{\Q$var\E\}/$val/;
                     }
 
-                    # Check if dependency is completed or exists as file
-                    unless ($completed_targets{$expanded_dep} || -e $expanded_dep) {
-                        $deps_satisfied = 0;
-                        print STDERR "Job '$target' waiting for dependency '$expanded_dep'\n" if $ENV{SMAK_DEBUG};
-                        last;
+                    # Split on whitespace in case multiple dependencies are in one string
+                    for my $single_dep (split /\s+/, $expanded_dep) {
+                        next unless $single_dep =~ /\S/;
+
+                        # Check if dependency is completed or exists as file
+                        unless ($completed_targets{$single_dep} || -e $single_dep) {
+                            $deps_satisfied = 0;
+                            print STDERR "Job '$target' waiting for dependency '$single_dep'\n" if $ENV{SMAK_DEBUG};
+                            last;
+                        }
                     }
+
+                    last unless $deps_satisfied;
                 }
 
                 if ($deps_satisfied) {

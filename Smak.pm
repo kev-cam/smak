@@ -3670,6 +3670,7 @@ sub run_job_master {
                     # Track successfully completed targets to avoid rebuilding
                     if ($exit_code == 0 && $job->{target}) {
                         $completed_targets{$job->{target}} = 1;
+                        $in_progress{$job->{target}} = "done";
                         print STDERR "Task $task_id completed successfully: $job->{target}\n";
 
                         # Check if any pending composite targets can now complete
@@ -3688,6 +3689,9 @@ sub run_job_master {
                             }
                         }
                     } else {
+                        if ($job->{target}) {
+                            $in_progress{$job->{target}} = "failed";
+                        }
                         print STDERR "Task $task_id completed with exit=$exit_code\n";
                     }
 

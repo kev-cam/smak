@@ -2838,6 +2838,18 @@ sub run_job_master {
     my %pending_path_requests;  # inode => 1 (waiting for resolution)
     my %file_modifications;  # path => {workers => [pids], last_op => time}
 
+    my %worker_env;
+
+    sub send_env {
+	my ($worker) = @_;
+	
+	print $worker "ENV_START\n";
+	for my $key (keys %worker_env) {
+	    print $worker "ENV $key=$worker_env{$key}\n";
+	}
+	print $worker "ENV_END\n";
+    }
+    
     sub detect_fuse_monitor {
         # Check if we're in a FUSE filesystem
         my $cwd = abs_path('.');
@@ -2907,7 +2919,6 @@ sub run_job_master {
     print STDERR "Master connected\n";
 
     # Receive environment from master
-    my %worker_env;
     while (my $line = <$master_socket>) {
         chomp $line;
         last if $line eq 'ENV_END';
@@ -2963,11 +2974,7 @@ sub run_job_master {
                         print STDERR "Worker connected ($workers_connected/$num_workers)\n";
 
                         # Send environment
-                        print $worker "ENV_START\n";
-                        for my $key (keys %worker_env) {
-                            print $worker "ENV $key=$worker_env{$key}\n";
-                        }
-                        print $worker "ENV_END\n";
+			send_env($worker);
 
                         # Now worker is ready to receive tasks
                         $worker_status{$worker}{ready} = 1;
@@ -3108,30 +3115,6 @@ sub run_job_master {
         }
 
 	return $j;
-    }
-
-    sub requeue_job {
-	my ($task_id) = @_;
-	my $target = $running_jobs{$task_id}->{target};
-
-	push @job_queue, {
-	    dir => $running_jobs{$task_id}->{dir},
-	    command => $running_jobs{$task_id}->{command},
-	    target => $target
-	};
-
-	$in_progress{$target} = "requeued";
-
-	undef $running_jobs{$task_id};
-	
-	for my $worker (@workers) {
-	    if ($task_id == $worker_status{$worker}{task_id}) {
-	        $worker_status{$worker}{ready} = -1; # defavor		
-		return;
-	    }
-	}
-
-	warn "Couldn't deassign task $task_id";
     }
 
     # Main event loop
@@ -3518,7 +3501,7 @@ sub run_job_master {
 
                 if ($line eq 'READY') {
                     # Worker is ready for a job
-                    $worker_status{$socket}{ready} = 1;
+                    $worker_status{$socket}{ready} |= 2;
                     print STDERR "Worker ready\n";
                     # Try to dispatch queued jobs
                     dispatch_jobs();
@@ -3531,8 +3514,6 @@ sub run_job_master {
                     }
                     print STDERR "Task $task_id started\n";
 
-                } elsif ($line =~ /^TASK_REFUSED (\d+)$/) {
-		    requeue_job($1);
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
                     # Forward to master
@@ -3553,6 +3534,10 @@ sub run_job_master {
                     my $reason = $2 || '';
                     $reason =~ s/^\s+//;  # Trim leading whitespace
 
+		    if ($reason =~ /not\s+ready/i) {
+			send_env($socket);
+		    }
+		    
                     # Worker is returning a task (doesn't want to execute it)
                     if (exists $running_jobs{$task_id}) {
                         my $job = $running_jobs{$task_id};
@@ -3565,7 +3550,7 @@ sub run_job_master {
                         delete $running_jobs{$task_id};
 
                         # Mark worker as ready
-                        $worker_status{$socket}{ready} = 1;
+                        $worker_status{$socket}{ready} = 7;
 
                         # Try to dispatch to another worker
                         dispatch_jobs();
@@ -3619,7 +3604,7 @@ sub run_job_master {
                             delete $running_jobs{$task_id};
 
                             # Mark worker as ready
-                            $worker_status{$socket}{ready} = 1;
+                            $worker_status{$socket}{ready} = 7;
 
                             # Dispatch the new subtasks
                             dispatch_jobs();

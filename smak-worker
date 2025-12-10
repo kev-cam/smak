@@ -68,7 +68,7 @@ sub get_task {
 	print $socket "TASK_START $task_id\n";
     }
     else {
-	print $socket "TASK_REFUSED $task_id\n";
+	print $socket "TASK_RETURN $task_id Not ready\n";
     }
     
 }

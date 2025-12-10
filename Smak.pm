@@ -3137,8 +3137,92 @@ sub run_job_master {
     }
 
     # Main event loop
+    my $last_consistency_check = time();
     while (1) {
         my @ready = $select->can_read(0.1);
+
+        # Periodic consistency check - run every 2 seconds
+        my $now = time();
+        if ($now - $last_consistency_check >= 2) {
+            $last_consistency_check = $now;
+
+            # Check all worker sockets for pending messages
+            for my $worker (@workers) {
+                $worker->blocking(0);
+                while (my $line = <$worker>) {
+                    chomp $line;
+                    print STDERR "Consistency check: processing pending message: $line\n";
+
+                    # Process the message inline (same logic as main event loop)
+                    if ($line eq 'READY') {
+                        $worker_status{$worker}{ready} |= 2;
+                        print STDERR "Worker ready\n";
+                        dispatch_jobs();
+
+                    } elsif ($line =~ /^TASK_START (\d+)$/) {
+                        my $task_id = $1;
+                        if (exists $running_jobs{$task_id}) {
+                            $running_jobs{$task_id}{started} = 1;
+                        }
+                        print STDERR "Task $task_id started\n";
+
+                    } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
+                        my ($task_id, $exit_code) = ($1, $2);
+                        my $job = $running_jobs{$task_id};
+
+                        delete $running_jobs{$task_id};
+
+                        if ($exit_code == 0 && $job->{target}) {
+                            $completed_targets{$job->{target}} = 1;
+                            $in_progress{$job->{target}} = "done";
+                            print STDERR "Task $task_id completed successfully: $job->{target}\n";
+
+                            # Check composite targets
+                            for my $comp_target (keys %pending_composite) {
+                                my $comp = $pending_composite{$comp_target};
+                                $comp->{deps} = [grep { $_ ne $job->{target} } @{$comp->{deps}}];
+
+                                if (@{$comp->{deps}} == 0) {
+                                    print STDERR "All dependencies complete for composite target '$comp_target'\n";
+                                    if ($comp->{master_socket}) {
+                                        print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
+                                    }
+                                    delete $pending_composite{$comp_target};
+                                }
+                            }
+                        } else {
+                            if ($job->{target}) {
+                                $in_progress{$job->{target}} = "failed";
+                            }
+                            print STDERR "Task $task_id completed with exit=$exit_code\n";
+
+                            # Check if this failed task is a dependency of any composite target
+                            for my $comp_target (keys %pending_composite) {
+                                my $comp = $pending_composite{$comp_target};
+                                # Check if this failed target is in the composite's dependencies
+                                if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
+                                    print STDERR "Dependency '$job->{target}' failed for composite target '$comp_target', marking as failed\n";
+                                    if ($comp->{master_socket}) {
+                                        print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                                    }
+                                    delete $pending_composite{$comp_target};
+                                }
+                            }
+                        }
+
+                        print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n" if $master_socket;
+
+                    } elsif ($line =~ /^OUTPUT (.*)$/) {
+                        print $master_socket "OUTPUT $1\n" if $master_socket;
+                    } elsif ($line =~ /^ERROR (.*)$/) {
+                        print $master_socket "ERROR $1\n" if $master_socket;
+                    } elsif ($line =~ /^WARN (.*)$/) {
+                        print $master_socket "WARN $1\n" if $master_socket;
+                    }
+                }
+                $worker->blocking(1);
+            }
+        }
 
         for my $socket (@ready) {
             if ($socket == $master_server) {
@@ -3353,7 +3437,28 @@ sub run_job_master {
 		    
                 } elsif ($line =~ /^IN_PROGRESS$/) {
 		    foreach my $target (keys %in_progress)  {
-			print $master_socket "$target\t$in_progress{$target}\n";
+			my $status = $in_progress{$target};
+
+			# If it's a socket reference, query the worker for actual status
+			if (ref($status) eq 'IO::Socket::INET') {
+			    eval {
+				local $SIG{ALRM} = sub { die "timeout\n" };
+				alarm(1);  # 1 second timeout
+				print $status "STATUS\n";
+				my $response = <$status>;
+				alarm(0);
+				if (defined $response) {
+				    chomp $response;
+				    # Response format: "RUNNING task_id" or "READY"
+				    $status = $response;
+				}
+			    };
+			    if ($@) {
+				$status = "worker unresponsive";
+			    }
+			}
+
+			print $master_socket "$target\t$status\n";
 		    }
 		    print $master_socket "END_PROGRESS\n";
 		    
@@ -3693,6 +3798,19 @@ sub run_job_master {
                             $in_progress{$job->{target}} = "failed";
                         }
                         print STDERR "Task $task_id completed with exit=$exit_code\n";
+
+                        # Check if this failed task is a dependency of any composite target
+                        for my $comp_target (keys %pending_composite) {
+                            my $comp = $pending_composite{$comp_target};
+                            # Check if this failed target is in the composite's dependencies
+                            if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
+                                print STDERR "Dependency '$job->{target}' failed for composite target '$comp_target', marking as failed\n";
+                                if ($comp->{master_socket}) {
+                                    print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                                }
+                                delete $pending_composite{$comp_target};
+                            }
+                        }
                     }
 
                     # Report to master

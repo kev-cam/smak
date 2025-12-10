@@ -3096,9 +3096,60 @@ sub run_job_master {
    	        warn "No workers\n" if $ENV{SMAK_DEBUG};
 		last; # No workers available
 	    }
-	    
-            # Dispatch next job
-            my $job = shift @job_queue;
+
+            # Find next job whose dependencies are all satisfied
+            my $job_index = -1;
+            for my $i (0 .. $#job_queue) {
+                my $job = $job_queue[$i];
+                my $target = $job->{target};
+
+                # Check if this job's dependencies are satisfied
+                my $key = "$makefile\t$target";
+                my @deps;
+                if (exists $fixed_deps{$key}) {
+                    @deps = @{$fixed_deps{$key} || []};
+                } elsif (exists $pattern_deps{$key}) {
+                    @deps = @{$pattern_deps{$key} || []};
+                } elsif (exists $pseudo_deps{$key}) {
+                    @deps = @{$pseudo_deps{$key} || []};
+                }
+
+                # Check if all dependencies are completed
+                my $deps_satisfied = 1;
+                for my $dep (@deps) {
+                    next if $dep =~ /^\.PHONY$/;
+                    next if $dep !~ /\S/;
+
+                    # Expand variables in dependency
+                    my $expanded_dep = $dep;
+                    while ($expanded_dep =~ /\$MV\{([^}]+)\}/) {
+                        my $var = $1;
+                        my $val = $MV{$var} // '';
+                        $expanded_dep =~ s/\$MV\{\Q$var\E\}/$val/;
+                    }
+
+                    # Check if dependency is completed or exists as file
+                    unless ($completed_targets{$expanded_dep} || -e $expanded_dep) {
+                        $deps_satisfied = 0;
+                        print STDERR "Job '$target' waiting for dependency '$expanded_dep'\n" if $ENV{SMAK_DEBUG};
+                        last;
+                    }
+                }
+
+                if ($deps_satisfied) {
+                    $job_index = $i;
+                    last;
+                }
+            }
+
+            # No job with satisfied dependencies found
+            if ($job_index < 0) {
+                print STDERR "No jobs with satisfied dependencies\n" if $ENV{SMAK_DEBUG};
+                last;
+            }
+
+            # Dispatch the job
+            my $job = splice(@job_queue, $job_index, 1);
             my $task_id = $next_task_id++;
 
             $worker_status{$ready_worker}{ready} = 0;

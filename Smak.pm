@@ -3146,27 +3146,68 @@ sub run_job_master {
         if ($now - $last_consistency_check >= 2) {
             $last_consistency_check = $now;
 
-            # Check for stale running tasks - workers might have completed but we missed it
-            for my $task_id (keys %running_jobs) {
-                my $job = $running_jobs{$task_id};
-                # Find the worker socket for this task
-                for my $worker (@workers) {
-                    if ($in_progress{$job->{target}} && ref($in_progress{$job->{target}}) eq 'IO::Socket::INET'
-                        && $in_progress{$job->{target}} == $worker) {
-                        # Try to read any pending data from this worker
-                        $worker->blocking(0);
-                        while (my $pending = <$worker>) {
-                            chomp $pending;
-                            print STDERR "Consistency check: found pending message from worker: $pending\n";
-                            # Put it back for normal processing
-                            # Actually, we can't put it back, so we need to process it here
-                            # Just trigger the socket as ready by adding to @ready if not already there
-                            push @ready, $worker unless grep { $_ == $worker } @ready;
-                            last;  # Process one message at a time
+            # Check all worker sockets for pending messages
+            for my $worker (@workers) {
+                $worker->blocking(0);
+                while (my $line = <$worker>) {
+                    chomp $line;
+                    print STDERR "Consistency check: processing pending message: $line\n";
+
+                    # Process the message inline (same logic as main event loop)
+                    if ($line eq 'READY') {
+                        $worker_status{$worker}{ready} |= 2;
+                        print STDERR "Worker ready\n";
+                        dispatch_jobs();
+
+                    } elsif ($line =~ /^TASK_START (\d+)$/) {
+                        my $task_id = $1;
+                        if (exists $running_jobs{$task_id}) {
+                            $running_jobs{$task_id}{started} = 1;
                         }
-                        $worker->blocking(1);
+                        print STDERR "Task $task_id started\n";
+
+                    } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
+                        my ($task_id, $exit_code) = ($1, $2);
+                        my $job = $running_jobs{$task_id};
+
+                        delete $running_jobs{$task_id};
+
+                        if ($exit_code == 0 && $job->{target}) {
+                            $completed_targets{$job->{target}} = 1;
+                            $in_progress{$job->{target}} = "done";
+                            print STDERR "Task $task_id completed successfully: $job->{target}\n";
+
+                            # Check composite targets
+                            for my $comp_target (keys %pending_composite) {
+                                my $comp = $pending_composite{$comp_target};
+                                $comp->{deps} = [grep { $_ ne $job->{target} } @{$comp->{deps}}];
+
+                                if (@{$comp->{deps}} == 0) {
+                                    print STDERR "All dependencies complete for composite target '$comp_target'\n";
+                                    if ($comp->{master_socket}) {
+                                        print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
+                                    }
+                                    delete $pending_composite{$comp_target};
+                                }
+                            }
+                        } else {
+                            if ($job->{target}) {
+                                $in_progress{$job->{target}} = "failed";
+                            }
+                            print STDERR "Task $task_id completed with exit=$exit_code\n";
+                        }
+
+                        print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n" if $master_socket;
+
+                    } elsif ($line =~ /^OUTPUT (.*)$/) {
+                        print $master_socket "OUTPUT $1\n" if $master_socket;
+                    } elsif ($line =~ /^ERROR (.*)$/) {
+                        print $master_socket "ERROR $1\n" if $master_socket;
+                    } elsif ($line =~ /^WARN (.*)$/) {
+                        print $master_socket "WARN $1\n" if $master_socket;
                     }
                 }
+                $worker->blocking(1);
             }
         }
 

@@ -3007,6 +3007,25 @@ sub run_job_master {
         return join(" && ", @lines);
     }
 
+    sub expand_job_command {
+        my ($cmd, $target, $deps_ref) = @_;
+        return '' unless defined $cmd && $cmd =~ /\S/;
+
+        my @deps = $deps_ref ? @$deps_ref : ();
+
+        # Convert $MV{VAR} to $(VAR) for expansion
+        my $converted = format_output($cmd);
+        # Expand variables
+        my $expanded = expand_vars($converted);
+
+        # Expand automatic variables
+        $expanded =~ s/\$@/$target/g;                     # $@ = target name
+        $expanded =~ s/\$</$deps[0] || ''/ge;             # $< = first prerequisite
+        $expanded =~ s/\$\^/join(' ', @deps)/ge;          # $^ = all prerequisites
+
+        return $expanded;
+    }
+
     sub is_target_pending {
         my ($target) = @_;
 
@@ -3268,6 +3287,8 @@ sub run_job_master {
 
                             # Process command to strip @ and - prefixes
                             $dep_cmd = process_command($dep_cmd);
+                            # Expand variables for this dependency
+                            $dep_cmd = expand_job_command($dep_cmd, $dep, \@deps);
 
                             push @job_queue, {
                                 target => $dep,
@@ -3283,6 +3304,8 @@ sub run_job_master {
                             unless (is_target_pending($target)) {
                                 # Process command to strip @ and - prefixes
                                 my $processed_rule = process_command($rule);
+                                # Expand variables for this target
+                                $processed_rule = expand_job_command($processed_rule, $target, \@deps);
 
                                 push @job_queue, {
                                     target => $target,
@@ -3319,10 +3342,14 @@ sub run_job_master {
                     } else {
                         # No dependencies, queue the job as-is (if not already handled)
                         unless (is_target_pending($target)) {
+                            # Process and expand the command
+                            my $processed_cmd = process_command($cmd);
+                            $processed_cmd = expand_job_command($processed_cmd, $target, []);
+
                             push @job_queue, {
                                 target => $target,
                                 dir => $dir,
-                                command => $cmd,
+                                command => $processed_cmd,
                             };
                         } else {
                             print STDERR "Skipping target '$target' (already handled)\n";

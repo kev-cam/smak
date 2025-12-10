@@ -6,12 +6,16 @@ use Exporter qw(import);
 use POSIX ":sys_wait_h";
 use Term::ReadLine;
 
+use Carp 'verbose'; # for debug trace
+	            # print STDERR Carp::confess( @_ ) if $ENV{SMAK_DEBUG};
+
 our $VERSION = '1.0';
 
 our @EXPORT_OK = qw(
     parse_makefile
     build_target
     dry_run_target
+    server_cli
     interactive_debug
     execute_script
     get_default_target
@@ -33,6 +37,7 @@ our @EXPORT_OK = qw(
     list_variables
     get_variable
     show_dependencies
+    wait_for_jobs
 );
 
 our %EXPORT_TAGS = (
@@ -46,6 +51,8 @@ our %pattern_rule;
 our %pattern_deps;
 our %pseudo_rule;
 our %pseudo_deps;
+
+our @job_queue;
 
 # Hash for Makefile variables
 our %MV;
@@ -113,7 +120,7 @@ sub start_job_server {
         # Child - run job-master with full access to parsed Makefile data
         # This allows job-master to understand dependencies and parallelize intelligently
         run_job_master($jobs, $RealBin);
-        exit 0;  # Should never reach here
+        exit 99;  # Should never reach here
     }
 
     warn "Spawned job-master with PID $job_server_pid\n" if $ENV{SMAK_DEBUG};
@@ -185,52 +192,28 @@ sub stop_job_server {
     }
 }
 
+our %in_progress;
+
 sub submit_job {
     my ($target, $command, $dir) = @_;
 
-    # For sequential builds, execute immediately
-    if ($jobs <= 1) {
-        execute_command_sequential($target, $command, $dir);
-        return;
+    if ($in_progress{$target}) {
+	warn "In progress: $target\n";
+	return;
     }
 
-    # For parallel builds, send to job-master and wait for completion
-    $dir ||= '.';
-
+    $in_progress{$target} = "queued";
+    
     warn "Submitting job: $target\n" if $ENV{SMAK_DEBUG};
 
-    # Send job to job-master
-    print $job_server_socket "SUBMIT_JOB\n";
-    print $job_server_socket "$target\n";
-    print $job_server_socket "$dir\n";
-    print $job_server_socket "$command\n";
+    push @job_queue, {
+	target => $target,
+	dir => $dir,
+	command => $command,
+    };
 
-    # Wait for completion (blocking)
-    while (my $line = <$job_server_socket>) {
-        chomp $line;
-
-        if ($line =~ /^OUTPUT (.*)$/) {
-            # Forward output from worker
-            my $output = $1;
-            tee_print("$output\n") unless $silent_mode;
-
-        } elsif ($line =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
-            my ($completed_target, $exit_code) = ($1, $2);
-
-            if ($exit_code != 0) {
-                my $err_msg = "smak: *** [$completed_target] Error $exit_code\n";
-                tee_print($err_msg);
-                stop_job_server();
-                die $err_msg;
-            }
-
-            warn "Job completed: $completed_target\n" if $ENV{SMAK_DEBUG};
-            return;  # Job done
-        }
-    }
-
-    # If we get here, job-master disconnected
-    die "Job-master disconnected unexpectedly\n";
+    # do it now if you can
+    dispatch_jobs(1,$jobs <= 1); # block if sequential
 }
 
 sub execute_command_sequential {
@@ -2087,13 +2070,189 @@ sub save_modifications {
     print "Saved modifications to '$output_file'\n";
 }
 
-sub interactive_debug {
-    my $term = Term::ReadLine->new('smak');
-    my $OUT = $term->OUT || \*STDOUT;
+sub server_cli
+{
+    my ($jobserver_pid,$socket,$prompt,$term,$selected_js) = @_;
+    # Enter CLI mode
+    use Term::ReadLine;
+    
+    # Set up signal handler for graceful exit
+    my $exit_requested = 0;
+    local $SIG{INT} = sub { $exit_requested = 1; };
+    
+    my $line;
+    while (!$exit_requested && defined($line = $term->readline($prompt))) {
+	chomp $line;
+	$line =~ s/^\s+|\s+$//g;
+	
+	next if $line eq '';
+	$term->addhistory($line) if $line =~ /\S/;
+	
+	my @words = split(/\s+/, $line);
+	my $cmd = shift @words;
 
+	if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') {
+	    print "Shutting down job server...\n";
+	    print $socket "SHUTDOWN\n";
+	    my $ack = <$socket>;
+	    last;
+	    
+	} elsif ($cmd eq 'detach') {
+	    print "Detaching from job server...\n";
+	    last;
+	    
+	} elsif ($cmd eq 'help' || $cmd eq 'h' || $cmd eq '?') {
+	    print <<'HELP';
+Available commands:
+  build <target>      Build the specified target
+  tasks, t            List pending and active tasks
+  status              Show job server status
+  progress            Show job status
+  files, f            List tracked file modifications (FUSE)
+  list [pattern]      List all targets (optionally matching pattern)
+  vars [pattern]      Show all variables (optionally matching pattern)
+  deps <target>       Show dependencies for target
+  kill                Kill all workers
+  restart [N]         Restart workers (optionally specify count)
+  detach              Detach from job server (leave it running)
+  help, h, ?          Show this help
+  quit, exit, q       Shut down job server and exit
+
+Keyboard shortcuts:
+  Ctrl-C              Detach from job server
+
+HELP
+
+	} elsif ($cmd eq 'build' || $cmd eq 'b') {
+	    if (@words == 0) {
+		print "Usage: build <target>\n";
+	    } else {
+		for my $target (@words) {
+		    print $socket "SUBMIT_JOB\n";
+		    print $socket "$target\n";
+		    print $socket ".\n";
+		    print $socket "cd . && make $target\n";
+		    
+		    # Wait for completion with interruptible reads
+		    my $select = IO::Select->new($socket);
+		    my $job_done = 0;
+		    while (!$exit_requested && !$job_done) {
+			if ($select->can_read(0.1)) {
+			    my $response = <$socket>;
+			    last unless defined $response;
+			    chomp $response;
+			    if ($response =~ /^OUTPUT (.*)$/) {
+				print "$1\n";
+			    } elsif ($response =~ /^ERROR (.*)$/) {
+				print "❌ ERROR: $1\n";
+			    } elsif ($response =~ /^WARN (.*)$/) {
+				print "⚠️  WARN: $1\n";
+			    } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+				my ($completed_target, $exit_code) = ($1, $2);
+				if ($exit_code == 0) {
+				    print "✓ Build succeeded: $completed_target\n";
+				} else {
+				    print "✗ Build failed: $completed_target (exit code $exit_code)\n";
+				}
+				$job_done = 1;
+			    }
+			}
+		    }
+		    
+		    if ($exit_requested) {
+			print "\nBuild interrupted.\n";
+			last;
+		    }
+		}
+	    }
+	    
+	} elsif ($cmd eq 'progress') {
+	    print $socket "IN_PROGRESS\n";
+	    while (my $response = <$socket>) {
+		chomp $response;
+		last if $response eq 'END_PROGRESS';
+		print "$response\n";
+	    }
+	    
+	} elsif ($cmd eq 'tasks' || $cmd eq 't') {
+	    print $socket "LIST_TASKS\n";
+	    while (my $response = <$socket>) {
+		chomp $response;
+		last if $response eq 'TASKS_END';
+		print "$response\n";
+	    }
+	    
+	} elsif ($cmd eq 'status' || $cmd eq 'st') {
+	    print "Our PID: $$\n";
+	    print "Job server PID: $jobserver_pid $socket\n";
+	    if (defined $selected_js->{workers}) {
+		print "Workers: $selected_js->{workers}\n";
+	    }
+	    print "Working directory: $selected_js->{cwd}\n" if $selected_js->{cwd};
+	    
+	} elsif ($cmd eq 'kill') {
+	    print "Killing all workers...\n";
+	    print $socket "KILL_WORKERS\n";
+	    my $response = <$socket>;
+            chomp $response if $response;
+	    print "$response\n" if $response;
+	    
+	} elsif ($cmd eq 'restart') {
+	    my $count = @words > 0 ? $words[0] : $selected_js->{workers};
+	    print "Restarting workers ($count workers)...\n";
+	    print $socket "RESTART_WORKERS $count\n";
+	    my $response = <$socket>;
+	    chomp $response if $response;
+	    print "$response\n" if $response;
+	    
+	} elsif ($cmd eq 'files' || $cmd eq 'f') {
+	    print $socket "LIST_FILES\n";
+	    while (my $response = <$socket>) {
+		chomp $response;
+		last if $response eq 'FILES_END';
+		print "$response\n";
+	    }
+	    
+	} elsif ($cmd eq 'list' || $cmd eq 'ls' || $cmd eq 'l') {
+	    print "list command not yet implemented in attach mode\n";
+	    
+	} elsif ($cmd eq 'vars' || $cmd eq 'v') {
+	    print "vars command not yet implemented in attach mode\n";
+	    
+	} elsif ($cmd eq 'deps' || $cmd eq 'd') {
+	    print "deps command not yet implemented in attach mode\n";
+	    
+	} else {
+	    print "Unknown command: $cmd\n";
+	    print "Type 'help' for available commands.\n";
+	}
+	
+	# Check for exit request from Ctrl-C
+	if ($exit_requested) {
+	    last;
+	}
+    }
+
+    if ($exit_requested || !defined($line)) {
+	print "\nDetaching from job server.\n";
+	print "Job server still running (PID $jobserver_pid).\n";
+	print "To reattach: smak-attach\n";
+    }
+}
+
+sub interactive_debug {
+    my ($OUT,$input) = @_ ;
+    my $term = Term::ReadLine->new('smak');
+    my $do1 = defined $OUT;
+    if (! $do1) {
+	$OUT = $term->OUT || \*STDOUT;
+    }
+    
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
 
-    while (defined(my $input = $term->readline($echo ? $prompt : $prompt))) {
+    while ((1 == $do1++) ||
+	   defined($input = $term->readline($echo ? $prompt : $prompt))) {
+
         chomp $input;
 
         # Echo the line if echo mode is enabled
@@ -2119,9 +2278,11 @@ sub interactive_debug {
 Commands:
   list, l              - List all rules
   build <target>       - Build a target
+  progress	       - Show work in progress
   dry-run <target>     - Dry run a target
   print <expr>         - Evaluate and print an expression (in isolated subprocess)
-  eval <expr>          - Evaluate a Perl expression (in isolated subprocess)
+  eval <expr>          - Evaluate a Perl expression
+  safe-eval <expr>     - Evaluate a Perl expression (in isolated subprocess)
   !<command>           - Run a shell command
   set                  - Show control variables
   set <var> <value>    - Set a control variable (timeout, prompt, echo)
@@ -2151,6 +2312,12 @@ HELP
                 }
             }
         }
+        elsif ($cmd eq 'progress') {
+	    foreach my $target (keys %in_progress) {
+		my $state = $in_progress{$target};
+		print STDERR "$target\n$state\n";
+	    }
+	}
         elsif ($cmd eq 'dry-run') {
             if (@parts < 2) {
                 print $OUT "Usage: dry-run <target>\n";
@@ -2287,6 +2454,16 @@ HELP
             }
         }
         elsif ($cmd eq 'eval') {
+           my $expr = $input;
+           $expr =~ s/^\s*eval\s+//;
+	   my $result = eval $expr;
+	   if ($@) {
+	       print "Error: $@\n";
+	   } else {
+	       print "$result\n" if defined $result;
+	   }
+	}
+        elsif ($cmd eq 'safe-eval') {
             my $expr = $input;
             $expr =~ s/^\s*eval\s+//;
 
@@ -2338,6 +2515,8 @@ HELP
         else {
             print $OUT "Unknown command: $cmd (type 'help' for commands)\n";
         }
+
+	last if $do1;
     }
 }
 
@@ -2793,7 +2972,6 @@ sub run_job_master {
     print $master_socket "JOBSERVER_WORKERS_READY\n";
 
     # Job queue and dependency tracking
-    my @job_queue;
     my %running_jobs;  # task_id => {target, worker, dir, command, started}
     my %completed_targets;  # target => 1 (successfully built targets)
     my %pending_composite;  # composite targets waiting for dependencies
@@ -2860,8 +3038,15 @@ sub run_job_master {
             print $worker "SHUTDOWN\n";
         }
     }
-
+    
+    sub wait_for_worker_done {
+	my ($ready_worker) = @_;
+	print STDERR "wait_for_worker_done: NIY\n";
+    }
+    
     sub dispatch_jobs {
+	my ($do,$block) = @_;
+	my $j = 0;
         while (@job_queue) {
             # Find a ready worker
             my $ready_worker;
@@ -2871,8 +3056,11 @@ sub run_job_master {
                     last;
                 }
             }
-            last unless $ready_worker;  # No workers available
-
+            if (! $ready_worker) {
+   	        warn "No workers\n" if $ENV{SMAK_DEBUG};
+		last; # No workers available
+	    }
+	    
             # Dispatch next job
             my $job = shift @job_queue;
             my $task_id = $next_task_id++;
@@ -2887,7 +3075,11 @@ sub run_job_master {
                 command => $job->{command},
                 started => 0,
             };
+	    
+	    $j++;
 
+	    $in_progress{$job->{target}} = $ready_worker;
+	    
             # Send task to worker
             print $ready_worker "TASK $task_id\n";
             print $ready_worker "DIR $job->{dir}\n";
@@ -2895,7 +3087,41 @@ sub run_job_master {
 
             print STDERR "Dispatched task $task_id to worker\n";
             broadcast_observers("DISPATCHED $task_id $job->{target}");
+
+            if ($block) {
+		wait_for_worker_done($ready_worker);
+	    }
+
+	    if (defined $do) {
+		last if (1 == $do); # done for now
+	    }
         }
+
+	return $j;
+    }
+
+    sub requeue_job {
+	my ($task_id) = @_;
+	my $target = $running_jobs{$task_id}->{target};
+
+	push @job_queue, {
+	    dir => $running_jobs{$task_id}->{dir},
+	    command => $running_jobs{$task_id}->{command},
+	    target => $target
+	};
+
+	$in_progress{$target} = "requeued";
+
+	undef $running_jobs{$task_id};
+	
+	for my $worker (@workers) {
+	    if ($task_id == $worker_status{$worker}{task_id}) {
+	        $worker_status{$worker}{ready} = -1; # defavor		
+		return;
+	    }
+	}
+
+	warn "Couldn't deassign task $task_id";
     }
 
     # Main event loop
@@ -2947,7 +3173,7 @@ sub run_job_master {
                     shutdown_workers();
                     print $master_socket "SHUTDOWN_ACK\n";
                     exit 0;
-
+		    
                 } elsif ($line =~ /^SUBMIT_JOB$/) {
                     # Read job details
                     my $target = <$socket>; chomp $target if defined $target;
@@ -3100,6 +3326,17 @@ sub run_job_master {
                     # Try to dispatch
                     dispatch_jobs();
 
+                } elsif ($line =~ /^COMMAND\s+(.*)/) {
+		    print STDERR "Command: $1\n";
+		    interactive_debug($master_socket,$1);
+		    print $master_socket "END_COMMAND\n";
+		    
+                } elsif ($line =~ /^IN_PROGRESS$/) {
+		    foreach my $target (keys %in_progress)  {
+			print $master_socket "$target\t$in_progress{$target}\n";
+		    }
+		    print $master_socket "END_PROGRESS\n";
+		    
                 } elsif ($line =~ /^LIST_TASKS$/) {
                     # Send task list to master
                     print $master_socket "Queued tasks: " . scalar(@job_queue) . "\n";
@@ -3284,6 +3521,8 @@ sub run_job_master {
                     }
                     print STDERR "Task $task_id started\n";
 
+                } elsif ($line =~ /^TASK_REFUSED (\d+)$/) {
+		    requeue_job($1);
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
                     # Forward to master
@@ -3417,5 +3656,37 @@ sub run_job_master {
         }
     }
 }
+
+sub wait_for_jobs
+{
+    my $sts = 0;
+    
+    open(TREE,"pstree -p $$ 2>&1 |");
+    while (<TREE>) {
+	my $p=0;
+	my @pid;
+	while (s/\((\d+)\)//) {
+	    if ($$ != $1) { $pid[$p++] = $1; }
+	}
+	for $p (@pid) {
+	    my $msg = "process: $p";
+	    if (open(CMD,"tr \\0 ' ' </proc/$p/cmdline 2>&1 |")) {
+		if (my $cmd = <CMD>) {
+		    $msg = " command: $cmd [$p]";
+		}
+	    }
+	    warn "Waiting for$msg\n" if $ENV{SMAK_DEBUG};
+	    my $s = waitpid($p,0);
+	    if (0 != $s) {
+		$sts = $s;
+	    }
+	}
+    }
+
+    return $sts;
+}
+
+$SIG{USR1} = sub { interactive_debug };
+$SIG{USR2} = sub { print STDERR Carp::confess( @_ ) };
 
 1;  # Return true to indicate successful module load

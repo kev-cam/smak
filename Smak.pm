@@ -197,23 +197,22 @@ our %in_progress;
 sub submit_job {
     my ($target, $command, $dir) = @_;
 
+    return unless $job_server_socket;  # No job server
+
     if ($in_progress{$target}) {
 	warn "In progress: $target\n";
 	return;
     }
 
     $in_progress{$target} = "queued";
-    
+
     warn "Submitting job: $target\n" if $ENV{SMAK_DEBUG};
 
-    push @job_queue, {
-	target => $target,
-	dir => $dir,
-	command => $command,
-    };
-
-    # do it now if you can
-    dispatch_jobs(1,$jobs <= 1); # block if sequential
+    # Send job to job-master via socket protocol
+    print $job_server_socket "SUBMIT_JOB\n";
+    print $job_server_socket "$target\n";
+    print $job_server_socket "$dir\n";
+    print $job_server_socket "$command\n";
 }
 
 sub execute_command_sequential {

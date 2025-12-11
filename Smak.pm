@@ -3092,9 +3092,6 @@ sub run_job_master {
         # Skip if already handled
         return if is_target_pending($target);
 
-        # Mark as pending to prevent infinite recursion
-        $in_progress{$target} = "queued";
-
         # Lookup dependencies
         my $key = "$makefile\t$target";
         my @deps;
@@ -3156,11 +3153,13 @@ sub run_job_master {
                 dir => $dir,
                 command => $processed_rule,
             };
+            $in_progress{$target} = "queued";
             print STDERR "Queued target: $target\n";
         } elsif (@deps > 0) {
             # Composite target - track pending dependencies
             my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
             if (@pending_deps) {
+                $in_progress{$target} = "queued";
                 $pending_composite{$target} = {
                     deps => \@pending_deps,
                     master_socket => $msocket,
@@ -3169,11 +3168,13 @@ sub run_job_master {
             } else {
                 # All deps already complete
                 $completed_targets{$target} = 1;
+                $in_progress{$target} = "done";
                 print $msocket "JOB_COMPLETE $target 0\n" if $msocket;
             }
         } else {
             # No command and no deps - just mark complete
             $completed_targets{$target} = 1;
+            $in_progress{$target} = "done";
         }
     }
 

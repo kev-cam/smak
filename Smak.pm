@@ -3245,7 +3245,16 @@ sub run_job_master {
 
             # No job with satisfied dependencies found
             if ($job_index < 0) {
-                print STDERR "No jobs with satisfied dependencies\n" if $ENV{SMAK_DEBUG};
+                if ($ENV{SMAK_DEBUG}) {
+                    print STDERR "No jobs with satisfied dependencies\n";
+                    print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
+                    my $max_show = @job_queue < 10 ? $#job_queue : 9;
+                    for my $i (0 .. $max_show) {
+                        my $job = $job_queue[$i];
+                        print STDERR "  [$i] $job->{target}\n";
+                    }
+                    print STDERR "  ...\n" if @job_queue > 10;
+                }
                 last;
             }
 

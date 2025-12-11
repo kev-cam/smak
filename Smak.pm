@@ -672,17 +672,13 @@ sub parse_makefile {
         if ($line =~ /^-?include\s+(.+)$/) {
             $save_current_rule->();
             my $include_files = $1;
-            # Expand variables in the include filename
-            $include_files = transform_make_vars($include_files);
+            # Expand variables and functions in the include filename
+            $include_files = expand_vars($include_files);
 
             # Handle multiple includes on one line
             for my $include_file (split /\s+/, $include_files) {
-                # Expand $MV{...} to actual values
-                while ($include_file =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $include_file =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
+                # Skip empty entries
+                next if $include_file eq '';
 
                 # Determine include path
                 my $include_path = $include_file;
@@ -883,17 +879,13 @@ sub parse_included_makefile {
         if ($line =~ /^-?include\s+(.+)$/) {
             $save_current_rule->();
             my $include_files = $1;
-            # Expand variables in the include filename
-            $include_files = transform_make_vars($include_files);
+            # Expand variables and functions in the include filename
+            $include_files = expand_vars($include_files);
 
             # Handle multiple includes on one line
             for my $include_file (split /\s+/, $include_files) {
-                # Expand $MV{...} to actual values
-                while ($include_file =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $include_file =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
+                # Skip empty entries
+                next if $include_file eq '';
 
                 # Determine include path
                 my $nested_include_path = $include_file;

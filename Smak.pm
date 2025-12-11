@@ -1800,6 +1800,14 @@ sub build_target {
     } else {
         warn "DEBUG[" . __LINE__ . "]:   No .PHONY target found in pseudo_deps\n" if $ENV{SMAK_DEBUG};
     }
+
+    # Auto-detect common phony target names even without .PHONY declaration
+    # This is a pragmatic extension to standard Make behavior
+    if (!$is_phony && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+        warn "DEBUG[" . __LINE__ . "]:   Auto-detecting '$target' as phony (common target name)\n" if $ENV{SMAK_DEBUG};
+        $is_phony = 1;
+    }
+
     warn "DEBUG[" . __LINE__ . "]:   is_phony=$is_phony\n" if $ENV{SMAK_DEBUG};
 
     # If not .PHONY and target is up-to-date, skip building

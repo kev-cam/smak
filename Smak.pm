@@ -1774,21 +1774,27 @@ sub build_target {
             last;
         }
     }
+    warn "DEBUG[" . __LINE__ . "]:   is_phony=$is_phony\n" if $ENV{SMAK_DEBUG};
 
     # If not .PHONY and target is up-to-date, skip building
     unless ($is_phony) {
+        warn "DEBUG[" . __LINE__ . "]:   Checking if target exists and is up-to-date...\n" if $ENV{SMAK_DEBUG};
         if (-e $target && !needs_rebuild($target)) {
             warn "DEBUG:   Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
             return;
         }
+        warn "DEBUG[" . __LINE__ . "]:   Target needs rebuilding\n" if $ENV{SMAK_DEBUG};
     }
 
     # Recursively build dependencies
     # In parallel mode, skip this - let job-master handle dependency expansion
     unless ($job_server_socket) {
+        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies...\n" if $ENV{SMAK_DEBUG};
         for my $dep (@deps) {
+            warn "DEBUG[" . __LINE__ . "]:     Building dependency: $dep\n" if $ENV{SMAK_DEBUG};
             build_target($dep, $visited, $depth + 1);
         }
+        warn "DEBUG[" . __LINE__ . "]:   Finished building dependencies\n" if $ENV{SMAK_DEBUG};
     }
 
     # Execute rule if it exists (submit_job is blocking, so no need to wait)

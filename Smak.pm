@@ -3176,6 +3176,10 @@ sub run_job_master {
             print STDERR "Queued target: $target\n";
         } elsif (@deps > 0) {
             # Composite target or target with dependencies but no rule
+            if ($ENV{SMAK_DEBUG}) {
+                print STDERR "Target '$target' has " . scalar(@deps) . " dependencies but no rule\n";
+                print STDERR "  Dependencies: " . join(", ", @deps) . "\n";
+            }
             # If file exists, consider it satisfied
             if (-e $target) {
                 $completed_targets{$target} = 1;
@@ -3191,6 +3195,7 @@ sub run_job_master {
                         master_socket => $msocket,
                     };
                     print STDERR "Composite target '$target' waiting for " . scalar(@pending_deps) . " dependencies\n";
+                    print STDERR "  Pending: " . join(", ", @pending_deps) . "\n" if $ENV{SMAK_DEBUG};
                 } else {
                     # All deps already complete
                     $completed_targets{$target} = 1;

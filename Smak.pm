@@ -1768,10 +1768,12 @@ sub build_target {
 
     # Check if target is .PHONY
     # A target is phony if it appears as a dependency of .PHONY
+    # Note: .PHONY is classified as a pseudo target (starts with .)
     my $is_phony = 0;
     my $phony_key = "$makefile\t.PHONY";
-    if (exists $fixed_deps{$phony_key}) {
-        my @phony_targets = @{$fixed_deps{$phony_key} || []};
+    if (exists $pseudo_deps{$phony_key}) {
+        my @phony_targets = @{$pseudo_deps{$phony_key} || []};
+        warn "DEBUG[" . __LINE__ . "]:   Found .PHONY with deps: " . join(', ', @phony_targets) . "\n" if $ENV{SMAK_DEBUG};
         # Expand variables in .PHONY dependencies
         @phony_targets = map {
             my $t = $_;
@@ -1782,7 +1784,10 @@ sub build_target {
             }
             $t;
         } @phony_targets;
+        warn "DEBUG[" . __LINE__ . "]:   After expansion: " . join(', ', @phony_targets) . "\n" if $ENV{SMAK_DEBUG};
         $is_phony = 1 if grep { $_ eq $target } @phony_targets;
+    } else {
+        warn "DEBUG[" . __LINE__ . "]:   No .PHONY target found in pseudo_deps\n" if $ENV{SMAK_DEBUG};
     }
     warn "DEBUG[" . __LINE__ . "]:   is_phony=$is_phony\n" if $ENV{SMAK_DEBUG};
 

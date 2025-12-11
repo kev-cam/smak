@@ -3096,6 +3096,7 @@ sub run_job_master {
         my $key = "$makefile\t$target";
         my @deps;
         my $rule = '';
+        my $stem = '';
 
         if (exists $fixed_deps{$key}) {
             @deps = @{$fixed_deps{$key} || []};
@@ -3106,6 +3107,24 @@ sub run_job_master {
         } elsif (exists $pseudo_deps{$key}) {
             @deps = @{$pseudo_deps{$key} || []};
             $rule = $pseudo_rule{$key} || '';
+        } else {
+            # Try to find pattern rule match
+            for my $pkey (keys %pattern_rule) {
+                if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                    my $pattern = $1;
+                    my $pattern_re = $pattern;
+                    $pattern_re =~ s/%/(.+)/g;
+                    if ($target =~ /^$pattern_re$/) {
+                        @deps = @{$pattern_deps{$pkey} || []};
+                        $rule = $pattern_rule{$pkey} || '';
+                        # Expand % in dependencies
+                        $stem = $1;  # Save stem for $* expansion
+                        @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                        print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
+                        last;
+                    }
+                }
+            }
         }
 
         # Expand variables in dependencies
@@ -3145,6 +3164,10 @@ sub run_job_master {
 
         # Now queue this target if it has a command
         if ($rule && $rule =~ /\S/) {
+            # Expand $* with stem if we matched a pattern rule
+            if ($stem) {
+                $rule =~ s/\$\*/$stem/g;
+            }
             my $processed_rule = process_command($rule);
             $processed_rule = expand_job_command($processed_rule, $target, \@deps);
 
@@ -3166,7 +3189,7 @@ sub run_job_master {
                 # Track pending dependencies
                 my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
                 if (@pending_deps) {
-                    $in_progress{$target} = "queued";
+                    $in_progress{$target} = "pending";
                     $pending_composite{$target} = {
                         deps => \@pending_deps,
                         master_socket => $msocket,

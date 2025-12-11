@@ -2226,7 +2226,8 @@ HELP
 	    }
 	    
 	} elsif ($cmd eq 'progress') {
-	    print $socket "IN_PROGRESS $words[0]\n";
+	    my $op = join(' ',@words);
+	    print $socket "IN_PROGRESS $op\n";
 	    while (my $response = <$socket>) {
 		chomp $response;
 		last if $response eq 'END_PROGRESS';

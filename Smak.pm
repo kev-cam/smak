@@ -658,8 +658,13 @@ sub parse_makefile {
             }
             # Split directories by whitespace or colon
             my @dirs = split /[\s:]+/, $directories;
-            $vpath{$pattern} = \@dirs;
-            print STDERR "DEBUG: vpath $pattern => " . join(", ", @dirs) . "\n" if $ENV{SMAK_DEBUG};
+            # Append to existing directories for this pattern (make accumulates vpath entries)
+            if (exists $vpath{$pattern}) {
+                push @{$vpath{$pattern}}, @dirs;
+            } else {
+                $vpath{$pattern} = \@dirs;
+            }
+            print STDERR "DEBUG: vpath $pattern += " . join(", ", @dirs) . " (total: " . join(", ", @{$vpath{$pattern}}) . ")\n" if $ENV{SMAK_DEBUG};
             next;
         }
 
@@ -945,7 +950,22 @@ sub resolve_vpath {
 
     # Check if file exists in current directory first
     my $file_path = $file =~ m{^/} ? $file : "$dir/$file";
-    return $file if -e $file_path;
+    if (-e $file_path) {
+        print STDERR "DEBUG vpath: '$file' found in current directory\n" if $ENV{SMAK_DEBUG};
+        return $file;
+    }
+
+    print STDERR "DEBUG vpath: '$file' not in current dir, checking vpath patterns\n" if $ENV{SMAK_DEBUG};
+
+    # Debug: show available vpath patterns
+    if ($ENV{SMAK_DEBUG} && keys %vpath) {
+        print STDERR "DEBUG vpath: Available patterns:\n";
+        for my $p (keys %vpath) {
+            print STDERR "DEBUG vpath:   '$p' => [" . join(", ", @{$vpath{$p}}) . "]\n";
+        }
+    } elsif ($ENV{SMAK_DEBUG}) {
+        print STDERR "DEBUG vpath: No vpath patterns defined!\n";
+    }
 
     # Try vpath patterns
     for my $pattern (keys %vpath) {
@@ -954,15 +974,17 @@ sub resolve_vpath {
         $pattern_re =~ s/%/.*?/g;
 
         if ($file =~ /^$pattern_re$/) {
+            print STDERR "DEBUG vpath: '$file' matches pattern '$pattern'\n" if $ENV{SMAK_DEBUG};
             # File matches this vpath pattern, search directories
             for my $vpath_dir (@{$vpath{$pattern}}) {
                 my $candidate = "$vpath_dir/$file";
                 # Make path relative to working directory
                 $candidate = $candidate =~ m{^/} ? $candidate : "$dir/$candidate";
+                print STDERR "DEBUG vpath:   trying '$candidate'\n" if $ENV{SMAK_DEBUG};
                 if (-e $candidate) {
-                    print STDERR "DEBUG: resolved '$file' to '$candidate' via vpath\n" if $ENV{SMAK_DEBUG};
                     # Return relative path from $dir
                     $candidate =~ s{^\Q$dir\E/}{};
+                    print STDERR "DEBUG vpath: ✓ resolved '$file' → '$candidate' via vpath\n" if $ENV{SMAK_DEBUG};
                     return $candidate;
                 }
             }
@@ -970,6 +992,7 @@ sub resolve_vpath {
     }
 
     # Not found via vpath, return original
+    print STDERR "DEBUG vpath: '$file' not found via vpath, returning as-is\n" if $ENV{SMAK_DEBUG};
     return $file;
 }
 
@@ -2193,6 +2216,7 @@ Available commands:
   tasks, t            List pending and active tasks
   status              Show job server status
   progress            Show job status
+  vpath <file>        Test vpath resolution for a file
   files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
@@ -2259,7 +2283,35 @@ HELP
 		last if $response eq 'END_PROGRESS';
 		print "$response\n";
 	    }
-	    
+
+	} elsif ($cmd eq 'vpath') {
+	    if (@words == 0) {
+		print "Usage: vpath <file>\n";
+	    } else {
+		my $file = $words[0];
+		use Cwd 'getcwd';
+		my $cwd = getcwd();
+
+		# Show vpath patterns
+		print "Available vpath patterns:\n";
+		if (keys %vpath) {
+		    for my $p (keys %vpath) {
+			print "  '$p' => [" . join(", ", @{$vpath{$p}}) . "]\n";
+		    }
+		} else {
+		    print "  (none)\n";
+		}
+
+		# Test resolution
+		print "\nResolving '$file':\n";
+		my $resolved = resolve_vpath($file, $cwd);
+		if ($resolved ne $file) {
+		    print "  ✓ Resolved to: $resolved\n";
+		} else {
+		    print "  ✗ Not resolved (returned as-is)\n";
+		}
+	    }
+
 	} elsif ($cmd eq 'tasks' || $cmd eq 't') {
 	    print $socket "LIST_TASKS\n";
 	    while (my $response = <$socket>) {
@@ -2365,6 +2417,7 @@ Commands:
   list, l              - List all rules
   build <target>       - Build a target
   progress	       - Show work in progress
+  vpath <file>         - Test vpath resolution for a file
   dry-run <target>     - Dry run a target
   print <expr>         - Evaluate and print an expression (in isolated subprocess)
   eval <expr>          - Evaluate a Perl expression
@@ -2408,6 +2461,34 @@ HELP
 		}
 	    }
 	}
+        elsif ($cmd eq 'vpath') {
+            if (@parts < 2) {
+                print $OUT "Usage: vpath <file>\n";
+            } else {
+                my $file = $parts[1];
+                use Cwd 'getcwd';
+                my $cwd = getcwd();
+
+                # Show vpath patterns
+                print $OUT "Available vpath patterns:\n";
+                if (keys %vpath) {
+                    for my $p (keys %vpath) {
+                        print $OUT "  '$p' => [" . join(", ", @{$vpath{$p}}) . "]\n";
+                    }
+                } else {
+                    print $OUT "  (none)\n";
+                }
+
+                # Test resolution
+                print $OUT "\nResolving '$file':\n";
+                my $resolved = resolve_vpath($file, $cwd);
+                if ($resolved ne $file) {
+                    print $OUT "  ✓ Resolved to: $resolved\n";
+                } else {
+                    print $OUT "  ✗ Not resolved (returned as-is)\n";
+                }
+            }
+        }
         elsif ($cmd eq 'dry-run') {
             if (@parts < 2) {
                 print $OUT "Usage: dry-run <target>\n";

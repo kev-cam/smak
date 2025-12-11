@@ -1577,6 +1577,10 @@ sub build_target {
                         my @pattern_deps = @{$pattern_deps{$pkey} || []};
                         $stem = $1;  # Save stem for $* expansion
                         @pattern_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @pattern_deps;
+                        # Resolve dependencies through vpath
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        @pattern_deps = map { resolve_vpath($_, $cwd) } @pattern_deps;
                         push @deps, @pattern_deps;
                         last;
                     }
@@ -1602,6 +1606,10 @@ sub build_target {
                     # Expand % in dependencies
                     $stem = $1;  # Save stem for $* expansion
                     @deps = map { s/%/$stem/g; $_ } @deps;
+                    # Resolve dependencies through vpath
+                    use Cwd 'getcwd';
+                    my $cwd = getcwd();
+                    @deps = map { resolve_vpath($_, $cwd) } @deps;
                     last;
                 }
             }
@@ -1840,6 +1848,10 @@ sub dry_run_target {
                         my @pattern_deps = @{$pattern_deps{$pkey} || []};
                         $stem = $1;  # Save stem for $* expansion
                         @pattern_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @pattern_deps;
+                        # Resolve dependencies through vpath
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        @pattern_deps = map { resolve_vpath($_, $cwd) } @pattern_deps;
                         push @deps, @pattern_deps;
                         last;
                     }
@@ -1865,6 +1877,10 @@ sub dry_run_target {
                     # Expand % in dependencies
                     $stem = $1;  # Save stem for $* expansion
                     @deps = map { s/%/$stem/g; $_ } @deps;
+                    # Resolve dependencies through vpath
+                    use Cwd 'getcwd';
+                    my $cwd = getcwd();
+                    @deps = map { resolve_vpath($_, $cwd) } @deps;
                     last;
                 }
             }

@@ -2211,6 +2211,7 @@ Available commands:
   tasks, t            List pending and active tasks
   status              Show job server status
   progress            Show job status
+  vpath <file>        Test vpath resolution for a file
   files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
@@ -2276,7 +2277,35 @@ HELP
 		last if $response eq 'END_PROGRESS';
 		print "$response\n";
 	    }
-	    
+
+	} elsif ($cmd eq 'vpath') {
+	    if (@words == 0) {
+		print "Usage: vpath <file>\n";
+	    } else {
+		my $file = $words[0];
+		use Cwd 'getcwd';
+		my $cwd = getcwd();
+
+		# Show vpath patterns
+		print "Available vpath patterns:\n";
+		if (keys %vpath) {
+		    for my $p (keys %vpath) {
+			print "  '$p' => [" . join(", ", @{$vpath{$p}}) . "]\n";
+		    }
+		} else {
+		    print "  (none)\n";
+		}
+
+		# Test resolution
+		print "\nResolving '$file':\n";
+		my $resolved = resolve_vpath($file, $cwd);
+		if ($resolved ne $file) {
+		    print "  ✓ Resolved to: $resolved\n";
+		} else {
+		    print "  ✗ Not resolved (returned as-is)\n";
+		}
+	    }
+
 	} elsif ($cmd eq 'tasks' || $cmd eq 't') {
 	    print $socket "LIST_TASKS\n";
 	    while (my $response = <$socket>) {
@@ -2382,6 +2411,7 @@ Commands:
   list, l              - List all rules
   build <target>       - Build a target
   progress	       - Show work in progress
+  vpath <file>         - Test vpath resolution for a file
   dry-run <target>     - Dry run a target
   print <expr>         - Evaluate and print an expression (in isolated subprocess)
   eval <expr>          - Evaluate a Perl expression
@@ -2421,6 +2451,34 @@ HELP
 		print STDERR "$target\n$state\n";
 	    }
 	}
+        elsif ($cmd eq 'vpath') {
+            if (@parts < 2) {
+                print $OUT "Usage: vpath <file>\n";
+            } else {
+                my $file = $parts[1];
+                use Cwd 'getcwd';
+                my $cwd = getcwd();
+
+                # Show vpath patterns
+                print $OUT "Available vpath patterns:\n";
+                if (keys %vpath) {
+                    for my $p (keys %vpath) {
+                        print $OUT "  '$p' => [" . join(", ", @{$vpath{$p}}) . "]\n";
+                    }
+                } else {
+                    print $OUT "  (none)\n";
+                }
+
+                # Test resolution
+                print $OUT "\nResolving '$file':\n";
+                my $resolved = resolve_vpath($file, $cwd);
+                if ($resolved ne $file) {
+                    print $OUT "  ✓ Resolved to: $resolved\n";
+                } else {
+                    print $OUT "  ✗ Not resolved (returned as-is)\n";
+                }
+            }
+        }
         elsif ($cmd eq 'dry-run') {
             if (@parts < 2) {
                 print $OUT "Usage: dry-run <target>\n";

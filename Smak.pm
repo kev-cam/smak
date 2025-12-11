@@ -952,6 +952,16 @@ sub resolve_vpath {
 
     print STDERR "DEBUG vpath: '$file' not in current dir, checking vpath patterns\n" if $ENV{SMAK_DEBUG};
 
+    # Debug: show available vpath patterns
+    if ($ENV{SMAK_DEBUG} && keys %vpath) {
+        print STDERR "DEBUG vpath: Available patterns:\n";
+        for my $p (keys %vpath) {
+            print STDERR "DEBUG vpath:   '$p' => [" . join(", ", @{$vpath{$p}}) . "]\n";
+        }
+    } elsif ($ENV{SMAK_DEBUG}) {
+        print STDERR "DEBUG vpath: No vpath patterns defined!\n";
+    }
+
     # Try vpath patterns
     for my $pattern (keys %vpath) {
         # Convert pattern to regex (% matches anything)

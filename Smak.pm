@@ -3363,6 +3363,7 @@ sub run_job_master {
                                 # Check if this failed target is in the composite's dependencies
                                 if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                     print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                                    $in_progress{$comp_target} = "failed";
                                     if ($comp->{master_socket}) {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                     }
@@ -3848,6 +3849,7 @@ sub run_job_master {
                             # Check if this failed target is in the composite's dependencies
                             if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                 print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                                $in_progress{$comp_target} = "failed";
                                 if ($comp->{master_socket}) {
                                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                 }

@@ -945,7 +945,12 @@ sub resolve_vpath {
 
     # Check if file exists in current directory first
     my $file_path = $file =~ m{^/} ? $file : "$dir/$file";
-    return $file if -e $file_path;
+    if (-e $file_path) {
+        print STDERR "DEBUG vpath: '$file' found in current directory\n" if $ENV{SMAK_DEBUG};
+        return $file;
+    }
+
+    print STDERR "DEBUG vpath: '$file' not in current dir, checking vpath patterns\n" if $ENV{SMAK_DEBUG};
 
     # Try vpath patterns
     for my $pattern (keys %vpath) {
@@ -954,15 +959,17 @@ sub resolve_vpath {
         $pattern_re =~ s/%/.*?/g;
 
         if ($file =~ /^$pattern_re$/) {
+            print STDERR "DEBUG vpath: '$file' matches pattern '$pattern'\n" if $ENV{SMAK_DEBUG};
             # File matches this vpath pattern, search directories
             for my $vpath_dir (@{$vpath{$pattern}}) {
                 my $candidate = "$vpath_dir/$file";
                 # Make path relative to working directory
                 $candidate = $candidate =~ m{^/} ? $candidate : "$dir/$candidate";
+                print STDERR "DEBUG vpath:   trying '$candidate'\n" if $ENV{SMAK_DEBUG};
                 if (-e $candidate) {
-                    print STDERR "DEBUG: resolved '$file' to '$candidate' via vpath\n" if $ENV{SMAK_DEBUG};
                     # Return relative path from $dir
                     $candidate =~ s{^\Q$dir\E/}{};
+                    print STDERR "DEBUG vpath: ✓ resolved '$file' → '$candidate' via vpath\n" if $ENV{SMAK_DEBUG};
                     return $candidate;
                 }
             }
@@ -970,6 +977,7 @@ sub resolve_vpath {
     }
 
     # Not found via vpath, return original
+    print STDERR "DEBUG vpath: '$file' not found via vpath, returning as-is\n" if $ENV{SMAK_DEBUG};
     return $file;
 }
 

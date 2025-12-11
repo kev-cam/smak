@@ -3078,7 +3078,7 @@ sub run_job_master {
 
     # Wait for initial master connection
     print STDERR "Waiting for master connection...\n";
-    my $master_socket = $master_server->accept();
+    our $master_socket = $master_server->accept();
     die "Failed to accept master connection\n" unless $master_socket;
     $master_socket->autoflush(1);
     print STDERR "Master connected\n";

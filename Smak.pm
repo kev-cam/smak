@@ -3079,7 +3079,100 @@ sub run_job_master {
 	my ($ready_worker) = @_;
 	print STDERR "wait_for_worker_done: NIY\n";
     }
-    
+
+    # Recursively queue a target and all its dependencies
+    sub queue_target_recursive {
+        my ($target, $dir, $msocket) = @_;
+        $msocket ||= $master_socket;  # Use provided or fall back to global
+
+        # Skip if already handled
+        return if is_target_pending($target);
+
+        # Mark as pending to prevent infinite recursion
+        $in_progress{$target} = "queued";
+
+        # Lookup dependencies
+        my $key = "$makefile\t$target";
+        my @deps;
+        my $rule = '';
+
+        if (exists $fixed_deps{$key}) {
+            @deps = @{$fixed_deps{$key} || []};
+            $rule = $fixed_rule{$key} || '';
+        } elsif (exists $pattern_deps{$key}) {
+            @deps = @{$pattern_deps{$key} || []};
+            $rule = $pattern_rule{$key} || '';
+        } elsif (exists $pseudo_deps{$key}) {
+            @deps = @{$pseudo_deps{$key} || []};
+            $rule = $pseudo_rule{$key} || '';
+        }
+
+        # Expand variables in dependencies
+        my @expanded_deps;
+        for my $dep (@deps) {
+            while ($dep =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            push @expanded_deps, $dep;
+        }
+        @deps = @expanded_deps;
+
+        # Recursively queue each dependency first
+        for my $dep (@deps) {
+            next if $dep =~ /^\.PHONY$/;
+            next if $dep !~ /\S/;
+            next if $dep =~ /^["']+$/;
+
+            # Split on whitespace for multiple files in one dep
+            for my $single_dep (split /\s+/, $dep) {
+                next unless $single_dep =~ /\S/;
+
+                # Check if file exists
+                if (-e $single_dep && !exists $fixed_deps{"$makefile\t$single_dep"}
+                    && !exists $pattern_deps{"$makefile\t$single_dep"}
+                    && !exists $pseudo_deps{"$makefile\t$single_dep"}) {
+                    $completed_targets{$single_dep} = 1;
+                    next;
+                }
+
+                # Recursively queue this dependency
+                queue_target_recursive($single_dep, $dir, $msocket);
+            }
+        }
+
+        # Now queue this target if it has a command
+        if ($rule && $rule =~ /\S/) {
+            my $processed_rule = process_command($rule);
+            $processed_rule = expand_job_command($processed_rule, $target, \@deps);
+
+            push @job_queue, {
+                target => $target,
+                dir => $dir,
+                command => $processed_rule,
+            };
+            print STDERR "Queued target: $target\n";
+        } elsif (@deps > 0) {
+            # Composite target - track pending dependencies
+            my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
+            if (@pending_deps) {
+                $pending_composite{$target} = {
+                    deps => \@pending_deps,
+                    master_socket => $msocket,
+                };
+                print STDERR "Composite target '$target' waiting for " . scalar(@pending_deps) . " dependencies\n";
+            } else {
+                # All deps already complete
+                $completed_targets{$target} = 1;
+                print $msocket "JOB_COMPLETE $target 0\n" if $msocket;
+            }
+        } else {
+            # No command and no deps - just mark complete
+            $completed_targets{$target} = 1;
+        }
+    }
+
     sub dispatch_jobs {
 	my ($do,$block) = @_;
 	my $j = 0;
@@ -3096,9 +3189,67 @@ sub run_job_master {
    	        warn "No workers\n" if $ENV{SMAK_DEBUG};
 		last; # No workers available
 	    }
-	    
-            # Dispatch next job
-            my $job = shift @job_queue;
+
+            # Find next job whose dependencies are all satisfied
+            my $job_index = -1;
+            for my $i (0 .. $#job_queue) {
+                my $job = $job_queue[$i];
+                my $target = $job->{target};
+
+                # Check if this job's dependencies are satisfied
+                my $key = "$makefile\t$target";
+                my @deps;
+                if (exists $fixed_deps{$key}) {
+                    @deps = @{$fixed_deps{$key} || []};
+                } elsif (exists $pattern_deps{$key}) {
+                    @deps = @{$pattern_deps{$key} || []};
+                } elsif (exists $pseudo_deps{$key}) {
+                    @deps = @{$pseudo_deps{$key} || []};
+                }
+
+                # Check if all dependencies are completed
+                my $deps_satisfied = 1;
+                for my $dep (@deps) {
+                    next if $dep =~ /^\.PHONY$/;
+                    next if $dep !~ /\S/;
+
+                    # Expand variables in dependency
+                    my $expanded_dep = $dep;
+                    while ($expanded_dep =~ /\$MV\{([^}]+)\}/) {
+                        my $var = $1;
+                        my $val = $MV{$var} // '';
+                        $expanded_dep =~ s/\$MV\{\Q$var\E\}/$val/;
+                    }
+
+                    # Split on whitespace in case multiple dependencies are in one string
+                    for my $single_dep (split /\s+/, $expanded_dep) {
+                        next unless $single_dep =~ /\S/;
+
+                        # Check if dependency is completed or exists as file
+                        unless ($completed_targets{$single_dep} || -e $single_dep) {
+                            $deps_satisfied = 0;
+                            print STDERR "Job '$target' waiting for dependency '$single_dep'\n" if $ENV{SMAK_DEBUG};
+                            last;
+                        }
+                    }
+
+                    last unless $deps_satisfied;
+                }
+
+                if ($deps_satisfied) {
+                    $job_index = $i;
+                    last;
+                }
+            }
+
+            # No job with satisfied dependencies found
+            if ($job_index < 0) {
+                print STDERR "No jobs with satisfied dependencies\n" if $ENV{SMAK_DEBUG};
+                last;
+            }
+
+            # Dispatch the job
+            my $job = splice(@job_queue, $job_index, 1);
             my $task_id = $next_task_id++;
 
             $worker_status{$ready_worker}{ready} = 0;
@@ -3303,126 +3454,8 @@ sub run_job_master {
                     print STDERR "DEBUG: Target '$target' has " . scalar(@deps) . " dependencies\n";
                     print STDERR "DEBUG: Dependencies: " . join(', ', @deps) . "\n" if @deps;
 
-                    # Check if target has dependencies that should be parallelized
-                    if (@deps > 0) {
-                        # Expand variables in dependencies
-                        my @expanded_deps;
-                        for my $dep (@deps) {
-                            # Expand $MV{VAR} references
-                            while ($dep =~ /\$MV\{([^}]+)\}/) {
-                                my $var = $1;
-                                my $val = $MV{$var} // '';
-                                $dep =~ s/\$MV\{\Q$var\E\}/$val/;
-                            }
-                            push @expanded_deps, $dep;
-                        }
-                        @deps = @expanded_deps;
-
-                        # Queue each dependency as a separate job
-                        for my $dep (@deps) {
-                            # Skip phony dependencies
-                            next if $dep =~ /^\.PHONY$/;
-
-                            # Skip invalid dependencies (empty, just quotes, etc.)
-                            next if $dep !~ /\S/;  # Empty or whitespace only
-                            next if $dep =~ /^["']+$/;  # Just quotes
-
-                            # Skip if already completed, queued, or running
-                            if (is_target_pending($dep)) {
-                                print STDERR "Skipping dependency '$dep' (already handled)\n";
-                                next;
-                            }
-
-                            # Get the build command for this dependency
-                            my $dep_key = "$makefile\t$dep";
-                            my $dep_cmd;
-                            if (exists $pseudo_rule{$dep_key}) {
-                                $dep_cmd = $pseudo_rule{$dep_key};
-                            } elsif (exists $fixed_rule{$dep_key}) {
-                                $dep_cmd = $fixed_rule{$dep_key};
-                            } elsif (exists $pattern_rule{$dep_key}) {
-                                $dep_cmd = $pattern_rule{$dep_key};
-                            } else {
-                                # No explicit rule - check if file exists
-                                if (-e $dep) {
-                                    print STDERR "Skipping dependency '$dep' (file exists, no rule)\n";
-                                    $completed_targets{$dep} = 1;
-                                    next;
-                                }
-                                # File doesn't exist and no rule - try recursive make
-                                $dep_cmd = "cd $dir && make $dep";
-                            }
-
-                            # Process command to strip @ and - prefixes
-                            $dep_cmd = process_command($dep_cmd);
-                            # Expand variables for this dependency
-                            $dep_cmd = expand_job_command($dep_cmd, $dep, \@deps);
-
-                            push @job_queue, {
-                                target => $dep,
-                                dir => $dir,
-                                command => $dep_cmd,
-                            };
-                            print STDERR "Queued dependency: $dep\n";
-                        }
-
-                        # Also queue the main target if it has its own command
-                        my $target_has_command = 0;
-                        if ($rule && $rule =~ /\S/) {
-                            unless (is_target_pending($target)) {
-                                # Process command to strip @ and - prefixes
-                                my $processed_rule = process_command($rule);
-                                # Expand variables for this target
-                                $processed_rule = expand_job_command($processed_rule, $target, \@deps);
-
-                                push @job_queue, {
-                                    target => $target,
-                                    dir => $dir,
-                                    command => $processed_rule,
-                                };
-                                print STDERR "Queued main target: $target\n";
-                                $target_has_command = 1;
-                            } else {
-                                print STDERR "Skipping main target '$target' (already handled)\n";
-                                $target_has_command = 1;  # Already queued
-                            }
-                        } else {
-                            # Composite target with no command
-                            # Track it as pending and send JOB_COMPLETE when deps finish
-                            my @pending_deps;
-                            for my $dep (@deps) {
-                                next if $dep =~ /^\.PHONY$/;
-                                push @pending_deps, $dep unless exists $completed_targets{$dep};
-                            }
-
-                            if (@pending_deps) {
-                                print STDERR "Composite target '$target' waiting for " . scalar(@pending_deps) . " dependencies\n";
-                                $pending_composite{$target} = {
-                                    deps => \@pending_deps,
-                                    master_socket => $master_socket,
-                                };
-                            } else {
-                                # All dependencies already complete
-                                print STDERR "Composite target '$target' has no pending dependencies, completing\n";
-                                print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket;
-                            }
-                        }
-                    } else {
-                        # No dependencies, queue the job as-is (if not already handled)
-                        unless (is_target_pending($target)) {
-                            # Process and expand the command
-                            my $processed_cmd = process_command($cmd);
-                            $processed_cmd = expand_job_command($processed_cmd, $target, []);
-
-                            push @job_queue, {
-                                target => $target,
-                                dir => $dir,
-                                command => $processed_cmd,
-                            };
-                        } else {
-                            print STDERR "Skipping target '$target' (already handled)\n";
-                        }
-                    }
+                    # Use recursive queuing to handle dependencies
+                    queue_target_recursive($target, $dir, $master_socket);
 
                     print STDERR "Job queue now has " . scalar(@job_queue) . " jobs\n";
                     broadcast_observers("QUEUED $target");

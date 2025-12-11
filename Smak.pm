@@ -3478,29 +3478,34 @@ sub run_job_master {
 		    my $clear = ($op =~ /clear/i);
 		    foreach my $target (keys %in_progress)  {
 			my $status = $in_progress{$target};
-
+			my $message = $status;
+			if (! defined $message) {
+			    $message = "unknown";
+			}
 			# If it's a socket reference, query the worker for actual status
 			if (ref($status) eq 'IO::Socket::INET') {
 			    eval {
 				local $SIG{ALRM} = sub { die "timeout\n" };
 				alarm(1);  # 1 second timeout
 				print $status "STATUS\n";
-				my $response = <$status>;
+				$message = <$status>;
 				alarm(0);
-				if (defined $response) {
-				    chomp $response;
+				if (defined $message) {
+				    chomp $message;
 				    # Response format: "RUNNING task_id" or "READY"
-				    $status = $response;
+				    if ("" eq $message) {
+					$message = "with worker(?)";
+				    }					
 				}
 			    };
 			    if ($@) {
-				$status = "worker unresponsive";
+				$message = "worker unresponsive";
 			    }
 			} elsif ('done' eq $status && $clear) {
-			    undef $in_progress{$target};
+			    delete $in_progress{$target};
 			}
 
-			print $master_socket "$target\t$status\n";
+			print $master_socket "$target\t$message\n";
 		    }
 		    print $master_socket "END_PROGRESS\n";
 		    

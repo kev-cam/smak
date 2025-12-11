@@ -3145,11 +3145,13 @@ sub run_job_master {
             for my $single_dep (split /\s+/, $dep) {
                 next unless $single_dep =~ /\S/;
 
-                # Check if file exists
-                if (-e $single_dep && !exists $fixed_deps{"$makefile\t$single_dep"}
+                # Check if file exists (relative to working directory)
+                my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$dir/$single_dep";
+                if (-e $dep_path && !exists $fixed_deps{"$makefile\t$single_dep"}
                     && !exists $pattern_deps{"$makefile\t$single_dep"}
                     && !exists $pseudo_deps{"$makefile\t$single_dep"}) {
                     $completed_targets{$single_dep} = 1;
+                    print STDERR "Dependency '$single_dep' exists at '$dep_path', marking complete\n" if $ENV{SMAK_DEBUG};
                     next;
                 }
 
@@ -3180,11 +3182,12 @@ sub run_job_master {
                 print STDERR "Target '$target' has " . scalar(@deps) . " dependencies but no rule\n";
                 print STDERR "  Dependencies: " . join(", ", @deps) . "\n";
             }
-            # If file exists, consider it satisfied
-            if (-e $target) {
+            # If file exists (relative to working directory), consider it satisfied
+            my $target_path = $target =~ m{^/} ? $target : "$dir/$target";
+            if (-e $target_path) {
                 $completed_targets{$target} = 1;
                 $in_progress{$target} = "done";
-                print STDERR "Target '$target' exists, marking complete (no rule found)\n" if $ENV{SMAK_DEBUG};
+                print STDERR "Target '$target' exists at '$target_path', marking complete (no rule found)\n" if $ENV{SMAK_DEBUG};
             } else {
                 # Track pending dependencies
                 my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
@@ -3262,10 +3265,11 @@ sub run_job_master {
                     for my $single_dep (split /\s+/, $expanded_dep) {
                         next unless $single_dep =~ /\S/;
 
-                        # Check if dependency is completed or exists as file
-                        unless ($completed_targets{$single_dep} || -e $single_dep) {
+                        # Check if dependency is completed or exists as file (relative to job dir)
+                        my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$job->{dir}/$single_dep";
+                        unless ($completed_targets{$single_dep} || -e $dep_path) {
                             $deps_satisfied = 0;
-                            print STDERR "Job '$target' waiting for dependency '$single_dep'\n" if $ENV{SMAK_DEBUG};
+                            print STDERR "Job '$target' waiting for dependency '$single_dep' (checked: $dep_path)\n" if $ENV{SMAK_DEBUG};
                             last;
                         }
                     }

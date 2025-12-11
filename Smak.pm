@@ -221,19 +221,25 @@ sub submit_job {
 sub execute_command_sequential {
     my ($target, $command, $dir) = @_;
 
+    warn "DEBUG[" . __LINE__ . "]: execute_command_sequential: target='$target' command='$command'\n" if $ENV{SMAK_DEBUG};
+
     my $old_dir;
     if ($dir && $dir ne '.') {
         use Cwd 'getcwd';
         $old_dir = getcwd();
+        warn "DEBUG[" . __LINE__ . "]: Changing to directory: $dir\n" if $ENV{SMAK_DEBUG};
         chdir($dir) or die "Cannot chdir to $dir: $!\n";
     }
 
     # Echo command unless silent
     unless ($silent_mode) {
+        warn "DEBUG[" . __LINE__ . "]: About to tee_print command\n" if $ENV{SMAK_DEBUG};
         tee_print("$command\n");
+        warn "DEBUG[" . __LINE__ . "]: After tee_print\n" if $ENV{SMAK_DEBUG};
     }
 
     # Execute command
+    warn "DEBUG[" . __LINE__ . "]: About to execute command\n" if $ENV{SMAK_DEBUG};
     my $exit_code;
     if ($report_mode) {
         my $output = `$command 2>&1`;
@@ -243,6 +249,7 @@ sub execute_command_sequential {
         my $status = system($command);
         $exit_code = $status >> 8;
     }
+    warn "DEBUG[" . __LINE__ . "]: Command executed, exit_code=$exit_code\n" if $ENV{SMAK_DEBUG};
 
     if ($exit_code != 0) {
         my $err_msg = "smak: *** [$target] Error $exit_code\n";
@@ -252,6 +259,7 @@ sub execute_command_sequential {
     }
 
     chdir($old_dir) if $old_dir;
+    warn "DEBUG[" . __LINE__ . "]: execute_command_sequential complete\n" if $ENV{SMAK_DEBUG};
 }
 
 sub set_cmd_var {
@@ -1814,10 +1822,13 @@ sub build_target {
 
     # Execute rule if it exists (submit_job is blocking, so no need to wait)
     if ($rule && $rule =~ /\S/) {
+        warn "DEBUG[" . __LINE__ . "]:   Executing rule for target '$target'\n" if $ENV{SMAK_DEBUG};
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($rule);
+        warn "DEBUG[" . __LINE__ . "]:   After format_output\n" if $ENV{SMAK_DEBUG};
         # Expand variables
         my $expanded = expand_vars($converted);
+        warn "DEBUG[" . __LINE__ . "]:   After expand_vars\n" if $ENV{SMAK_DEBUG};
 
         # Expand automatic variables
         $expanded =~ s/\$@/$target/g;                     # $@ = target name
@@ -1825,15 +1836,19 @@ sub build_target {
         $expanded =~ s/\$\^/join(' ', @deps)/ge;         # $^ = all prerequisites
         $expanded =~ s/\$\*/$stem/g;                     # $* = stem (part matching %)
 
+        warn "DEBUG[" . __LINE__ . "]:   About to execute commands\n" if $ENV{SMAK_DEBUG};
         # Execute each command line
         for my $cmd_line (split /\n/, $expanded) {
+            warn "DEBUG[" . __LINE__ . "]:     Processing command line\n" if $ENV{SMAK_DEBUG};
             next unless $cmd_line =~ /\S/;  # Skip empty lines
 
+            warn "DEBUG[" . __LINE__ . "]:     Command: $cmd_line\n" if $ENV{SMAK_DEBUG};
             # Check if command starts with @ (silent mode)
             my $silent = ($cmd_line =~ s/^\s*@//);
 
             # In dry-run mode, handle recursive make invocations or print commands
             if ($dry_run_mode) {
+                warn "DEBUG[" . __LINE__ . "]:     In dry-run mode\n" if $ENV{SMAK_DEBUG};
                 # Check if this is a recursive make/smak invocation
                 if ($cmd_line =~ /\b(make|smak)\s/ || $cmd_line =~ m{/smak(?:\s|$)}) {
                     # Debug: show what we detected
@@ -1892,11 +1907,14 @@ sub build_target {
             use Cwd 'getcwd';
             my $cwd = getcwd();
             if ($job_server_socket) {
+                warn "DEBUG[" . __LINE__ . "]:     Using job server\n" if $ENV{SMAK_DEBUG};
                 # Parallel mode - submit to job server
                 submit_job($target, $cmd_line, $cwd);
             } else {
+                warn "DEBUG[" . __LINE__ . "]:     Sequential execution\n" if $ENV{SMAK_DEBUG};
                 # Sequential mode - execute directly
                 execute_command_sequential($target, $cmd_line, $cwd);
+                warn "DEBUG[" . __LINE__ . "]:     Command completed\n" if $ENV{SMAK_DEBUG};
             }
         }
     } elsif ($job_server_socket && @deps > 0) {

@@ -2172,7 +2172,7 @@ HELP
 	    }
 	    
 	} elsif ($cmd eq 'progress') {
-	    print $socket "IN_PROGRESS\n";
+	    print $socket "IN_PROGRESS $words[0]\n";
 	    while (my $response = <$socket>) {
 		chomp $response;
 		last if $response eq 'END_PROGRESS';
@@ -2320,7 +2320,11 @@ HELP
         elsif ($cmd eq 'progress') {
 	    foreach my $target (keys %in_progress) {
 		my $state = $in_progress{$target};
+		my $op = lc($parts[1]);
 		print STDERR "$target\n$state\n";
+		if ('done' eq $state && 'clear' eq $op) {
+		    undef $in_progress{$target};
+		}
 	    }
 	}
         elsif ($cmd eq 'dry-run') {
@@ -3468,7 +3472,9 @@ sub run_job_master {
 		    interactive_debug($master_socket,$1);
 		    print $master_socket "END_COMMAND\n";
 		    
-                } elsif ($line =~ /^IN_PROGRESS$/) {
+                } elsif ($line =~ /^IN_PROGRESS(\s(.*))*$/) {
+		    my $op = $2;
+		    my $clear = ($op =~ /clear/i);
 		    foreach my $target (keys %in_progress)  {
 			my $status = $in_progress{$target};
 
@@ -3489,6 +3495,8 @@ sub run_job_master {
 			    if ($@) {
 				$status = "worker unresponsive";
 			    }
+			} elsif ('done' eq $status && $clear) {
+			    undef $in_progress{$target};
 			}
 
 			print $master_socket "$target\t$status\n";

@@ -1766,13 +1766,23 @@ sub build_target {
         }
     }
 
-    # Check if target is .PHONY or needs rebuilding
+    # Check if target is .PHONY
+    # A target is phony if it appears as a dependency of .PHONY
     my $is_phony = 0;
-    for my $dep (@deps) {
-        if ($dep eq '.PHONY') {
-            $is_phony = 1;
-            last;
-        }
+    my $phony_key = "$makefile\t.PHONY";
+    if (exists $fixed_deps{$phony_key}) {
+        my @phony_targets = @{$fixed_deps{$phony_key} || []};
+        # Expand variables in .PHONY dependencies
+        @phony_targets = map {
+            my $t = $_;
+            while ($t =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $t =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            $t;
+        } @phony_targets;
+        $is_phony = 1 if grep { $_ eq $target } @phony_targets;
     }
     warn "DEBUG[" . __LINE__ . "]:   is_phony=$is_phony\n" if $ENV{SMAK_DEBUG};
 

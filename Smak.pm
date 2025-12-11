@@ -658,8 +658,13 @@ sub parse_makefile {
             }
             # Split directories by whitespace or colon
             my @dirs = split /[\s:]+/, $directories;
-            $vpath{$pattern} = \@dirs;
-            print STDERR "DEBUG: vpath $pattern => " . join(", ", @dirs) . "\n" if $ENV{SMAK_DEBUG};
+            # Append to existing directories for this pattern (make accumulates vpath entries)
+            if (exists $vpath{$pattern}) {
+                push @{$vpath{$pattern}}, @dirs;
+            } else {
+                $vpath{$pattern} = \@dirs;
+            }
+            print STDERR "DEBUG: vpath $pattern += " . join(", ", @dirs) . " (total: " . join(", ", @{$vpath{$pattern}}) . ")\n" if $ENV{SMAK_DEBUG};
             next;
         }
 

@@ -1662,6 +1662,11 @@ sub build_target {
     # Flatten and filter empty strings
     @deps = grep { $_ ne '' } @deps;
 
+    # Apply vpath resolution to all dependencies
+    use Cwd 'getcwd';
+    my $cwd = getcwd();
+    @deps = map { resolve_vpath($_, $cwd) } @deps;
+
     # Debug: show dependencies and rule status
     if ($ENV{SMAK_DEBUG}) {
         if (@deps) {
@@ -1932,6 +1937,11 @@ sub dry_run_target {
     } @deps;
     # Flatten and filter empty strings
     @deps = grep { $_ ne '' } @deps;
+
+    # Apply vpath resolution to all dependencies
+    use Cwd 'getcwd';
+    my $cwd = getcwd();
+    @deps = map { resolve_vpath($_, $cwd) } @deps;
 
     # Print dependencies
     if (@deps) {

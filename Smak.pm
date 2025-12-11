@@ -695,6 +695,7 @@ sub parse_makefile {
 
                 # Parse the included file (ignore if it doesn't exist and line starts with -)
                 if (-f $include_path) {
+                    print STDERR "DEBUG: including '$include_path'\n" if $ENV{SMAK_DEBUG};
                     # Save current makefile name
                     my $saved_makefile = $makefile;
 
@@ -705,6 +706,8 @@ sub parse_makefile {
                     $makefile = $saved_makefile;
                 } elsif ($line !~ /^-include/) {
                     warn "Warning: included file not found: $include_path\n";
+                } elsif ($ENV{SMAK_DEBUG}) {
+                    print STDERR "DEBUG: optional include not found (ignored): $include_path\n";
                 }
             }
             next;

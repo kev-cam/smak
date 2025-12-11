@@ -684,13 +684,28 @@ sub parse_makefile {
                     $include_file =~ s/\$MV\{\Q$var\E\}/$val/;
                 }
 
-                # Make path absolute relative to current Makefile's directory
+                # Determine include path
                 my $include_path = $include_file;
+
+                # If not absolute path, try to find the file
                 unless ($include_path =~ m{^/}) {
                     use File::Basename;
                     use File::Spec;
-                    my $makefile_dir = dirname($makefile);
-                    $include_path = File::Spec->catfile($makefile_dir, $include_file);
+
+                    # First try relative to current working directory
+                    if (-f $include_file) {
+                        $include_path = $include_file;
+                    } else {
+                        # Try relative to current Makefile's directory
+                        my $makefile_dir = dirname($makefile);
+                        my $relative_path = File::Spec->catfile($makefile_dir, $include_file);
+                        if (-f $relative_path) {
+                            $include_path = $relative_path;
+                        } else {
+                            # Use the relative path for error reporting even if not found
+                            $include_path = $relative_path;
+                        }
+                    }
                 }
 
                 # Parse the included file (ignore if it doesn't exist and line starts with -)
@@ -861,6 +876,60 @@ sub parse_included_makefile {
 
         # Skip comments and empty lines
         if (!@current_targets && ($line =~ /^\s*#/ || $line =~ /^\s*$/)) {
+            next;
+        }
+
+        # Handle include directives (nested includes)
+        if ($line =~ /^-?include\s+(.+)$/) {
+            $save_current_rule->();
+            my $include_files = $1;
+            # Expand variables in the include filename
+            $include_files = transform_make_vars($include_files);
+
+            # Handle multiple includes on one line
+            for my $include_file (split /\s+/, $include_files) {
+                # Expand $MV{...} to actual values
+                while ($include_file =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $include_file =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+
+                # Determine include path
+                my $nested_include_path = $include_file;
+
+                # If not absolute path, try to find the file
+                unless ($nested_include_path =~ m{^/}) {
+                    use File::Basename;
+                    use File::Spec;
+
+                    # First try relative to current working directory
+                    if (-f $include_file) {
+                        $nested_include_path = $include_file;
+                    } else {
+                        # Try relative to current Makefile's directory
+                        my $makefile_dir = dirname($makefile);
+                        my $relative_path = File::Spec->catfile($makefile_dir, $include_file);
+                        if (-f $relative_path) {
+                            $nested_include_path = $relative_path;
+                        } else {
+                            # Use the relative path for error reporting even if not found
+                            $nested_include_path = $relative_path;
+                        }
+                    }
+                }
+
+                # Parse the included file (ignore if it doesn't exist and line starts with -)
+                if (-f $nested_include_path) {
+                    print STDERR "DEBUG: including '$nested_include_path' (nested)\n" if $ENV{SMAK_DEBUG};
+                    # Recursively parse the nested included file
+                    parse_included_makefile($nested_include_path);
+                } elsif ($line !~ /^-include/) {
+                    warn "Warning: included file not found: $nested_include_path\n";
+                } elsif ($ENV{SMAK_DEBUG}) {
+                    print STDERR "DEBUG: optional include not found (ignored): $nested_include_path\n";
+                }
+            }
             next;
         }
 

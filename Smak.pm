@@ -3156,20 +3156,28 @@ sub run_job_master {
             $in_progress{$target} = "queued";
             print STDERR "Queued target: $target\n";
         } elsif (@deps > 0) {
-            # Composite target - track pending dependencies
-            my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
-            if (@pending_deps) {
-                $in_progress{$target} = "queued";
-                $pending_composite{$target} = {
-                    deps => \@pending_deps,
-                    master_socket => $msocket,
-                };
-                print STDERR "Composite target '$target' waiting for " . scalar(@pending_deps) . " dependencies\n";
-            } else {
-                # All deps already complete
+            # Composite target or target with dependencies but no rule
+            # If file exists, consider it satisfied
+            if (-e $target) {
                 $completed_targets{$target} = 1;
                 $in_progress{$target} = "done";
-                print $msocket "JOB_COMPLETE $target 0\n" if $msocket;
+                print STDERR "Target '$target' exists, marking complete (no rule found)\n" if $ENV{SMAK_DEBUG};
+            } else {
+                # Track pending dependencies
+                my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
+                if (@pending_deps) {
+                    $in_progress{$target} = "queued";
+                    $pending_composite{$target} = {
+                        deps => \@pending_deps,
+                        master_socket => $msocket,
+                    };
+                    print STDERR "Composite target '$target' waiting for " . scalar(@pending_deps) . " dependencies\n";
+                } else {
+                    # All deps already complete
+                    $completed_targets{$target} = 1;
+                    $in_progress{$target} = "done";
+                    print $msocket "JOB_COMPLETE $target 0\n" if $msocket;
+                }
             }
         } else {
             # No command and no deps - just mark complete
@@ -3249,7 +3257,16 @@ sub run_job_master {
 
             # No job with satisfied dependencies found
             if ($job_index < 0) {
-                print STDERR "No jobs with satisfied dependencies\n" if $ENV{SMAK_DEBUG};
+                if ($ENV{SMAK_DEBUG}) {
+                    print STDERR "No jobs with satisfied dependencies\n";
+                    print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
+                    my $max_show = @job_queue < 10 ? $#job_queue : 9;
+                    for my $i (0 .. $max_show) {
+                        my $job = $job_queue[$i];
+                        print STDERR "  [$i] $job->{target}\n";
+                    }
+                    print STDERR "  ...\n" if @job_queue > 10;
+                }
                 last;
             }
 
@@ -3358,6 +3375,7 @@ sub run_job_master {
                                 # Check if this failed target is in the composite's dependencies
                                 if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                     print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                                    $in_progress{$comp_target} = "failed";
                                     if ($comp->{master_socket}) {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                     }
@@ -3852,6 +3870,7 @@ sub run_job_master {
                             # Check if this failed target is in the composite's dependencies
                             if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                 print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                                $in_progress{$comp_target} = "failed";
                                 if ($comp->{master_socket}) {
                                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                 }

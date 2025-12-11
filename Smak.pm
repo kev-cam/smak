@@ -52,6 +52,9 @@ our %pattern_deps;
 our %pseudo_rule;
 our %pseudo_deps;
 
+# VPATH search directories: pattern => [directories]
+our %vpath;
+
 our @job_queue;
 
 # Hash for Makefile variables
@@ -643,6 +646,23 @@ sub parse_makefile {
             next;
         }
 
+        # Handle vpath directives
+        if ($line =~ /^vpath\s+(\S+)\s+(.+)$/) {
+            my ($pattern, $directories) = ($1, $2);
+            # Expand variables in directories
+            $directories = transform_make_vars($directories);
+            while ($directories =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $directories =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            # Split directories by whitespace or colon
+            my @dirs = split /[\s:]+/, $directories;
+            $vpath{$pattern} = \@dirs;
+            print STDERR "DEBUG: vpath $pattern => " . join(", ", @dirs) . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+
         # Handle include directives
         if ($line =~ /^-?include\s+(.+)$/) {
             $save_current_rule->();
@@ -917,6 +937,40 @@ sub parse_included_makefile {
 
 sub get_default_target {
     return $default_target;
+}
+
+# Resolve a file through vpath directories
+sub resolve_vpath {
+    my ($file, $dir) = @_;
+
+    # Check if file exists in current directory first
+    my $file_path = $file =~ m{^/} ? $file : "$dir/$file";
+    return $file if -e $file_path;
+
+    # Try vpath patterns
+    for my $pattern (keys %vpath) {
+        # Convert pattern to regex (% matches anything)
+        my $pattern_re = $pattern;
+        $pattern_re =~ s/%/.*?/g;
+
+        if ($file =~ /^$pattern_re$/) {
+            # File matches this vpath pattern, search directories
+            for my $vpath_dir (@{$vpath{$pattern}}) {
+                my $candidate = "$vpath_dir/$file";
+                # Make path relative to working directory
+                $candidate = $candidate =~ m{^/} ? $candidate : "$dir/$candidate";
+                if (-e $candidate) {
+                    print STDERR "DEBUG: resolved '$file' to '$candidate' via vpath\n" if $ENV{SMAK_DEBUG};
+                    # Return relative path from $dir
+                    $candidate =~ s{^\Q$dir\E/}{};
+                    return $candidate;
+                }
+            }
+        }
+    }
+
+    # Not found via vpath, return original
+    return $file;
 }
 
 sub get_rules {
@@ -3120,6 +3174,8 @@ sub run_job_master {
                         # Expand % in dependencies
                         $stem = $1;  # Save stem for $* expansion
                         @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                        # Resolve dependencies through vpath
+                        @deps = map { resolve_vpath($_, $dir) } @deps;
                         print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
                         last;
                     }

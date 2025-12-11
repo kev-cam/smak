@@ -1577,6 +1577,10 @@ sub build_target {
                         my @pattern_deps = @{$pattern_deps{$pkey} || []};
                         $stem = $1;  # Save stem for $* expansion
                         @pattern_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @pattern_deps;
+                        # Resolve dependencies through vpath
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        @pattern_deps = map { resolve_vpath($_, $cwd) } @pattern_deps;
                         push @deps, @pattern_deps;
                         last;
                     }
@@ -1602,6 +1606,10 @@ sub build_target {
                     # Expand % in dependencies
                     $stem = $1;  # Save stem for $* expansion
                     @deps = map { s/%/$stem/g; $_ } @deps;
+                    # Resolve dependencies through vpath
+                    use Cwd 'getcwd';
+                    my $cwd = getcwd();
+                    @deps = map { resolve_vpath($_, $cwd) } @deps;
                     last;
                 }
             }
@@ -1840,6 +1848,10 @@ sub dry_run_target {
                         my @pattern_deps = @{$pattern_deps{$pkey} || []};
                         $stem = $1;  # Save stem for $* expansion
                         @pattern_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @pattern_deps;
+                        # Resolve dependencies through vpath
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        @pattern_deps = map { resolve_vpath($_, $cwd) } @pattern_deps;
                         push @deps, @pattern_deps;
                         last;
                     }
@@ -1865,6 +1877,10 @@ sub dry_run_target {
                     # Expand % in dependencies
                     $stem = $1;  # Save stem for $* expansion
                     @deps = map { s/%/$stem/g; $_ } @deps;
+                    # Resolve dependencies through vpath
+                    use Cwd 'getcwd';
+                    my $cwd = getcwd();
+                    @deps = map { resolve_vpath($_, $cwd) } @deps;
                     last;
                 }
             }
@@ -3080,6 +3096,11 @@ sub run_job_master {
 
         my @deps = $deps_ref ? @$deps_ref : ();
 
+        # Debug: Show what deps we're expanding with
+        if ($ENV{SMAK_DEBUG} && @deps) {
+            print STDERR "DEBUG expand_job_command: target='$target', deps=(" . join(", ", @deps) . ")\n";
+        }
+
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($cmd);
         # Expand variables
@@ -3176,7 +3197,11 @@ sub run_job_master {
                         $stem = $1;  # Save stem for $* expansion
                         @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
                         # Resolve dependencies through vpath
+                        my @orig_deps = @deps;
                         @deps = map { resolve_vpath($_, $dir) } @deps;
+                        if ($ENV{SMAK_DEBUG} && "@orig_deps" ne "@deps") {
+                            print STDERR "  Deps after vpath: " . join(", ", @deps) . "\n";
+                        }
                         print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
                         last;
                     }

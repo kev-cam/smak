@@ -1769,6 +1769,9 @@ sub build_target {
         }
         if ($rule && $rule =~ /\S/) {
             warn "DEBUG[" . __LINE__ . "]:   Has rule: yes\n";
+            my $rule_preview = substr($rule, 0, 100);
+            $rule_preview =~ s/\n/\\n/g;
+            warn "DEBUG[" . __LINE__ . "]:   Rule preview: '$rule_preview" . (length($rule) > 100 ? "...' (truncated)" : "'") . "\n";
         } else {
             warn "DEBUG[" . __LINE__ . "]:   Has rule: no\n";
         }
@@ -1818,6 +1821,13 @@ sub build_target {
             build_target($dep, $visited, $depth + 1);
         }
         warn "DEBUG[" . __LINE__ . "]:   Finished building dependencies\n" if $ENV{SMAK_DEBUG};
+    }
+
+    warn "DEBUG[" . __LINE__ . "]:   Checking if should execute rule: rule defined=" . (defined $rule ? "yes" : "no") . ", has content=" . (($rule && $rule =~ /\S/) ? "yes" : "no") . "\n" if $ENV{SMAK_DEBUG};
+    if ($ENV{SMAK_DEBUG} && defined $rule) {
+        my $rule_preview = substr($rule, 0, 100);
+        $rule_preview =~ s/\n/\\n/g;
+        warn "DEBUG[" . __LINE__ . "]:   Rule value: '$rule_preview" . (length($rule) > 100 ? "...' (truncated)" : "'") . "\n";
     }
 
     # Execute rule if it exists (submit_job is blocking, so no need to wait)

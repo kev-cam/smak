@@ -3441,6 +3441,8 @@ sub run_job_master {
 
                                 if (@{$comp->{deps}} == 0) {
                                     print STDERR "All dependencies complete for composite target '$comp_target'\n";
+                                    $completed_targets{$comp_target} = 1;
+                                    $in_progress{$comp_target} = "done";
                                     if ($comp->{master_socket}) {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
                                     }
@@ -3927,6 +3929,8 @@ sub run_job_master {
                             # If all dependencies done, complete the composite target
                             if (@{$comp->{deps}} == 0) {
                                 print STDERR "All dependencies complete for composite target '$comp_target'\n";
+                                $completed_targets{$comp_target} = 1;
+                                $in_progress{$comp_target} = "done";
                                 if ($comp->{master_socket}) {
                                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
                                 }

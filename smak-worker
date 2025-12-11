@@ -4,6 +4,30 @@ use warnings;
 use IO::Socket::INET;
 use POSIX qw(:sys_wait_h);
 
+# Analyze command failures and determine if they're acceptable
+sub is_acceptable_failure {
+    my ($command, $exit_code, $dir) = @_;
+
+    return 0 if $exit_code == 0;  # Not a failure
+
+    # mkdir: if directory exists after command, treat as success
+    if ($command =~ /^\s*mkdir\s+(.+)/) {
+        my $target_dir = $1;
+        $target_dir =~ s/\s+$//;  # Trim trailing whitespace
+
+        # Check if directory exists
+        my $full_path = "$dir/$target_dir";
+        $full_path =~ s{/+}{/}g;  # Normalize path
+
+        if (-d $full_path) {
+            print STDERR "mkdir failed but directory '$target_dir' exists, treating as success\n";
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 # Usage: smak-worker <host:port>
 my $server_addr = $ARGV[0] or die "Usage: $0 <host:port>\n";
 
@@ -218,6 +242,11 @@ while (my $line = <$socket>) {
             # Fork failed
             print $socket "ERROR Failed to execute command: $!\n";
             $exit_code = 1;
+        }
+
+        # Check if failure is acceptable
+        if ($exit_code != 0 && is_acceptable_failure($command, $exit_code, $dir)) {
+            $exit_code = 0;  # Treat as success
         }
 
         # Send completion

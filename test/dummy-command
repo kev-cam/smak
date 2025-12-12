@@ -1,0 +1,64 @@
+#!/bin/bash
+# File handler script for smak
+# Checks input files exist, then touches output files after a random delay
+
+input_files=()
+output_files=()
+mode=""
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -in)
+            mode="input"
+            shift
+            ;;
+        -out)
+            mode="output"
+            shift
+            ;;
+        *)
+            if [[ "$mode" == "input" ]]; then
+                input_files+=("$1")
+            elif [[ "$mode" == "output" ]]; then
+                output_files+=("$1")
+            else
+                echo "Error: Unexpected argument '$1' without -in or -out" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Check that all input files exist
+if [[ ${#input_files[@]} -gt 0 ]]; then
+    for file in "${input_files[@]}"; do
+        if [[ ! -f "$file" ]]; then
+            echo "Error: Input file '$file' does not exist" >&2
+            exit 1
+        fi
+    done
+    echo "All ${#input_files[@]} input file(s) verified"
+fi
+
+# Random delay between 0 and 2 seconds
+delay=$(awk -v min=0 -v max=2 'BEGIN{srand(); print min+rand()*(max-min)}')
+echo "Waiting ${delay} seconds..."
+sleep "$delay"
+
+# Touch all output files
+if [[ ${#output_files[@]} -gt 0 ]]; then
+    for file in "${output_files[@]}"; do
+        # Create directory if it doesn't exist
+        dir=$(dirname "$file")
+        if [[ "$dir" != "." && ! -d "$dir" ]]; then
+            mkdir -p "$dir"
+        fi
+        touch "$file"
+        echo "Created output file: $file"
+    done
+fi
+
+echo "Success: Processed ${#input_files[@]} input(s), ${#output_files[@]} output(s)"
+exit 0

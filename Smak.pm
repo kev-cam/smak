@@ -4383,29 +4383,45 @@ sub run_job_master {
 sub wait_for_jobs
 {
     my $sts = 0;
-    
-    open(TREE,"pstree -p $$ 2>&1 |");
-    while (defined(my $line = <TREE>)) {
-	my $p=0;
-	my @pid;
-	while ($line =~ s/\((\d+)\)//) {
-	    if ($$ != $1) { $pid[$p++] = $1; }
-	}
-	for $p (@pid) {
-	    my $msg = "process: $p";
-	    if (open(CMD,"tr \\0 ' ' </proc/$p/cmdline 2>&1 |")) {
-		my $cmd = <CMD>;
-		if (defined $cmd) {
-		    $msg = " command: $cmd [$p]";
-		}
-	    }
-	    warn "Waiting for$msg\n" if $ENV{SMAK_DEBUG};
-	    my $s = waitpid($p,0);
-	    if (0 != $s) {
-		$sts = $s;
-	    }
-	}
+
+    # Use pstree to find child processes, but handle failures gracefully
+    if (!open(TREE, "pstree -p $$ 2>/dev/null |")) {
+        # If pstree fails, just return - no children to wait for
+        return 0;
     }
+
+    while (defined(my $line = <TREE>)) {
+        my $p=0;
+        my @pid;
+        while ($line =~ s/\((\d+)\)//) {
+            if ($$ != $1) { $pid[$p++] = $1; }
+        }
+        for $p (@pid) {
+            # Skip if this PID doesn't exist or isn't our child
+            next unless kill(0, $p);  # Check if process exists
+
+            my $msg = "process: $p";
+            if (open(CMD,"tr \\0 ' ' </proc/$p/cmdline 2>/dev/null |")) {
+                my $cmd = <CMD>;
+                close(CMD);
+                if (defined $cmd) {
+                    $msg = " command: $cmd [$p]";
+                }
+            }
+            warn "Waiting for $msg\n" if $ENV{SMAK_DEBUG};
+
+            # Use non-blocking wait first to check if child exists
+            my $s = waitpid($p, 1);  # WNOHANG = 1
+            if ($s == 0) {
+                # Process still running, do blocking wait
+                $s = waitpid($p, 0);
+            }
+            if ($s > 0) {
+                $sts = $?;
+            }
+        }
+    }
+    close(TREE);
 
     return $sts;
 }

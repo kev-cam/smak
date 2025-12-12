@@ -1,0 +1,341 @@
+DEBUG[1807]: Building target 'all' (depth=0, makefile=Makefile)
+DEBUG vpath: 'target1' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'target1' not found via vpath, returning as-is
+DEBUG vpath: 'target2' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'target2' not found via vpath, returning as-is
+DEBUG[1926]:   Dependencies: target1, target2
+DEBUG[1934]:   Has rule: no
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=1
+DEBUG[1989]:   Building 2 dependencies...
+DEBUG[1991]:     Building dependency: target1
+DEBUG[1807]: Building target 'target1' (depth=1, makefile=Makefile)
+DEBUG vpath: 'obj3.o' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'obj3.o' not found via vpath, returning as-is
+DEBUG vpath: 'obj4.o' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'obj4.o' not found via vpath, returning as-is
+DEBUG vpath: 'obj3.o' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'obj3.o' not found via vpath, returning as-is
+DEBUG[1926]:   Dependencies: obj3.o, obj4.o, obj3.o
+DEBUG[1929]:   Has rule: yes
+DEBUG[1932]:   Rule preview: '$MV{DUMMY} -in  obj3.o obj4.o obj3.o -out $@\n'
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=0
+DEBUG[1978]:   Checking if target exists and is up-to-date...
+DEBUG[1983]:   Target needs rebuilding
+DEBUG[1989]:   Building 3 dependencies...
+DEBUG[1991]:     Building dependency: obj3.o
+DEBUG[1807]: Building target 'obj3.o' (depth=2, makefile=Makefile)
+DEBUG vpath: 'src2.txt' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'src2.txt' not found via vpath, returning as-is
+DEBUG[1926]:   Dependencies: src2.txt
+DEBUG[1929]:   Has rule: yes
+DEBUG[1932]:   Rule preview: '$MV{DUMMY} -in  src2.txt -out $@\n'
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=0
+DEBUG[1978]:   Checking if target exists and is up-to-date...
+DEBUG[1983]:   Target needs rebuilding
+DEBUG[1989]:   Building 1 dependencies...
+DEBUG[1991]:     Building dependency: src2.txt
+DEBUG[1807]: Building target 'src2.txt' (depth=3, makefile=Makefile)
+DEBUG[1929]:   Has rule: yes
+DEBUG[1932]:   Rule preview: '@echo "Creating starter file: $@"\n@echo "Source 2" > $@\n'
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=0
+DEBUG[1978]:   Checking if target exists and is up-to-date...
+DEBUG[1983]:   Target needs rebuilding
+DEBUG[1989]:   Building 0 dependencies...
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=yes
+DEBUG[2001]:   Rule value: '@echo "Creating starter file: $@"\n@echo "Source 2" > $@\n'
+DEBUG[2006]:   Executing rule for target 'src2.txt'
+DEBUG[2009]:   After format_output
+DEBUG[2012]:   After expand_vars
+DEBUG[2020]:   About to execute commands
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: @echo "Creating starter file: src2.txt"
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='src2.txt' command='echo "Creating starter file: src2.txt"'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+echo "Creating starter file: src2.txt"
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: @echo "Source 2" > src2.txt
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='src2.txt' command='echo "Source 2" > src2.txt'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+Creating starter file: src2.txt
+echo "Source 2" > src2.txt
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=yes
+DEBUG[2001]:   Rule value: '$MV{DUMMY} -in  src2.txt -out $@\n'
+DEBUG[2006]:   Executing rule for target 'obj3.o'
+DEBUG[2009]:   After format_output
+DEBUG[2012]:   After expand_vars
+DEBUG[2020]:   About to execute commands
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: ../dummy-command -in  src2.txt -out obj3.o
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='obj3.o' command='../dummy-command -in  src2.txt -out obj3.o'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+../dummy-command -in  src2.txt -out obj3.o
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[1991]:     Building dependency: obj4.o
+DEBUG[1807]: Building target 'obj4.o' (depth=2, makefile=Makefile)
+DEBUG vpath: 'src1.txt' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'src1.txt' not found via vpath, returning as-is
+DEBUG vpath: 'src2.txt' found in current directory
+DEBUG vpath: 'src1.txt' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'src1.txt' not found via vpath, returning as-is
+DEBUG[1926]:   Dependencies: src1.txt, src2.txt, src1.txt
+DEBUG[1929]:   Has rule: yes
+DEBUG[1932]:   Rule preview: '$MV{DUMMY} -in  src1.txt src2.txt src1.txt -out $@\n'
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=0
+DEBUG[1978]:   Checking if target exists and is up-to-date...
+DEBUG[1983]:   Target needs rebuilding
+DEBUG[1989]:   Building 3 dependencies...
+DEBUG[1991]:     Building dependency: src1.txt
+DEBUG[1807]: Building target 'src1.txt' (depth=3, makefile=Makefile)
+DEBUG[1929]:   Has rule: yes
+DEBUG[1932]:   Rule preview: '@echo "Creating starter file: $@"\n@echo "Source 1" > $@\n'
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=0
+DEBUG[1978]:   Checking if target exists and is up-to-date...
+DEBUG[1983]:   Target needs rebuilding
+DEBUG[1989]:   Building 0 dependencies...
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=yes
+DEBUG[2001]:   Rule value: '@echo "Creating starter file: $@"\n@echo "Source 1" > $@\n'
+DEBUG[2006]:   Executing rule for target 'src1.txt'
+DEBUG[2009]:   After format_output
+DEBUG[2012]:   After expand_vars
+DEBUG[2020]:   About to execute commands
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: @echo "Creating starter file: src1.txt"
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='src1.txt' command='echo "Creating starter file: src1.txt"'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+All 1 input file(s) verified
+Waiting 0.910833 seconds...
+Created output file: obj3.o
+Success: Processed 1 input(s), 1 output(s)
+echo "Creating starter file: src1.txt"
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: @echo "Source 1" > src1.txt
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='src1.txt' command='echo "Source 1" > src1.txt'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+Creating starter file: src1.txt
+echo "Source 1" > src1.txt
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[1991]:     Building dependency: src2.txt
+DEBUG[1991]:     Building dependency: src1.txt
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=yes
+DEBUG[2001]:   Rule value: '$MV{DUMMY} -in  src1.txt src2.txt src1.txt -out $@\n'
+DEBUG[2006]:   Executing rule for target 'obj4.o'
+DEBUG[2009]:   After format_output
+DEBUG[2012]:   After expand_vars
+DEBUG[2020]:   About to execute commands
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: ../dummy-command -in  src1.txt src2.txt src1.txt -out obj4.o
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='obj4.o' command='../dummy-command -in  src1.txt src2.txt src1.txt -out obj4.o'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+../dummy-command -in  src1.txt src2.txt src1.txt -out obj4.o
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[1991]:     Building dependency: obj3.o
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=yes
+DEBUG[2001]:   Rule value: '$MV{DUMMY} -in  obj3.o obj4.o obj3.o -out $@\n'
+DEBUG[2006]:   Executing rule for target 'target1'
+DEBUG[2009]:   After format_output
+DEBUG[2012]:   After expand_vars
+DEBUG[2020]:   About to execute commands
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: ../dummy-command -in  obj3.o obj4.o obj3.o -out target1
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='target1' command='../dummy-command -in  obj3.o obj4.o obj3.o -out target1'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+All 3 input file(s) verified
+Waiting 1.44598 seconds...
+Created output file: obj4.o
+Success: Processed 3 input(s), 1 output(s)
+../dummy-command -in  obj3.o obj4.o obj3.o -out target1
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[1991]:     Building dependency: target2
+DEBUG[1807]: Building target 'target2' (depth=1, makefile=Makefile)
+DEBUG vpath: 'obj4.o' found in current directory
+DEBUG vpath: 'obj2.o' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'obj2.o' not found via vpath, returning as-is
+DEBUG vpath: 'obj1.o' not in current dir, checking vpath patterns
+DEBUG vpath: No vpath patterns defined!
+DEBUG vpath: 'obj1.o' not found via vpath, returning as-is
+DEBUG[1926]:   Dependencies: obj4.o, obj2.o, obj1.o
+DEBUG[1929]:   Has rule: yes
+DEBUG[1932]:   Rule preview: '$MV{DUMMY} -in  obj4.o obj2.o obj1.o -out $@\n'
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=0
+DEBUG[1978]:   Checking if target exists and is up-to-date...
+DEBUG[1983]:   Target needs rebuilding
+DEBUG[1989]:   Building 3 dependencies...
+DEBUG[1991]:     Building dependency: obj4.o
+DEBUG[1991]:     Building dependency: obj2.o
+DEBUG[1807]: Building target 'obj2.o' (depth=2, makefile=Makefile)
+DEBUG vpath: 'src2.txt' found in current directory
+DEBUG[1926]:   Dependencies: src2.txt
+DEBUG[1929]:   Has rule: yes
+DEBUG[1932]:   Rule preview: '$MV{DUMMY} -in  src2.txt -out $@\n'
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=0
+DEBUG[1978]:   Checking if target exists and is up-to-date...
+DEBUG[1983]:   Target needs rebuilding
+DEBUG[1989]:   Building 1 dependencies...
+DEBUG[1991]:     Building dependency: src2.txt
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=yes
+DEBUG[2001]:   Rule value: '$MV{DUMMY} -in  src2.txt -out $@\n'
+DEBUG[2006]:   Executing rule for target 'obj2.o'
+DEBUG[2009]:   After format_output
+DEBUG[2012]:   After expand_vars
+DEBUG[2020]:   About to execute commands
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: ../dummy-command -in  src2.txt -out obj2.o
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='obj2.o' command='../dummy-command -in  src2.txt -out obj2.o'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+All 3 input file(s) verified
+Waiting 1.36615 seconds...
+Created output file: target1
+Success: Processed 3 input(s), 1 output(s)
+../dummy-command -in  src2.txt -out obj2.o
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[1991]:     Building dependency: obj1.o
+DEBUG[1807]: Building target 'obj1.o' (depth=2, makefile=Makefile)
+DEBUG vpath: 'src2.txt' found in current directory
+DEBUG vpath: 'src1.txt' found in current directory
+DEBUG[1926]:   Dependencies: src2.txt, src1.txt
+DEBUG[1929]:   Has rule: yes
+DEBUG[1932]:   Rule preview: '$MV{DUMMY} -in  src2.txt src1.txt -out $@\n'
+DEBUG[1945]:   Found .PHONY with deps: all, clean, starters
+DEBUG[1956]:   After expansion: all, clean, starters
+DEBUG[1969]:   is_phony=0
+DEBUG[1978]:   Checking if target exists and is up-to-date...
+DEBUG[1983]:   Target needs rebuilding
+DEBUG[1989]:   Building 2 dependencies...
+DEBUG[1991]:     Building dependency: src2.txt
+DEBUG[1991]:     Building dependency: src1.txt
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=yes
+DEBUG[2001]:   Rule value: '$MV{DUMMY} -in  src2.txt src1.txt -out $@\n'
+DEBUG[2006]:   Executing rule for target 'obj1.o'
+DEBUG[2009]:   After format_output
+DEBUG[2012]:   After expand_vars
+DEBUG[2020]:   About to execute commands
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: ../dummy-command -in  src2.txt src1.txt -out obj1.o
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='obj1.o' command='../dummy-command -in  src2.txt src1.txt -out obj1.o'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+All 1 input file(s) verified
+Waiting 1.37645 seconds...
+Created output file: obj2.o
+Success: Processed 1 input(s), 1 output(s)
+../dummy-command -in  src2.txt src1.txt -out obj1.o
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=yes
+DEBUG[2001]:   Rule value: '$MV{DUMMY} -in  obj4.o obj2.o obj1.o -out $@\n'
+DEBUG[2006]:   Executing rule for target 'target2'
+DEBUG[2009]:   After format_output
+DEBUG[2012]:   After expand_vars
+DEBUG[2020]:   About to execute commands
+DEBUG[2023]:     Processing command line
+DEBUG[2026]:     Command: ../dummy-command -in  obj4.o obj2.o obj1.o -out target2
+DEBUG[2095]:     Sequential execution
+DEBUG[224]: execute_command_sequential: target='target2' command='../dummy-command -in  obj4.o obj2.o obj1.o -out target2'
+DEBUG[230]: Changing to directory: /home/user/smak/test/test-1
+DEBUG[236]: About to tee_print command
+DEBUG[238]: After tee_print
+DEBUG[242]: About to execute command
+All 2 input file(s) verified
+Waiting 1.01998 seconds...
+Created output file: obj1.o
+Success: Processed 2 input(s), 1 output(s)
+../dummy-command -in  obj4.o obj2.o obj1.o -out target2
+DEBUG[265]: Command executed, exit_code=0
+DEBUG[275]: execute_command_sequential complete
+DEBUG[2098]:     Command completed
+DEBUG[1994]:   Finished building dependencies
+DEBUG[1997]:   Checking if should execute rule: rule defined=yes, has content=no
+DEBUG[2001]:   Rule value: ''
+All 3 input file(s) verified
+Waiting 1.93923 seconds...
+Created output file: target2
+Success: Processed 3 input(s), 1 output(s)
+Waiting forprocess: 1082

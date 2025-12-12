@@ -1,0 +1,192 @@
+#!/bin/bash
+# Test generator for smak
+# Creates test-<number> directories with Makefiles for build testing
+
+set -e
+
+# Default values
+test_num=""
+num_sources=5
+num_objects=10
+num_targets=3
+cleanup=false
+
+# Usage message
+usage() {
+    cat << EOF
+Usage: $0 [options]
+
+Options:
+    -n NUM          Test number (default: auto-detect next available)
+    -s NUM          Number of source files to generate (default: 5)
+    -o NUM          Number of object/intermediate files (default: 10)
+    -t NUM          Number of final targets (default: 3)
+    -c              Clean up existing test directories
+    -h              Show this help
+
+Examples:
+    $0                          # Create test-1 (or next available) with defaults
+    $0 -n 5 -s 10 -o 20 -t 5    # Create test-5 with custom counts
+    $0 -c                       # Clean all test-* directories
+EOF
+    exit 1
+}
+
+# Parse arguments
+while getopts "n:s:o:t:ch" opt; do
+    case $opt in
+        n) test_num=$OPTARG ;;
+        s) num_sources=$OPTARG ;;
+        o) num_objects=$OPTARG ;;
+        t) num_targets=$OPTARG ;;
+        c) cleanup=true ;;
+        h) usage ;;
+        *) usage ;;
+    esac
+done
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Cleanup mode
+if $cleanup; then
+    echo "Cleaning up test-* directories..."
+    rm -rf test-[0-9]*
+    echo "Cleanup complete"
+    exit 0
+fi
+
+# Auto-detect next test number if not specified
+if [[ -z "$test_num" ]]; then
+    test_num=1
+    while [[ -d "test-$test_num" ]]; do
+        ((test_num++))
+    done
+fi
+
+test_dir="test-$test_num"
+
+echo "Generating $test_dir with:"
+echo "  - $num_sources source files"
+echo "  - $num_objects object files"
+echo "  - $num_targets final targets"
+
+# Create test directory
+mkdir -p "$test_dir"
+cd "$test_dir"
+
+# Generate the Makefile header
+cat > Makefile << 'EOF'
+# Auto-generated Makefile for smak testing
+# Uses dummy-command to simulate build processes
+
+DUMMY := ../dummy-command
+
+EOF
+
+# Add all variable definitions first
+echo "# Source files" >> Makefile
+for i in $(seq 1 $num_sources); do
+    echo "SOURCES += src$i.txt" >> Makefile
+done
+
+
+# Add object variable definitions
+echo "" >> Makefile
+echo "# Object/intermediate files" >> Makefile
+for i in $(seq 1 $num_objects); do
+    echo "OBJECTS += obj$i.o" >> Makefile
+done
+# Add target variable definitions
+echo "" >> Makefile
+echo "# Final targets" >> Makefile
+for i in $(seq 1 $num_targets); do
+    echo "TARGETS += target$i" >> Makefile
+done
+
+# Now add the phony targets and main rules
+cat >> Makefile << 'EOF'
+
+# Phony targets
+.PHONY: all clean starters
+
+all: $(TARGETS)
+
+# Create starter source files
+starters: $(SOURCES)
+
+EOF
+
+# Add source file rules
+echo "# Source file rules" >> Makefile
+for i in $(seq 1 $num_sources); do
+    cat >> Makefile << EOF
+src$i.txt:
+	@echo "Creating starter file: \$@"
+	@echo "Source $i" > \$@
+
+EOF
+done
+
+# Add object file rules (depend on sources)
+echo "# Object file rules" >> Makefile
+# Create dependency chains - objects depend on 1-3 sources
+for i in $(seq 1 $num_objects); do
+    # Pick 1-3 random sources for this object
+    num_deps=$((1 + RANDOM % 3))
+    deps=""
+    for j in $(seq 1 $num_deps); do
+        src_idx=$((1 + RANDOM % num_sources))
+        deps="$deps src$src_idx.txt"
+    done
+
+    cat >> Makefile << EOF
+obj$i.o: $deps
+	\$(DUMMY) -in $deps -out \$@
+
+EOF
+done
+
+# Add target rules (depend on objects)
+echo "# Final target rules" >> Makefile
+# Create targets that depend on multiple objects
+for i in $(seq 1 $num_targets); do
+    # Each target depends on 2-5 objects
+    num_deps=$((2 + RANDOM % 4))
+    if [ $num_deps -gt $num_objects ]; then
+        num_deps=$num_objects
+    fi
+
+    deps=""
+    for j in $(seq 1 $num_deps); do
+        obj_idx=$((1 + RANDOM % num_objects))
+        deps="$deps obj$obj_idx.o"
+    done
+
+    cat >> Makefile << EOF
+target$i: $deps
+	\$(DUMMY) -in $deps -out \$@
+
+EOF
+done
+
+# Add clean rule
+cat >> Makefile << 'EOF'
+# Clean up generated files
+clean:
+	rm -f $(SOURCES) $(OBJECTS) $(TARGETS)
+	@echo "Cleaned all generated files"
+EOF
+
+echo ""
+echo "Created $test_dir/Makefile"
+echo ""
+echo "To use:"
+echo "  cd $test_dir"
+echo "  ../../smak all          # Build all targets"
+echo "  ../../smak starters     # Create only source files"
+echo "  ../../smak clean        # Clean up"
+echo ""
+echo "To test parallel builds:"
+echo "  ../../smak -j4 all      # Build with 4 parallel jobs"

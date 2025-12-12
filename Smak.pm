@@ -242,19 +242,25 @@ sub execute_command_sequential {
     warn "DEBUG[" . __LINE__ . "]: About to execute command\n" if $ENV{SMAK_DEBUG};
 
     # Execute command as a pipe to stream output in real-time
-    my $pid = open(my $cmd_fh, '-|', "$command 2>&1");
+    # Append exit status marker to capture command result
+    my $pid = open(my $cmd_fh, '-|', "$command ; echo EXIT_STATUS=\$?");
     if (!defined $pid) {
         die "Cannot execute command: $!\n";
     }
 
     # Stream output line by line as it comes in
+    my $exit_code = 0;
     while (my $line = <$cmd_fh>) {
+        # Check for exit status marker
+        if ($line =~ /^EXIT_STATUS=(\d+)$/) {
+            $exit_code = $1;
+            next;  # Don't print the marker
+        }
         print STDOUT $line;
         print $log_fh $line if $report_mode && $log_fh;
     }
 
     close($cmd_fh);
-    my $exit_code = $? >> 8;
 
     warn "DEBUG[" . __LINE__ . "]: Command executed, exit_code=$exit_code\n" if $ENV{SMAK_DEBUG};
 

@@ -529,6 +529,28 @@ sub expand_vars {
                     $replacement = `$cmd`;
                     chomp $replacement;
                 }
+            } elsif ($func eq 'foreach') {
+                # $(foreach var,list,text)
+                if (@args >= 3) {
+                    my ($var, $list, $text) = @args;
+                    my @words = split /\s+/, $list;
+                    my @results;
+                    for my $word (@words) {
+                        # Temporarily set the loop variable
+                        my $saved_val = $MV{$var};
+                        $MV{$var} = $word;
+                        # Expand the text with the loop variable set
+                        my $expanded = expand_vars($text, $depth + 1);
+                        push @results, $expanded;
+                        # Restore previous value
+                        if (defined $saved_val) {
+                            $MV{$var} = $saved_val;
+                        } else {
+                            delete $MV{$var};
+                        }
+                    }
+                    $replacement = join('', @results);
+                }
             } else {
                 # Unknown function, leave as-is
                 $replacement = "\$($content)";

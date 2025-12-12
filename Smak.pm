@@ -361,7 +361,10 @@ sub expand_vars {
             @args = map { s/^\s+|\s+$//gr } @args;
 
             # Recursively expand variables in arguments
-            @args = map { expand_vars($_, $depth + 1) } @args;
+            # NOTE: foreach is handled specially - don't pre-expand its arguments
+            unless ($func eq 'foreach') {
+                @args = map { expand_vars($_, $depth + 1) } @args;
+            }
 
             # Process gmake functions
             if ($func eq 'patsubst') {
@@ -555,15 +558,21 @@ sub expand_vars {
                 }
             } elsif ($func eq 'foreach') {
                 # $(foreach var,list,text)
+                # NOTE: Arguments are NOT pre-expanded for foreach
                 if (@args >= 3) {
                     my ($var, $list, $text) = @args;
+                    # Expand the list to get the words to iterate over
+                    $list = expand_vars($list, $depth + 1);
                     my @words = split /\s+/, $list;
                     my @results;
                     for my $word (@words) {
+                        # Skip empty words
+                        next if $word eq '';
                         # Temporarily set the loop variable
                         my $saved_val = $MV{$var};
                         $MV{$var} = $word;
                         # Expand the text with the loop variable set
+                        # Note: text was NOT pre-expanded, so $(var) will be found
                         my $expanded = expand_vars($text, $depth + 1);
                         push @results, $expanded;
                         # Restore previous value

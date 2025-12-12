@@ -609,8 +609,51 @@ sub transform_make_vars {
     # In Makefiles, $$ means a literal $ that should be passed to the shell
     $text =~ s/\$\$/\x00DOLLAR\x00/g;
 
-    # Transform $(VAR) to $MV{VAR}
-    $text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+    # Transform $(VAR) to $MV{VAR} with proper nested parenthesis handling
+    my $result = '';
+    my $pos = 0;
+    my $len = length($text);
+
+    while ($pos < $len) {
+        # Look for $(
+        my $start = index($text, '$(', $pos);
+        if ($start < 0) {
+            # No more $(...) patterns, append rest of text
+            $result .= substr($text, $pos);
+            last;
+        }
+
+        # Append text before $(
+        $result .= substr($text, $pos, $start - $pos);
+
+        # Find matching closing paren
+        my $scan_pos = $start + 2;
+        my $depth = 1;
+
+        while ($scan_pos < $len && $depth > 0) {
+            my $char = substr($text, $scan_pos, 1);
+            if ($char eq '(' && substr($text, $scan_pos-1, 1) eq '$') {
+                $depth++;
+            } elsif ($char eq ')') {
+                $depth--;
+            }
+            $scan_pos++;
+        }
+
+        if ($depth == 0) {
+            # Found balanced parentheses, extract content
+            my $content = substr($text, $start + 2, $scan_pos - $start - 3);
+            $result .= '$MV{' . $content . '}';
+            $pos = $scan_pos;
+        } else {
+            # Unbalanced, just copy the $( and continue
+            $result .= '$(';
+            $pos = $start + 2;
+        }
+    }
+
+    $text = $result;
+
     # Transform $X (single-letter variables) to $MV{X}, but not automatic vars like $@, $<, $^, $*, $?
     # Automatic variables are handled separately in expand_vars
     $text =~ s/\$([A-Za-z0-9_])(?![A-Za-z0-9_{])/\$MV{$1}/g;

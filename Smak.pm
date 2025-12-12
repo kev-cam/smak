@@ -298,14 +298,38 @@ sub expand_vars {
     my $iterations = 0;
 
     # Expand $(function args) and $(VAR) references
-    while ($text =~ /\$\(([^)]+)\)/) {
+    while ($text =~ /\$\(/) {
         if (++$iterations > $max_iterations) {
             warn "Warning: expand_vars hit iteration limit, stopping expansion\n";
             warn "         Remaining unexpanded: " . substr($text, 0, 200) . "...\n" if length($text) > 200;
             last;
         }
 
-        my $content = $1;
+        # Find the matching closing paren for balanced extraction
+        my $start = index($text, '$(');
+        last if $start < 0;
+
+        my $pos = $start + 2;  # Start after '$('
+        my $depth = 1;
+        my $len = length($text);
+
+        while ($pos < $len && $depth > 0) {
+            my $char = substr($text, $pos, 1);
+            if ($char eq '(' && substr($text, $pos-1, 1) eq '$') {
+                $depth++;
+            } elsif ($char eq ')') {
+                $depth--;
+            }
+            $pos++;
+        }
+
+        if ($depth != 0) {
+            # Unbalanced parentheses, skip this one
+            warn "Warning: Unbalanced parentheses in: " . substr($text, $start, 50) . "...\n";
+            last;
+        }
+
+        my $content = substr($text, $start + 2, $pos - $start - 3);
         my $replacement;
 
         # Check if it's a function call (contains space or comma)
@@ -563,9 +587,10 @@ sub expand_vars {
             $replacement = format_output($replacement);
         }
 
-        # Replace in text
+        # Replace in text using substring positions
         $replacement //= '';
-        $text =~ s/\Q$(\E\Q$content\E\Q)/$replacement/;
+        my $match_len = $pos - $start;
+        $text = substr($text, 0, $start) . $replacement . substr($text, $pos);
     }
 
     return $text;

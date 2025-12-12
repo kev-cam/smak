@@ -1820,6 +1820,11 @@ sub build_target {
 
     warn "DEBUG[" . __LINE__ . "]:   is_phony=$is_phony\n" if $ENV{SMAK_DEBUG};
 
+    # Warn if phony target exists as a file
+    if ($is_phony && -e $target) {
+        warn "smak: Warning: phony target '$target' exists as a file and will be ignored\n";
+    }
+
     # If not .PHONY and target is up-to-date, skip building
     unless ($is_phony) {
         warn "DEBUG[" . __LINE__ . "]:   Checking if target exists and is up-to-date...\n" if $ENV{SMAK_DEBUG};

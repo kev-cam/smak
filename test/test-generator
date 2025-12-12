@@ -10,6 +10,9 @@ num_sources=5
 num_objects=10
 num_targets=3
 cleanup=false
+run_test=false
+parallel_jobs=4
+build_timeout=60
 
 # Usage message
 usage() {
@@ -21,24 +24,31 @@ Options:
     -s NUM          Number of source files to generate (default: 5)
     -o NUM          Number of object/intermediate files (default: 10)
     -t NUM          Number of final targets (default: 3)
+    -r              Run test after generation (sequential then parallel)
+    -j NUM          Number of parallel jobs for parallel test (default: 4)
+    -T NUM          Build timeout in seconds (default: 60)
     -c              Clean up existing test directories
     -h              Show this help
 
 Examples:
     $0                          # Create test-1 (or next available) with defaults
     $0 -n 5 -s 10 -o 20 -t 5    # Create test-5 with custom counts
+    $0 -r -j 8                  # Create and run test with 8 parallel jobs
     $0 -c                       # Clean all test-* directories
 EOF
     exit 1
 }
 
 # Parse arguments
-while getopts "n:s:o:t:ch" opt; do
+while getopts "n:s:o:t:rj:T:ch" opt; do
     case $opt in
         n) test_num=$OPTARG ;;
         s) num_sources=$OPTARG ;;
         o) num_objects=$OPTARG ;;
         t) num_targets=$OPTARG ;;
+        r) run_test=true ;;
+        j) parallel_jobs=$OPTARG ;;
+        T) build_timeout=$OPTARG ;;
         c) cleanup=true ;;
         h) usage ;;
         *) usage ;;
@@ -47,6 +57,7 @@ done
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SMAK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$SCRIPT_DIR"
 
 # Cleanup mode
@@ -181,12 +192,95 @@ EOF
 
 echo ""
 echo "Created $test_dir/Makefile"
-echo ""
-echo "To use:"
-echo "  cd $test_dir"
-echo "  ../../smak all          # Build all targets"
-echo "  ../../smak starters     # Create only source files"
-echo "  ../../smak clean        # Clean up"
-echo ""
-echo "To test parallel builds:"
-echo "  ../../smak -j4 all      # Build with 4 parallel jobs"
+
+# Function to run build with timeout and verification
+run_build() {
+    local mode="$1"
+    local smak_args="$2"
+    local expected_count=$((num_sources + num_objects + num_targets))
+
+    echo ""
+    echo "========================================="
+    echo "Running $mode build..."
+    echo "Command: SMAK_DEBUG=1 $SMAK_DIR/smak -C $test_dir $smak_args all"
+    echo "========================================="
+
+    # Clean before running
+    cd "$SCRIPT_DIR"
+    "$SMAK_DIR/smak" -C "$test_dir" clean >/dev/null 2>&1 || true
+
+    # Run with timeout
+    if SMAK_DEBUG=1 timeout "$build_timeout" "$SMAK_DIR/smak" -C "$test_dir" $smak_args all; then
+        echo ""
+        echo "Build completed (exit code: $?)"
+    else
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            echo ""
+            echo "ERROR: Build timed out after ${build_timeout}s (smak may have hung)"
+            return 1
+        else
+            echo ""
+            echo "ERROR: Build failed with exit code $exit_code"
+            return 1
+        fi
+    fi
+
+    # Verify files were generated
+    echo ""
+    echo "Verifying generated files..."
+    local file_count=$(find "$test_dir" -type f ! -name "Makefile" | wc -l)
+
+    if [ "$file_count" -eq "$expected_count" ]; then
+        echo "✓ All $expected_count files generated successfully"
+        echo "  - Sources: $num_sources"
+        echo "  - Objects: $num_objects"
+        echo "  - Targets: $num_targets"
+        return 0
+    else
+        echo "✗ ERROR: Expected $expected_count files, but found $file_count"
+        echo "Generated files:"
+        find "$test_dir" -type f ! -name "Makefile" | sort
+        return 1
+    fi
+}
+
+# Run tests if requested
+if $run_test; then
+    echo ""
+    echo "========================================="
+    echo "TESTING BUILD"
+    echo "========================================="
+
+    # Sequential build
+    if ! run_build "SEQUENTIAL" ""; then
+        echo ""
+        echo "FAILED: Sequential build failed"
+        exit 1
+    fi
+
+    # Parallel build
+    if ! run_build "PARALLEL (-j$parallel_jobs)" "-j$parallel_jobs"; then
+        echo ""
+        echo "FAILED: Parallel build failed"
+        exit 1
+    fi
+
+    echo ""
+    echo "========================================="
+    echo "✓ ALL TESTS PASSED"
+    echo "========================================="
+    echo "Sequential and parallel builds both succeeded"
+else
+    echo ""
+    echo "To use:"
+    echo "  cd $test_dir"
+    echo "  ../../smak all          # Build all targets"
+    echo "  ../../smak starters     # Create only source files"
+    echo "  ../../smak clean        # Clean up"
+    echo ""
+    echo "To test parallel builds:"
+    echo "  ../../smak -j4 all      # Build with 4 parallel jobs"
+    echo ""
+    echo "Or run: $0 -n $test_num -r    # Re-run tests on this directory"
+fi

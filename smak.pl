@@ -29,6 +29,7 @@ my $silent = 0;
 my $yes = 0;  # Auto-answer yes to prompts
 my $jobs = 1;  # Number of parallel jobs (default: 1 = sequential)
 my $cli = 0;  # CLI mode (interactive shell)
+my $directory = '';  # Directory to change to before running (-C option)
 
 # Parse environment variable options first
 if (defined $ENV{USR_SMAK_OPT}) {
@@ -40,6 +41,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
     @ARGV = @env_args;
     GetOptions(
         'f|file|makefile=s' => \$makefile,
+        'C|directory=s' => \$directory,
         'Kd|Kdebug' => \$debug,
         'h|help|Kh|Khelp' => \$help,
         'Ks|Kscript=s' => \$script_file,
@@ -57,6 +59,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
 # Parse command-line options (override environment)
 GetOptions(
     'f|file|makefile=s' => \$makefile,
+    'C|directory=s' => \$directory,
     'Kd|Kdebug' => \$debug,
     'h|help|Kh|Khelp' => \$help,
     'Ks|Kscript=s' => \$script_file,
@@ -94,6 +97,11 @@ for my $arg (@ARGV) {
 if ($help) {
     print_help();
     exit 0;
+}
+
+# Change directory if -C option is specified
+if ($directory) {
+    chdir($directory) or die "smak: Cannot change to directory '$directory': $!\n";
 }
 
 # Setup report directory if -Kreport is enabled
@@ -240,6 +248,7 @@ Usage: smak [options] [targets...]
 
 Options:
   -f, -file, -makefile FILE   Use FILE as a makefile (default: Makefile)
+  -C, --directory DIR         Change to DIR before doing anything
   -n, --just-print            Print commands without executing (dry-run)
   --dry-run, --recon          Same as -n
   -s, --silent, --quiet       Don't print commands being executed

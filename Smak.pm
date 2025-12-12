@@ -872,17 +872,30 @@ sub parse_makefile {
         }
 
         # Variable assignment
-        if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*[:?]?=\s*(.*)$/) {
+        if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
             $save_current_rule->();
-            my ($var, $value) = ($1, $2);
+            my ($var, $op, $value) = ($1, $2, $3);
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
             $value = transform_make_vars($value);
-            $MV{$var} = $value;
+
+            # Handle different assignment operators
+            if ($op eq '+=') {
+                # Append to existing value (with space separator)
+                if (exists $MV{$var} && $MV{$var} ne '') {
+                    $MV{$var} .= " $value";
+                } else {
+                    $MV{$var} = $value;
+                }
+            } else {
+                # := ? or = operators all do simple assignment
+                $MV{$var} = $value;
+            }
             next;
         }
 
         # Rule definition (target: dependencies)
-        if ($line =~ /^([^:]+):\s*(.*)$/) {
+        # Must not start with whitespace (tabs are recipe lines, spaces might be command output)
+        if ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
             $save_current_rule->();
 
             my $targets_str = $1;
@@ -1073,16 +1086,29 @@ sub parse_included_makefile {
         }
 
         # Variable assignment (most important for included files like flags.make)
-        if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*[:?]?=\s*(.*)$/) {
+        if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
             $save_current_rule->();
-            my ($var, $value) = ($1, $2);
+            my ($var, $op, $value) = ($1, $2, $3);
             $value = transform_make_vars($value);
-            $MV{$var} = $value;
+
+            # Handle different assignment operators
+            if ($op eq '+=') {
+                # Append to existing value (with space separator)
+                if (exists $MV{$var} && $MV{$var} ne '') {
+                    $MV{$var} .= " $value";
+                } else {
+                    $MV{$var} = $value;
+                }
+            } else {
+                # := ? or = operators all do simple assignment
+                $MV{$var} = $value;
+            }
             next;
         }
 
         # Rule definition (included files might have rules too)
-        if ($line =~ /^([^:]+):\s*(.*)$/) {
+        # Must not start with whitespace (tabs are recipe lines)
+        if ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
             $save_current_rule->();
 
             my $targets_str = $1;

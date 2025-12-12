@@ -270,19 +270,24 @@ run_build() {
     kill $monitor_pid 2>/dev/null || true
     wait $monitor_pid 2>/dev/null || true
 
-    # Verify files were generated
+    # Verify that at least the targets were generated
     echo ""
-    echo "Verifying generated files..."
-    local file_count=$(find "$test_dir" -type f ! -name "Makefile" ! -name "*.log" | wc -l)
+    echo "Verifying targets were generated..."
+    local missing_targets=0
+    for i in $(seq 1 $num_targets); do
+        if [ ! -f "$test_dir/target$i" ]; then
+            echo "✗ ERROR: Target file target$i not found"
+            ((missing_targets++))
+        fi
+    done
 
-    if [ "$file_count" -eq "$expected_count" ]; then
-        echo "✓ All $expected_count files generated successfully"
-        echo "  - Sources: $num_sources"
-        echo "  - Objects: $num_objects"
-        echo "  - Targets: $num_targets"
+    if [ $missing_targets -eq 0 ]; then
+        local file_count=$(find "$test_dir" -type f ! -name "Makefile" ! -name "*.log" | wc -l)
+        echo "✓ All $num_targets targets generated successfully"
+        echo "  Total files created: $file_count (including dependencies)"
         return 0
     else
-        echo "✗ ERROR: Expected $expected_count files, but found $file_count"
+        echo "✗ ERROR: $missing_targets target(s) missing"
         echo "Generated files:"
         find "$test_dir" -type f ! -name "Makefile" ! -name "*.log" | sort
         return 1

@@ -696,6 +696,8 @@ sub transform_make_vars {
     return $text;
 }
 
+our %missing_inc; # bug workaround
+
 sub parse_makefile {
     my ($makefile_path) = @_;
 
@@ -819,7 +821,11 @@ sub parse_makefile {
             for my $include_file (split /\s+/, $include_files) {
                 # Skip empty entries
                 next if $include_file eq '';
-
+		
+		if (defined $missing_inc{$include_file}) {
+		    die "Already missing: $include_file !!!\n";
+		}
+			
                 # Determine include path
                 my $include_path = $include_file;
 
@@ -856,7 +862,8 @@ sub parse_makefile {
                     # Restore current makefile name
                     $makefile = $saved_makefile;
                 } elsif ($line !~ /^-include/) {
-                    warn "Warning: included file not found: $include_path\n";
+                    warn "Warning: included file not found: $include_path [$include_file]\n";
+		    $missing_inc{$include_file} = 1;
                 } elsif ($ENV{SMAK_DEBUG}) {
                     print STDERR "DEBUG: optional include not found (ignored): $include_path\n";
                 }

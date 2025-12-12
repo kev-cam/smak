@@ -371,7 +371,15 @@ sub expand_vars {
             push @args, $current if $current ne '';
 
             # Trim whitespace from arguments
-            @args = map { s/^\s+|\s+$//gr } @args;
+            # NOTE: For foreach, preserve whitespace in the third argument (text template)
+            if ($func eq 'foreach' && @args >= 3) {
+                # Trim first two args, preserve exact whitespace in third arg (text)
+                $args[0] =~ s/^\s+|\s+$//g;
+                $args[1] =~ s/^\s+|\s+$//g;
+                # $args[2] is NOT trimmed - whitespace is significant
+            } else {
+                @args = map { s/^\s+|\s+$//gr } @args;
+            }
 
             # Recursively expand variables in arguments
             # NOTE: foreach is handled specially - don't pre-expand its arguments

@@ -242,8 +242,8 @@ sub execute_command_sequential {
     warn "DEBUG[" . __LINE__ . "]: About to execute command\n" if $ENV{SMAK_DEBUG};
 
     # Execute command as a pipe to stream output in real-time
-    # Append exit status marker to capture command result
-    my $pid = open(my $cmd_fh, '-|', "$command ; echo EXIT_STATUS=\$?");
+    # Redirect stderr to stdout and append exit status marker
+    my $pid = open(my $cmd_fh, '-|', "$command 2>&1 ; echo EXIT_STATUS=\$?");
     if (!defined $pid) {
         die "Cannot execute command: $!\n";
     }
@@ -603,7 +603,7 @@ sub expand_vars {
                         # Convert to separate commands for parallel execution
                         @results = map {
                             my $cmd = $_;
-                            $cmd =~ s/&&\s*$//;  # Remove trailing &&
+                            $cmd =~ s/\s*&&\s*$//;  # Remove trailing && and surrounding whitespace
                             $cmd;
                         } @results;
                         # Join with newlines to create separate commands

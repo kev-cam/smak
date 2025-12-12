@@ -1,0 +1,208 @@
+#!/bin/bash
+# Run multiple test generations and keep only failures
+# Useful for finding intermittent bugs in parallel builds
+
+set +e  # Don't exit on error - we want to collect failures
+
+# Default values
+max_failures=10
+max_time=600  # 10 minutes in seconds
+test_sources=5
+test_objects=10
+test_targets=3
+parallel_jobs="2,4,8"
+verbose=false
+keep_passing=false
+
+# Usage message
+usage() {
+    cat << EOF
+Usage: $0 [options]
+
+Runs test-generator repeatedly, keeping only failing tests for analysis.
+Stops when max failures reached or time limit exceeded.
+
+Options:
+    -f NUM          Maximum failures to collect (default: 10)
+    -t NUM          Time limit in seconds (default: 600 = 10 minutes)
+    -s NUM          Source files per test (default: 5)
+    -o NUM          Object files per test (default: 10)
+    -T NUM          Target files per test (default: 3)
+    -j NUMS         Parallel job counts (default: 2,4,8)
+    -v              Verbose mode (show all test output)
+    -k              Keep passing tests (don't delete them)
+    -h              Show this help
+
+Examples:
+    $0                      # Run with defaults
+    $0 -f 20 -t 1200        # Collect 20 failures or run for 20 minutes
+    $0 -s 10 -o 20 -T 5     # Larger tests
+    $0 -v                   # Verbose output
+    $0 -k                   # Keep all tests (passing and failing)
+
+EOF
+    exit 1
+}
+
+# Parse arguments
+while getopts "f:t:s:o:T:j:vkh" opt; do
+    case $opt in
+        f) max_failures=$OPTARG ;;
+        t) max_time=$OPTARG ;;
+        s) test_sources=$OPTARG ;;
+        o) test_objects=$OPTARG ;;
+        T) test_targets=$OPTARG ;;
+        j) parallel_jobs=$OPTARG ;;
+        v) verbose=true ;;
+        k) keep_passing=true ;;
+        h) usage ;;
+        *) usage ;;
+    esac
+done
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Check that test-generator exists
+if [ ! -x "./test-generator" ]; then
+    echo "ERROR: test-generator not found or not executable"
+    exit 1
+fi
+
+# Initialize counters
+start_time=$(date +%s)
+test_count=0
+pass_count=0
+fail_count=0
+failures_dir="failures-$(date +%Y%m%d-%H%M%S)"
+
+echo "========================================="
+echo "SMAK TEST RUNNER"
+echo "========================================="
+echo "Configuration:"
+echo "  Max failures to collect: $max_failures"
+echo "  Time limit: ${max_time}s ($(($max_time / 60)) minutes)"
+echo "  Test size: ${test_sources} sources, ${test_objects} objects, ${test_targets} targets"
+echo "  Parallel jobs: $parallel_jobs"
+echo "  Verbose: $verbose"
+echo "  Keep passing tests: $keep_passing"
+echo ""
+echo "Failures will be saved to: $failures_dir/"
+echo "========================================="
+echo ""
+
+# Create failures directory
+mkdir -p "$failures_dir"
+
+# Main loop
+while true; do
+    current_time=$(date +%s)
+    elapsed=$((current_time - start_time))
+    remaining=$((max_time - elapsed))
+
+    # Check time limit
+    if [ $elapsed -ge $max_time ]; then
+        echo ""
+        echo "Time limit reached (${max_time}s)"
+        break
+    fi
+
+    # Check failure limit
+    if [ $fail_count -ge $max_failures ]; then
+        echo ""
+        echo "Failure limit reached ($max_failures failures)"
+        break
+    fi
+
+    ((test_count++))
+    echo ""
+    echo "========================================="
+    echo "Test $test_count (Elapsed: ${elapsed}s / ${max_time}s)"
+    echo "Passes: $pass_count | Failures: $fail_count / $max_failures"
+    echo "Time remaining: ${remaining}s"
+    echo "========================================="
+
+    # Clean old test directories before generating new one
+    ./test-generator -c >/dev/null 2>&1
+
+    # Generate and run test
+    if $verbose; then
+        ./test-generator -s $test_sources -o $test_objects -t $test_targets -r -j "$parallel_jobs"
+        result=$?
+    else
+        ./test-generator -s $test_sources -o $test_objects -t $test_targets -r -j "$parallel_jobs" >/dev/null 2>&1
+        result=$?
+    fi
+
+    # Check result
+    if [ $result -eq 0 ]; then
+        # Test passed
+        ((pass_count++))
+        echo "✓ Test $test_count PASSED"
+
+        if $keep_passing; then
+            echo "  Keeping test-1 (keep passing mode)"
+            mv test-1 "passing-$test_count" 2>/dev/null || true
+        else
+            echo "  Discarding test-1"
+            rm -rf test-1 2>/dev/null || true
+        fi
+    else
+        # Test failed
+        ((fail_count++))
+        echo "✗ Test $test_count FAILED (exit code: $result)"
+
+        # Move to failures directory
+        if [ -d "test-1" ]; then
+            failure_name="failure-$fail_count-test$test_count"
+            mv test-1 "$failures_dir/$failure_name"
+            echo "  Saved to: $failures_dir/$failure_name"
+            echo "  Logs: $failures_dir/$failure_name/logs/"
+        else
+            echo "  WARNING: test-1 directory not found"
+        fi
+    fi
+done
+
+# Final summary
+end_time=$(date +%s)
+total_time=$((end_time - start_time))
+
+echo ""
+echo "========================================="
+echo "TEST RUN COMPLETE"
+echo "========================================="
+echo "Total tests run: $test_count"
+echo "Passed: $pass_count"
+echo "Failed: $fail_count"
+echo "Total time: ${total_time}s ($(($total_time / 60))m $(($total_time % 60))s)"
+echo ""
+
+if [ $fail_count -gt 0 ]; then
+    echo "Failed tests saved in: $failures_dir/"
+    echo ""
+    echo "Failure summary:"
+    for dir in "$failures_dir"/*; do
+        if [ -d "$dir" ]; then
+            echo "  - $(basename "$dir")"
+            if [ -d "$dir/logs" ]; then
+                echo "    Logs: $(ls -1 "$dir/logs" | wc -l) files"
+            fi
+        fi
+    done
+    echo ""
+    echo "To investigate a failure:"
+    echo "  cd $failures_dir/failure-1-testN"
+    echo "  cat logs/build-*.log"
+    echo "  ../../smak all  # Re-run manually"
+else
+    echo "No failures found!"
+    rmdir "$failures_dir" 2>/dev/null || true
+fi
+
+echo ""
+echo "Pass rate: $(awk "BEGIN {printf \"%.1f\", ($pass_count/$test_count)*100}")%"
+echo "========================================="
+
+exit 0

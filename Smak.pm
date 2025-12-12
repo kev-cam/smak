@@ -221,28 +221,48 @@ sub submit_job {
 sub execute_command_sequential {
     my ($target, $command, $dir) = @_;
 
+    warn "DEBUG[" . __LINE__ . "]: execute_command_sequential: target='$target' command='$command'\n" if $ENV{SMAK_DEBUG};
+
     my $old_dir;
     if ($dir && $dir ne '.') {
         use Cwd 'getcwd';
         $old_dir = getcwd();
+        warn "DEBUG[" . __LINE__ . "]: Changing to directory: $dir\n" if $ENV{SMAK_DEBUG};
         chdir($dir) or die "Cannot chdir to $dir: $!\n";
     }
 
     # Echo command unless silent
     unless ($silent_mode) {
+        warn "DEBUG[" . __LINE__ . "]: About to tee_print command\n" if $ENV{SMAK_DEBUG};
         tee_print("$command\n");
+        warn "DEBUG[" . __LINE__ . "]: After tee_print\n" if $ENV{SMAK_DEBUG};
     }
 
     # Execute command
-    my $exit_code;
-    if ($report_mode) {
-        my $output = `$command 2>&1`;
-        $exit_code = $? >> 8;
-        tee_print($output) if $output;
-    } else {
-        my $status = system($command);
-        $exit_code = $status >> 8;
+    warn "DEBUG[" . __LINE__ . "]: About to execute command\n" if $ENV{SMAK_DEBUG};
+
+    # Execute command as a pipe to stream output in real-time
+    # Append exit status marker to capture command result
+    my $pid = open(my $cmd_fh, '-|', "$command ; echo EXIT_STATUS=\$?");
+    if (!defined $pid) {
+        die "Cannot execute command: $!\n";
     }
+
+    # Stream output line by line as it comes in
+    my $exit_code = 0;
+    while (my $line = <$cmd_fh>) {
+        # Check for exit status marker
+        if ($line =~ /^EXIT_STATUS=(\d+)$/) {
+            $exit_code = $1;
+            next;  # Don't print the marker
+        }
+        print STDOUT $line;
+        print $log_fh $line if $report_mode && $log_fh;
+    }
+
+    close($cmd_fh);
+
+    warn "DEBUG[" . __LINE__ . "]: Command executed, exit_code=$exit_code\n" if $ENV{SMAK_DEBUG};
 
     if ($exit_code != 0) {
         my $err_msg = "smak: *** [$target] Error $exit_code\n";
@@ -252,6 +272,7 @@ sub execute_command_sequential {
     }
 
     chdir($old_dir) if $old_dir;
+    warn "DEBUG[" . __LINE__ . "]: execute_command_sequential complete\n" if $ENV{SMAK_DEBUG};
 }
 
 sub set_cmd_var {
@@ -285,9 +306,43 @@ sub expand_vars {
     $depth ||= 0;
     return $text if $depth > 10;  # Prevent infinite recursion
 
+    # Prevent infinite loops from unsupported functions
+    my $max_iterations = 100;
+    my $iterations = 0;
+
     # Expand $(function args) and $(VAR) references
-    while ($text =~ /\$\(([^)]+)\)/) {
-        my $content = $1;
+    while ($text =~ /\$\(/) {
+        if (++$iterations > $max_iterations) {
+            warn "Warning: expand_vars hit iteration limit, stopping expansion\n";
+            warn "         Remaining unexpanded: " . substr($text, 0, 200) . "...\n" if length($text) > 200;
+            last;
+        }
+
+        # Find the matching closing paren for balanced extraction
+        my $start = index($text, '$(');
+        last if $start < 0;
+
+        my $pos = $start + 2;  # Start after '$('
+        my $depth = 1;
+        my $len = length($text);
+
+        while ($pos < $len && $depth > 0) {
+            my $char = substr($text, $pos, 1);
+            if ($char eq '(' && substr($text, $pos-1, 1) eq '$') {
+                $depth++;
+            } elsif ($char eq ')') {
+                $depth--;
+            }
+            $pos++;
+        }
+
+        if ($depth != 0) {
+            # Unbalanced parentheses, skip this one
+            warn "Warning: Unbalanced parentheses in: " . substr($text, $start, 50) . "...\n";
+            last;
+        }
+
+        my $content = substr($text, $start + 2, $pos - $start - 3);
         my $replacement;
 
         # Check if it's a function call (contains space or comma)
@@ -319,7 +374,10 @@ sub expand_vars {
             @args = map { s/^\s+|\s+$//gr } @args;
 
             # Recursively expand variables in arguments
-            @args = map { expand_vars($_, $depth + 1) } @args;
+            # NOTE: foreach is handled specially - don't pre-expand its arguments
+            unless ($func eq 'foreach') {
+                @args = map { expand_vars($_, $depth + 1) } @args;
+            }
 
             # Process gmake functions
             if ($func eq 'patsubst') {
@@ -511,6 +569,50 @@ sub expand_vars {
                     $replacement = `$cmd`;
                     chomp $replacement;
                 }
+            } elsif ($func eq 'foreach') {
+                # $(foreach var,list,text)
+                # NOTE: Arguments are NOT pre-expanded for foreach
+                if (@args >= 3) {
+                    my ($var, $list, $text) = @args;
+                    # Expand the list to get the words to iterate over
+                    $list = expand_vars($list, $depth + 1);
+                    my @words = split /\s+/, $list;
+                    my @results;
+                    for my $word (@words) {
+                        # Skip empty words
+                        next if $word eq '';
+                        # Temporarily set the loop variable
+                        my $saved_val = $MV{$var};
+                        $MV{$var} = $word;
+                        # Expand the text with the loop variable set
+                        # Note: text was NOT pre-expanded, so $(var) will be found
+                        my $expanded = expand_vars($text, $depth + 1);
+                        push @results, $expanded;
+                        # Restore previous value
+                        if (defined $saved_val) {
+                            $MV{$var} = $saved_val;
+                        } else {
+                            delete $MV{$var};
+                        }
+                    }
+
+                    # Check if this is a parallel-friendly pattern (commands ending with && )
+                    # If so, split into separate commands instead of chaining
+                    if (@results > 0 && $results[0] =~ /&&\s*$/) {
+                        # Each result ends with && - this is a chain pattern
+                        # Convert to separate commands for parallel execution
+                        @results = map {
+                            my $cmd = $_;
+                            $cmd =~ s/&&\s*$//;  # Remove trailing &&
+                            $cmd;
+                        } @results;
+                        # Join with newlines to create separate commands
+                        $replacement = join("\n", @results);
+                    } else {
+                        # Standard foreach - concatenate results
+                        $replacement = join('', @results);
+                    }
+                }
             } else {
                 # Unknown function, leave as-is
                 $replacement = "\$($content)";
@@ -523,9 +625,10 @@ sub expand_vars {
             $replacement = format_output($replacement);
         }
 
-        # Replace in text
+        # Replace in text using substring positions
         $replacement //= '';
-        $text =~ s/\Q$(\E\Q$content\E\Q)/$replacement/;
+        my $match_len = $pos - $start;
+        $text = substr($text, 0, $start) . $replacement . substr($text, $pos);
     }
 
     return $text;
@@ -544,8 +647,51 @@ sub transform_make_vars {
     # In Makefiles, $$ means a literal $ that should be passed to the shell
     $text =~ s/\$\$/\x00DOLLAR\x00/g;
 
-    # Transform $(VAR) to $MV{VAR}
-    $text =~ s/\$\(([^)]+)\)/\$MV{$1}/g;
+    # Transform $(VAR) to $MV{VAR} with proper nested parenthesis handling
+    my $result = '';
+    my $pos = 0;
+    my $len = length($text);
+
+    while ($pos < $len) {
+        # Look for $(
+        my $start = index($text, '$(', $pos);
+        if ($start < 0) {
+            # No more $(...) patterns, append rest of text
+            $result .= substr($text, $pos);
+            last;
+        }
+
+        # Append text before $(
+        $result .= substr($text, $pos, $start - $pos);
+
+        # Find matching closing paren
+        my $scan_pos = $start + 2;
+        my $depth = 1;
+
+        while ($scan_pos < $len && $depth > 0) {
+            my $char = substr($text, $scan_pos, 1);
+            if ($char eq '(' && substr($text, $scan_pos-1, 1) eq '$') {
+                $depth++;
+            } elsif ($char eq ')') {
+                $depth--;
+            }
+            $scan_pos++;
+        }
+
+        if ($depth == 0) {
+            # Found balanced parentheses, extract content
+            my $content = substr($text, $start + 2, $scan_pos - $start - 3);
+            $result .= '$MV{' . $content . '}';
+            $pos = $scan_pos;
+        } else {
+            # Unbalanced, just copy the $( and continue
+            $result .= '$(';
+            $pos = $start + 2;
+        }
+    }
+
+    $text = $result;
+
     # Transform $X (single-letter variables) to $MV{X}, but not automatic vars like $@, $<, $^, $*, $?
     # Automatic variables are handled separately in expand_vars
     $text =~ s/\$([A-Za-z0-9_])(?![A-Za-z0-9_{])/\$MV{$1}/g;
@@ -672,17 +818,13 @@ sub parse_makefile {
         if ($line =~ /^-?include\s+(.+)$/) {
             $save_current_rule->();
             my $include_files = $1;
-            # Expand variables in the include filename
-            $include_files = transform_make_vars($include_files);
+            # Expand variables and functions in the include filename
+            $include_files = expand_vars($include_files);
 
             # Handle multiple includes on one line
             for my $include_file (split /\s+/, $include_files) {
-                # Expand $MV{...} to actual values
-                while ($include_file =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $include_file =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
+                # Skip empty entries
+                next if $include_file eq '';
 
                 # Determine include path
                 my $include_path = $include_file;
@@ -883,17 +1025,13 @@ sub parse_included_makefile {
         if ($line =~ /^-?include\s+(.+)$/) {
             $save_current_rule->();
             my $include_files = $1;
-            # Expand variables in the include filename
-            $include_files = transform_make_vars($include_files);
+            # Expand variables and functions in the include filename
+            $include_files = expand_vars($include_files);
 
             # Handle multiple includes on one line
             for my $include_file (split /\s+/, $include_files) {
-                # Expand $MV{...} to actual values
-                while ($include_file =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $include_file =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
+                # Skip empty entries
+                next if $include_file eq '';
 
                 # Determine include path
                 my $nested_include_path = $include_file;
@@ -1769,42 +1907,89 @@ sub build_target {
         }
         if ($rule && $rule =~ /\S/) {
             warn "DEBUG[" . __LINE__ . "]:   Has rule: yes\n";
+            my $rule_preview = substr($rule, 0, 100);
+            $rule_preview =~ s/\n/\\n/g;
+            warn "DEBUG[" . __LINE__ . "]:   Rule preview: '$rule_preview" . (length($rule) > 100 ? "...' (truncated)" : "'") . "\n";
         } else {
             warn "DEBUG[" . __LINE__ . "]:   Has rule: no\n";
         }
     }
 
-    # Check if target is .PHONY or needs rebuilding
+    # Check if target is .PHONY
+    # A target is phony if it appears as a dependency of .PHONY
+    # Note: .PHONY is classified as a pseudo target (starts with .)
     my $is_phony = 0;
-    for my $dep (@deps) {
-        if ($dep eq '.PHONY') {
-            $is_phony = 1;
-            last;
-        }
+    my $phony_key = "$makefile\t.PHONY";
+    if (exists $pseudo_deps{$phony_key}) {
+        my @phony_targets = @{$pseudo_deps{$phony_key} || []};
+        warn "DEBUG[" . __LINE__ . "]:   Found .PHONY with deps: " . join(', ', @phony_targets) . "\n" if $ENV{SMAK_DEBUG};
+        # Expand variables in .PHONY dependencies
+        @phony_targets = map {
+            my $t = $_;
+            while ($t =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $t =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            $t;
+        } @phony_targets;
+        warn "DEBUG[" . __LINE__ . "]:   After expansion: " . join(', ', @phony_targets) . "\n" if $ENV{SMAK_DEBUG};
+        $is_phony = 1 if grep { $_ eq $target } @phony_targets;
+    } else {
+        warn "DEBUG[" . __LINE__ . "]:   No .PHONY target found in pseudo_deps\n" if $ENV{SMAK_DEBUG};
+    }
+
+    # Auto-detect common phony target names even without .PHONY declaration
+    # This is a pragmatic extension to standard Make behavior
+    if (!$is_phony && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+        warn "DEBUG[" . __LINE__ . "]:   Auto-detecting '$target' as phony (common target name)\n" if $ENV{SMAK_DEBUG};
+        $is_phony = 1;
+    }
+
+    warn "DEBUG[" . __LINE__ . "]:   is_phony=$is_phony\n" if $ENV{SMAK_DEBUG};
+
+    # Warn if phony target exists as a file
+    if ($is_phony && -e $target) {
+        warn "smak: Warning: phony target '$target' exists as a file and will be ignored\n";
     }
 
     # If not .PHONY and target is up-to-date, skip building
     unless ($is_phony) {
+        warn "DEBUG[" . __LINE__ . "]:   Checking if target exists and is up-to-date...\n" if $ENV{SMAK_DEBUG};
         if (-e $target && !needs_rebuild($target)) {
             warn "DEBUG:   Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
             return;
         }
+        warn "DEBUG[" . __LINE__ . "]:   Target needs rebuilding\n" if $ENV{SMAK_DEBUG};
     }
 
     # Recursively build dependencies
     # In parallel mode, skip this - let job-master handle dependency expansion
     unless ($job_server_socket) {
+        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies...\n" if $ENV{SMAK_DEBUG};
         for my $dep (@deps) {
+            warn "DEBUG[" . __LINE__ . "]:     Building dependency: $dep\n" if $ENV{SMAK_DEBUG};
             build_target($dep, $visited, $depth + 1);
         }
+        warn "DEBUG[" . __LINE__ . "]:   Finished building dependencies\n" if $ENV{SMAK_DEBUG};
+    }
+
+    warn "DEBUG[" . __LINE__ . "]:   Checking if should execute rule: rule defined=" . (defined $rule ? "yes" : "no") . ", has content=" . (($rule && $rule =~ /\S/) ? "yes" : "no") . "\n" if $ENV{SMAK_DEBUG};
+    if ($ENV{SMAK_DEBUG} && defined $rule) {
+        my $rule_preview = substr($rule, 0, 100);
+        $rule_preview =~ s/\n/\\n/g;
+        warn "DEBUG[" . __LINE__ . "]:   Rule value: '$rule_preview" . (length($rule) > 100 ? "...' (truncated)" : "'") . "\n";
     }
 
     # Execute rule if it exists (submit_job is blocking, so no need to wait)
     if ($rule && $rule =~ /\S/) {
+        warn "DEBUG[" . __LINE__ . "]:   Executing rule for target '$target'\n" if $ENV{SMAK_DEBUG};
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($rule);
+        warn "DEBUG[" . __LINE__ . "]:   After format_output\n" if $ENV{SMAK_DEBUG};
         # Expand variables
         my $expanded = expand_vars($converted);
+        warn "DEBUG[" . __LINE__ . "]:   After expand_vars\n" if $ENV{SMAK_DEBUG};
 
         # Expand automatic variables
         $expanded =~ s/\$@/$target/g;                     # $@ = target name
@@ -1812,15 +1997,19 @@ sub build_target {
         $expanded =~ s/\$\^/join(' ', @deps)/ge;         # $^ = all prerequisites
         $expanded =~ s/\$\*/$stem/g;                     # $* = stem (part matching %)
 
+        warn "DEBUG[" . __LINE__ . "]:   About to execute commands\n" if $ENV{SMAK_DEBUG};
         # Execute each command line
         for my $cmd_line (split /\n/, $expanded) {
+            warn "DEBUG[" . __LINE__ . "]:     Processing command line\n" if $ENV{SMAK_DEBUG};
             next unless $cmd_line =~ /\S/;  # Skip empty lines
 
+            warn "DEBUG[" . __LINE__ . "]:     Command: $cmd_line\n" if $ENV{SMAK_DEBUG};
             # Check if command starts with @ (silent mode)
             my $silent = ($cmd_line =~ s/^\s*@//);
 
             # In dry-run mode, handle recursive make invocations or print commands
             if ($dry_run_mode) {
+                warn "DEBUG[" . __LINE__ . "]:     In dry-run mode\n" if $ENV{SMAK_DEBUG};
                 # Check if this is a recursive make/smak invocation
                 if ($cmd_line =~ /\b(make|smak)\s/ || $cmd_line =~ m{/smak(?:\s|$)}) {
                     # Debug: show what we detected
@@ -1879,11 +2068,14 @@ sub build_target {
             use Cwd 'getcwd';
             my $cwd = getcwd();
             if ($job_server_socket) {
+                warn "DEBUG[" . __LINE__ . "]:     Using job server\n" if $ENV{SMAK_DEBUG};
                 # Parallel mode - submit to job server
                 submit_job($target, $cmd_line, $cwd);
             } else {
+                warn "DEBUG[" . __LINE__ . "]:     Sequential execution\n" if $ENV{SMAK_DEBUG};
                 # Sequential mode - execute directly
                 execute_command_sequential($target, $cmd_line, $cwd);
+                warn "DEBUG[" . __LINE__ . "]:     Command completed\n" if $ENV{SMAK_DEBUG};
             }
         }
     } elsif ($job_server_socket && @deps > 0) {

@@ -582,7 +582,23 @@ sub expand_vars {
                             delete $MV{$var};
                         }
                     }
-                    $replacement = join('', @results);
+
+                    # Check if this is a parallel-friendly pattern (commands ending with && )
+                    # If so, split into separate commands instead of chaining
+                    if (@results > 0 && $results[0] =~ /&&\s*$/) {
+                        # Each result ends with && - this is a chain pattern
+                        # Convert to separate commands for parallel execution
+                        @results = map {
+                            my $cmd = $_;
+                            $cmd =~ s/&&\s*$//;  # Remove trailing &&
+                            $cmd;
+                        } @results;
+                        # Join with newlines to create separate commands
+                        $replacement = join("\n", @results);
+                    } else {
+                        # Standard foreach - concatenate results
+                        $replacement = join('', @results);
+                    }
                 }
             } else {
                 # Unknown function, leave as-is

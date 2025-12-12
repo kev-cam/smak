@@ -242,8 +242,8 @@ sub execute_command_sequential {
     warn "DEBUG[" . __LINE__ . "]: About to execute command\n" if $ENV{SMAK_DEBUG};
 
     # Execute command as a pipe to stream output in real-time
-    # Append exit status marker to capture command result
-    my $pid = open(my $cmd_fh, '-|', "$command ; echo EXIT_STATUS=\$?");
+    # Redirect stderr to stdout and append exit status marker
+    my $pid = open(my $cmd_fh, '-|', "$command 2>&1 ; echo EXIT_STATUS=\$?");
     if (!defined $pid) {
         die "Cannot execute command: $!\n";
     }
@@ -371,7 +371,15 @@ sub expand_vars {
             push @args, $current if $current ne '';
 
             # Trim whitespace from arguments
-            @args = map { s/^\s+|\s+$//gr } @args;
+            # NOTE: For foreach, preserve whitespace in the third argument (text template)
+            if ($func eq 'foreach' && @args >= 3) {
+                # Trim first two args, preserve exact whitespace in third arg (text)
+                $args[0] =~ s/^\s+|\s+$//g;
+                $args[1] =~ s/^\s+|\s+$//g;
+                # $args[2] is NOT trimmed - whitespace is significant
+            } else {
+                @args = map { s/^\s+|\s+$//gr } @args;
+            }
 
             # Recursively expand variables in arguments
             # NOTE: foreach is handled specially - don't pre-expand its arguments
@@ -596,22 +604,8 @@ sub expand_vars {
                         }
                     }
 
-                    # Check if this is a parallel-friendly pattern (commands ending with && )
-                    # If so, split into separate commands instead of chaining
-                    if (@results > 0 && $results[0] =~ /&&\s*$/) {
-                        # Each result ends with && - this is a chain pattern
-                        # Convert to separate commands for parallel execution
-                        @results = map {
-                            my $cmd = $_;
-                            $cmd =~ s/&&\s*$//;  # Remove trailing &&
-                            $cmd;
-                        } @results;
-                        # Join with newlines to create separate commands
-                        $replacement = join("\n", @results);
-                    } else {
-                        # Standard foreach - concatenate results
-                        $replacement = join('', @results);
-                    }
+                    # Concatenate all results (standard foreach behavior)
+                    $replacement = join('', @results);
                 }
             } else {
                 # Unknown function, leave as-is

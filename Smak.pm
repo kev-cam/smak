@@ -293,8 +293,18 @@ sub expand_vars {
     $depth ||= 0;
     return $text if $depth > 10;  # Prevent infinite recursion
 
+    # Prevent infinite loops from unsupported functions
+    my $max_iterations = 100;
+    my $iterations = 0;
+
     # Expand $(function args) and $(VAR) references
     while ($text =~ /\$\(([^)]+)\)/) {
+        if (++$iterations > $max_iterations) {
+            warn "Warning: expand_vars hit iteration limit, stopping expansion\n";
+            warn "         Remaining unexpanded: " . substr($text, 0, 200) . "...\n" if length($text) > 200;
+            last;
+        }
+
         my $content = $1;
         my $replacement;
 

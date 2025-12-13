@@ -17,15 +17,17 @@ my @wheel_chars = qw(/ - \\);
 my $wheel_pos = 0;
 
 sub vprint {
-    return unless $ENV{SMAK_VERBOSE};
+    my $mode;
 
-    if ($ENV{SMAK_VERBOSE} eq 'w') {
+    return if (! defined ($mode = $ENV{SMAK_VERBOSE}));
+    
+    if ($mode eq 'w') {
         # Spinning wheel mode - update in place
         # Clear line, show wheel, flush
         print STDERR "\r" . $wheel_chars[$wheel_pos] . "  \r";
         STDERR->flush();
         $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
-    } else {
+    } elsif (1 == $mode) {
         # Normal verbose mode
         print STDERR @_;
     }
@@ -58,6 +60,7 @@ our @EXPORT_OK = qw(
     get_variable
     show_dependencies
     wait_for_jobs
+    vprint
 );
 
 our %EXPORT_TAGS = (
@@ -236,6 +239,10 @@ sub submit_job {
     print $job_server_socket "$target\n";
     print $job_server_socket "$dir\n";
     print $job_server_socket "$command\n";
+
+    unless ($silent_mode) {
+	print "$command\n";
+    }
 }
 
 sub execute_command_sequential {
@@ -3640,7 +3647,7 @@ sub run_job_master {
 
             return 1 if -e $target_path;
 
-            print STDERR "Warning: Target '$target' not found at '$target_path', retry $attempt/3\n";
+            vprint "Warning: Target '$target' not found at '$target_path', retry $attempt/3\n";
         }
 
         # Final check
@@ -3649,7 +3656,7 @@ sub run_job_master {
             return 1;
         }
 
-        print STDERR "ERROR: Target '$target' does not exist at '$target_path' after task completion\n";
+        vprint "ERROR: Target '$target' does not exist at '$target_path' after task completion\n";
         return 0;
     }
 
@@ -3923,6 +3930,11 @@ sub run_job_master {
             print $ready_worker "CMD $job->{command}\n";
 
             vprint "Dispatched task $task_id to worker\n";
+
+	    if (! $silent_mode) {
+		print "$job->{command}\n";
+	    }
+	    
             broadcast_observers("DISPATCHED $task_id $job->{target}");
 
             if ($block) {
@@ -4461,7 +4473,7 @@ sub run_job_master {
                         $select->add($worker);
                         push @workers, $worker;
                         $worker_status{$worker} = {ready => 0, task_id => 0};
-                        print STDERR "Worker connected during runtime\n";
+                        warn "Worker connected during runtime\n";
 
                         # Send environment to new worker
                         print $worker "ENV_START\n";
@@ -4574,8 +4586,7 @@ sub run_job_master {
                 my $line = <$socket>;
                 unless (defined $line) {
                     # Worker disconnected
-                    vprint "Worker disconnected
-";
+                    vprint "Worker disconnected\n";
                     $select->remove($socket);
                     next;
                 }
@@ -4584,8 +4595,7 @@ sub run_job_master {
                 if ($line eq 'READY') {
                     # Worker is ready for a job
                     $worker_status{$socket}{ready} |= 2;
-                    vprint "Worker ready
-";
+                    vprint "Worker ready\n";
                     # Try to dispatch queued jobs
                     dispatch_jobs();
 

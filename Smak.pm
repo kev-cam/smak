@@ -4425,6 +4425,21 @@ sub run_job_master {
                     } else {
                         print $master_socket "WATCH_NOT_ACTIVE\n";
                     }
+
+                } elsif ($line =~ /^ENV (\w+)=(.*)$/) {
+                    # Update environment variable in job-master and workers
+                    my ($var, $value) = ($1, $2);
+                    $ENV{$var} = $value;
+                    $worker_env{$var} = $value;
+
+                    # Send update to all connected workers
+                    for my $worker (@workers) {
+                        print $worker "ENV_START\n";
+                        print $worker "ENV $var=$value\n";
+                        print $worker "ENV_END\n";
+                    }
+
+                    print STDERR "Updated environment: $var=$value\n" if $ENV{SMAK_DEBUG};
                 }
 
             } elsif ($socket == $worker_server) {

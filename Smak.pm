@@ -22,7 +22,7 @@ sub vprint {
     if ($ENV{SMAK_VERBOSE} eq 'w') {
         # Spinning wheel mode - update in place
         # Clear line, show wheel, flush
-        print STDERR "\r" . $wheel_chars[$wheel_pos] . "  \r" . $wheel_chars[$wheel_pos];
+        print STDERR "\r" . $wheel_chars[$wheel_pos] . "  \r";
         STDERR->flush();
         $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
     } else {

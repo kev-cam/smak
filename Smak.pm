@@ -11,6 +11,26 @@ use Carp 'verbose'; # for debug trace
 
 our $VERSION = '1.0';
 
+# Helper function to print verbose messages (smak-specific, not GNU make compatible)
+# If SMAK_VERBOSE='w', shows a spinning wheel instead of printing
+my @wheel_chars = qw(/ - \\);
+my $wheel_pos = 0;
+
+sub vprint {
+    return unless $ENV{SMAK_VERBOSE};
+
+    if ($ENV{SMAK_VERBOSE} eq 'w') {
+        # Spinning wheel mode - update in place
+        # Clear line, show wheel, flush
+        print STDERR "\r" . $wheel_chars[$wheel_pos] . "  \r" . $wheel_chars[$wheel_pos];
+        STDERR->flush();
+        $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
+    } else {
+        # Normal verbose mode
+        print STDERR @_;
+    }
+}
+
 our @EXPORT_OK = qw(
     parse_makefile
     build_target
@@ -114,7 +134,7 @@ sub start_job_server {
     use IO::Select;
     use FindBin qw($RealBin);
 
-    return if $jobs <= 1;  # No job server needed for sequential builds
+    return if $jobs < 1;  # Need at least 1 worker for job server (enables FUSE monitoring)
 
     $job_server_pid = fork();
     die "Cannot fork job-master: $!\n" unless defined $job_server_pid;
@@ -3235,6 +3255,8 @@ sub run_job_master {
     our %pseudo_rule;
     our %MV;  # Variables
     our $makefile;  # Current makefile path
+    our %rules;  # All rules (for is_build_relevant and stale checking)
+    our %targets;  # All targets
 
     our @workers;
     our %worker_status;  # socket => {ready => 0/1, task_id => N}
@@ -3251,7 +3273,7 @@ sub run_job_master {
     ) or die "Cannot create master server: $!\n";
 
     my $master_port = $master_server->sockport();
-    print STDERR "Job-master master server on port $master_port\n";
+    vprint "Job-master master server on port $master_port\n";
 
     # Create socket server for workers
     my $worker_server = IO::Socket::INET->new(
@@ -3263,7 +3285,7 @@ sub run_job_master {
     ) or die "Cannot create worker server: $!\n";
 
     my $worker_port = $worker_server->sockport();
-    print STDERR "Job-master worker server on port $worker_port\n";
+    vprint "Job-master worker server on port $worker_port\n";
 
     # Create socket server for observers (monitoring/attach)
     my $observer_server = IO::Socket::INET->new(
@@ -3275,7 +3297,7 @@ sub run_job_master {
     ) or die "Cannot create observer server: $!\n";
 
     my $observer_port = $observer_server->sockport();
-    print STDERR "Job-master observer server on port $observer_port\n";
+    vprint "Job-master observer server on port $observer_port\n";
 
     # Write ports to file for smak-attach to find
     open(my $port_fh, '>', "/tmp/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
@@ -3292,8 +3314,52 @@ sub run_job_master {
     my %inode_cache;  # inode => path
     my %pending_path_requests;  # inode => 1 (waiting for resolution)
     my %file_modifications;  # path => {workers => [pids], last_op => time}
+    my $watch_client;  # Client socket to send watch notifications to
 
     our %worker_env;
+
+    # Helper to check if a file path is relevant to the build
+    sub is_build_relevant {
+        my ($path) = @_;
+
+        # In debug mode, show everything
+        return 1 if $ENV{SMAK_DEBUG};
+
+        # Skip .git files and directories
+        return 0 if $path =~ /\/\.git\//;
+        return 0 if $path =~ /\.git$/;
+
+        # Skip lock files and temp files
+        return 0 if $path =~ /\.lock$/;
+        return 0 if $path =~ /~$/;
+        return 0 if $path =~ /\.tmp$/;
+        return 0 if $path =~ /\.swp$/;
+
+        # Get just the filename (might be absolute path)
+        my $file = $path;
+        $file =~ s{^.*/}{};  # Remove directory path
+
+        # Check if it's a known target or has a rule
+        return 1 if exists $rules{$file};
+        return 1 if exists $targets{$file};
+
+        # Check if it matches any pattern in rules (for wildcards)
+        for my $rule_pattern (keys %rules) {
+            if ($file =~ /$rule_pattern/) {
+                return 1;
+            }
+        }
+
+        # Check common source file extensions
+        return 1 if $path =~ /\.(c|cc|cpp|cxx|C|h|hpp|hxx|H)$/;
+        return 1 if $path =~ /\.(f|f90|f95|F|F90|F95)$/;
+        return 1 if $path =~ /\.(s|S|asm)$/;
+        return 1 if $path =~ /\.(java|py|pl|pm|rb)$/;
+        return 1 if $path =~ /\.(o|a|so|dylib|dll)$/;
+
+        # Default to not showing
+        return 0;
+    }
 
     sub send_env {
 	my ($worker) = @_;
@@ -3318,7 +3384,7 @@ sub run_job_master {
                 my ($dev, $mountpoint, $fstype) = ($1, $2, $3);
                 # Check if our CWD is under this mount
                 if ($cwd =~ /^\Q$mountpoint\E/) {
-                    print STDERR "Detected FUSE filesystem: $fstype at $mountpoint\n";
+                    vprint "Detected FUSE filesystem: $fstype at $mountpoint\n";
                     # Try to find the FUSE process - look for sshfs process
                     my $ps_output = `ps aux | grep -E '(sshfs|smak-fuse)' | grep -v grep`;
                     for my $ps_line (split /\n/, $ps_output) {
@@ -3340,7 +3406,7 @@ sub run_job_master {
         for my $line (split /\n/, $lsof_output) {
             if ($line =~ /:(\d+)\s+\(LISTEN\)/) {
                 my $port = $1;
-                print STDERR "Found FUSE monitor on port $port (PID $fuse_pid)\n";
+                vprint "Found FUSE monitor on port $port (PID $fuse_pid)\n";
                 return $port;
             }
         }
@@ -3358,20 +3424,21 @@ sub run_job_master {
         );
         if ($fuse_socket) {
             $fuse_socket->autoflush(1);
-            print STDERR "Connected to FUSE monitor\n";
+            vprint "Connected to FUSE monitor\n";
         } else {
             print STDERR "Failed to connect to FUSE monitor: $!\n";
         }
     } else {
-        print STDERR "No FUSE filesystem monitor detected\n";
+        vprint "No FUSE filesystem monitor detected\n";
     }
 
     # Wait for initial master connection
-    print STDERR "Waiting for master connection...\n";
+    vprint "Waiting for master connection...\n";
     our $master_socket = $master_server->accept();
     die "Failed to accept master connection\n" unless $master_socket;
     $master_socket->autoflush(1);
-    print STDERR "Master connected\n";
+    vprint "Master connected
+";
 
     # Receive environment from master
     while (my $line = <$master_socket>) {
@@ -3381,7 +3448,7 @@ sub run_job_master {
             $worker_env{$1} = $2;
         }
     }
-    print STDERR "Job-master received environment\n";
+    vprint "Job-master received environment\n";
 
     # Spawn workers
     for (my $i = 0; $i < $num_workers; $i++) {
@@ -3393,7 +3460,7 @@ sub run_job_master {
             exec($worker_script, "127.0.0.1:$worker_port");
             die "Failed to exec worker: $!\n";
         }
-        print STDERR "Spawned worker $i (PID $pid)\n";
+        vprint "Spawned worker $i (PID $pid)\n";
     }
 
     # Set up IO::Select for multiplexing
@@ -3426,21 +3493,21 @@ sub run_job_master {
                         $worker_status{$worker} = {ready => 0, task_id => 0};  # Not ready until env sent
                         $select->add($worker);
                         $workers_connected++;
-                        print STDERR "Worker connected ($workers_connected/$num_workers)\n";
+                        vprint "Worker connected ($workers_connected/$num_workers)\n";
 
                         # Send environment
 			send_env($worker);
 
                         # Now worker is ready to receive tasks
                         $worker_status{$worker}{ready} = 1;
-                        print STDERR "Worker $workers_connected environment sent, now ready\n";
+                        vprint "Worker $workers_connected environment sent, now ready\n";
                     }
                 }
             }
         }
     }
 
-    print STDERR "All workers ready. Job-master entering listen loop.\n";
+    vprint "All workers ready. Job-master entering listen loop.\n";
     print $master_socket "JOBSERVER_WORKERS_READY\n";
 
     # Job queue and dependency tracking - use 'our' to avoid closure warnings
@@ -3687,7 +3754,7 @@ sub run_job_master {
                 command => $processed_rule,
             };
             $in_progress{$target} = "queued";
-            print STDERR "Queued target: $target\n";
+            vprint "Queued target: $target\n";
         } elsif (@deps > 0) {
             # Composite target or target with dependencies but no rule
             if ($ENV{SMAK_DEBUG}) {
@@ -3709,7 +3776,7 @@ sub run_job_master {
                         deps => \@pending_deps,
                         master_socket => $msocket,
                     };
-                    print STDERR "Composite target '$target' waiting for " . scalar(@pending_deps) . " dependencies\n";
+                    vprint "Composite target $target waiting for " . scalar(@pending_deps) . " dependencies\n";
                     print STDERR "  Pending: " . join(", ", @pending_deps) . "\n" if $ENV{SMAK_DEBUG};
                 } else {
                     # All deps already complete
@@ -3819,7 +3886,7 @@ sub run_job_master {
             # No job with satisfied dependencies found
             if ($job_index < 0) {
                 if ($ENV{SMAK_DEBUG}) {
-                    print STDERR "No jobs with satisfied dependencies\n";
+                    vprint "No jobs with satisfied dependencies\n";
                     print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
                     my $max_show = @job_queue < 10 ? $#job_queue : 9;
                     for my $i (0 .. $max_show) {
@@ -3855,7 +3922,7 @@ sub run_job_master {
             print $ready_worker "DIR $job->{dir}\n";
             print $ready_worker "CMD $job->{command}\n";
 
-            print STDERR "Dispatched task $task_id to worker\n";
+            vprint "Dispatched task $task_id to worker\n";
             broadcast_observers("DISPATCHED $task_id $job->{target}");
 
             if ($block) {
@@ -3876,7 +3943,7 @@ sub run_job_master {
     while (1) {
         # Check if all work is complete (only after we've received jobs)
         if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0) {
-            print STDERR "All jobs complete. Job-master exiting.\n";
+            vprint "All jobs complete. Job-master exiting.\n";
             last;
         }
 
@@ -3892,12 +3959,13 @@ sub run_job_master {
                 $worker->blocking(0);
                 while (my $line = <$worker>) {
                     chomp $line;
-                    print STDERR "Consistency check: processing pending message: $line\n";
+                    vprint "Consistency check: processing pending message: $line\n";
 
                     # Process the message inline (same logic as main event loop)
                     if ($line eq 'READY') {
                         $worker_status{$worker}{ready} |= 2;
-                        print STDERR "Worker ready\n";
+                        vprint "Worker ready
+";
                         dispatch_jobs();
 
                     } elsif ($line =~ /^TASK_START (\d+)$/) {
@@ -3914,9 +3982,24 @@ sub run_job_master {
                         delete $running_jobs{$task_id};
 
                         if ($exit_code == 0 && $job->{target}) {
-                            # Verify the target file actually exists before marking as complete
-                            # This prevents race conditions where dependent tasks start before file is on disk
-                            if (verify_target_exists($job->{target}, $job->{dir})) {
+                            # Check if this looks like a phony target (doesn't produce a file)
+                            # Phony targets typically have no extension or are common make targets
+                            my $target = $job->{target};
+                            my $looks_like_file = $target =~ /\.[a-zA-Z0-9]+$/ ||  # has extension
+                                                  $target =~ /\// ||                # has path separator
+                                                  $target =~ /^lib.*\.a$/ ||        # library file
+                                                  $target =~ /^.*\.so(\.\d+)*$/;    # shared library
+
+                            # Common phony targets that don't produce files
+                            my $is_common_phony = $target =~ /^(all|clean|install|test|check|depend|dist|
+                                                                distclean|maintainer-clean|mostlyclean|
+                                                                cmake_check_build_system|help|list|
+                                                                package|preinstall|rebuild_cache|edit_cache)$/x;
+
+                            # Only verify file existence for targets that look like real files
+                            my $should_verify = $looks_like_file && !$is_common_phony;
+
+                            if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                                 $completed_targets{$job->{target}} = 1;
                                 $in_progress{$job->{target}} = "done";
                                 print STDERR "Task $task_id completed successfully: $job->{target}\n";
@@ -3937,7 +4020,7 @@ sub run_job_master {
                                 $comp->{deps} = [grep { $_ ne $job->{target} } @{$comp->{deps}}];
 
                                 if (@{$comp->{deps}} == 0) {
-                                    print STDERR "All dependencies complete for composite target '$comp_target'\n";
+                                    vprint "All dependencies complete for composite target '$comp_target'\n";
                                     $completed_targets{$comp_target} = 1;
                                     $in_progress{$comp_target} = "done";
                                     if ($comp->{master_socket}) {
@@ -4016,6 +4099,8 @@ sub run_job_master {
                     print STDERR "Master disconnected. Waiting for reconnection...\n";
                     $select->remove($master_socket);
                     close($master_socket);
+                    # Clear watch client if this was the watching client
+                    $watch_client = undef if $watch_client && $watch_client == $master_socket;
                     $master_socket = undef;
                     next;
                 }
@@ -4033,7 +4118,7 @@ sub run_job_master {
                     my $dir = <$socket>; chomp $dir if defined $dir;
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
-                    print STDERR "Received job request for target: $target\n";
+                    vprint "Received job request for target: $target\n";
                     $jobs_received = 1;  # Mark that we've received at least one job
 
                     # Lookup dependencies using the key format "makefile\ttarget"
@@ -4064,7 +4149,7 @@ sub run_job_master {
                     # Use recursive queuing to handle dependencies
                     queue_target_recursive($target, $dir, $master_socket);
 
-                    print STDERR "Job queue now has " . scalar(@job_queue) . " jobs\n";
+                    vprint "Job queue now has " . scalar(@job_queue) . " jobs\n";
                     broadcast_observers("QUEUED $target");
 
                     # Try to dispatch
@@ -4176,6 +4261,54 @@ sub run_job_master {
                         print $master_socket "FUSE monitoring not available\n";
                         print $master_socket "FILES_END\n";
                     }
+
+                } elsif ($line =~ /^LIST_STALE$/) {
+                    # List targets that need rebuilding based on tracked modifications
+                    my %stale_targets;
+
+                    # For each modified file, find targets that depend on it
+                    for my $modified_file (keys %file_modifications) {
+                        # Extract just the filename
+                        my $file = $modified_file;
+                        $file =~ s{^.*/}{};
+
+                        # Check all rules to see which targets depend on this file
+                        for my $target (keys %rules) {
+                            my $rule_info = $rules{$target};
+                            my $deps = $rule_info->{deps} || '';
+
+                            # Check if this file is a dependency
+                            if ($deps =~ /\b\Q$file\E\b/ || $deps =~ /\Q$modified_file\E/) {
+                                $stale_targets{$target} = 1;
+                            }
+                        }
+                    }
+
+                    # Send stale targets
+                    for my $target (sort keys %stale_targets) {
+                        print $master_socket "STALE:$target\n";
+                    }
+                    print $master_socket "STALE_END\n";
+
+                } elsif ($line =~ /^WATCH_START$/) {
+                    # Enable watch mode - send file change notifications to this client
+                    if ($fuse_socket) {
+                        $watch_client = $master_socket;
+                        print $master_socket "WATCH_STARTED\n";
+                        print STDERR "Watch mode enabled for client\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        print $master_socket "WATCH_UNAVAILABLE (no FUSE)\n";
+                    }
+
+                } elsif ($line =~ /^WATCH_STOP$/) {
+                    # Disable watch mode
+                    if ($watch_client && $watch_client == $master_socket) {
+                        $watch_client = undef;
+                        print $master_socket "WATCH_STOPPED\n";
+                        print STDERR "Watch mode disabled\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        print $master_socket "WATCH_NOT_ACTIVE\n";
+                    }
                 }
 
             } elsif ($socket == $worker_server) {
@@ -4202,7 +4335,7 @@ sub run_job_master {
 
                         # Now worker is ready
                         $worker_status{$worker}{ready} = 1;
-                        print STDERR "Runtime worker environment sent, now ready\n";
+                        vprint "Runtime worker environment sent, now ready\n";
                     } else {
                         warn "Worker connected but didn't send READY, got: $ready_msg\n";
                         close($worker);
@@ -4246,7 +4379,7 @@ sub run_job_master {
                 my $line = <$socket>;
                 unless (defined $line) {
                     # FUSE monitor disconnected
-                    print STDERR "FUSE monitor disconnected\n";
+                    vprint "FUSE monitor disconnected\n";
                     $select->remove($fuse_socket);
                     $fuse_socket = undef;
                     next;
@@ -4265,7 +4398,12 @@ sub run_job_master {
 
                         # Track modification
                         $file_modifications{$path} ||= {workers => [], last_op => time()};
-                        print STDERR "FUSE: $path (inode $inode)\n";
+                        print STDERR "FUSE: $path (inode $inode)\n" if $ENV{SMAK_DEBUG};
+
+                        # Send watch notification if client is watching AND file is build-relevant
+                        if ($watch_client && is_build_relevant($path)) {
+                            print $watch_client "WATCH:$path\n";
+                        }
 
                     } else {
                         # File operation: OP:pid:inode
@@ -4284,7 +4422,12 @@ sub run_job_master {
                             push @{$file_modifications{$path}{workers}}, $pid
                                 unless grep { $_ == $pid } @{$file_modifications{$path}{workers}};
                             $file_modifications{$path}{last_op} = time();
-                            print STDERR "FUSE: $op $path by PID $pid\n";
+                            print STDERR "FUSE: $op $path by PID $pid\n" if $ENV{SMAK_DEBUG};
+
+                            # Send watch notification if client is watching AND file is build-relevant
+                            if ($watch_client && is_build_relevant($path)) {
+                                print $watch_client "WATCH:$path\n";
+                            }
                         }
                     }
                 }
@@ -4294,7 +4437,8 @@ sub run_job_master {
                 my $line = <$socket>;
                 unless (defined $line) {
                     # Worker disconnected
-                    print STDERR "Worker disconnected\n";
+                    vprint "Worker disconnected
+";
                     $select->remove($socket);
                     next;
                 }
@@ -4303,7 +4447,8 @@ sub run_job_master {
                 if ($line eq 'READY') {
                     # Worker is ready for a job
                     $worker_status{$socket}{ready} |= 2;
-                    print STDERR "Worker ready\n";
+                    vprint "Worker ready
+";
                     # Try to dispatch queued jobs
                     dispatch_jobs();
 
@@ -4342,7 +4487,7 @@ sub run_job_master {
                     # Worker is returning a task (doesn't want to execute it)
                     if (exists $running_jobs{$task_id}) {
                         my $job = $running_jobs{$task_id};
-                        print STDERR "Worker returning task $task_id ($job->{target}): $reason\n";
+                        vprint "Worker returning task $task_id ($job->{target}): $reason\n";
 
                         # Re-queue the job
                         unshift @job_queue, $job;  # Add to front of queue
@@ -4365,7 +4510,7 @@ sub run_job_master {
                         my $job = $running_jobs{$task_id};
                         my $target = $job->{target};
 
-                        print STDERR "Worker decomposing task $task_id ($target)\n";
+                        vprint "Worker decomposing task $task_id ($target)\n";
 
                         # Read subtargets from worker
                         my @subtargets;
@@ -4423,9 +4568,24 @@ sub run_job_master {
 
                     # Track successfully completed targets to avoid rebuilding
                     if ($exit_code == 0 && $job->{target}) {
-                        # Verify the target file actually exists before marking as complete
-                        # This prevents race conditions where dependent tasks start before file is on disk
-                        if (verify_target_exists($job->{target}, $job->{dir})) {
+                        # Check if this looks like a phony target (doesn't produce a file)
+                        # Phony targets typically have no extension or are common make targets
+                        my $target = $job->{target};
+                        my $looks_like_file = $target =~ /\.[a-zA-Z0-9]+$/ ||  # has extension
+                                              $target =~ /\// ||                # has path separator
+                                              $target =~ /^lib.*\.a$/ ||        # library file
+                                              $target =~ /^.*\.so(\.\d+)*$/;    # shared library
+
+                        # Common phony targets that don't produce files
+                        my $is_common_phony = $target =~ /^(all|clean|install|test|check|depend|dist|
+                                                            distclean|maintainer-clean|mostlyclean|
+                                                            cmake_check_build_system|help|list|
+                                                            package|preinstall|rebuild_cache|edit_cache)$/x;
+
+                        # Only verify file existence for targets that look like real files
+                        my $should_verify = $looks_like_file && !$is_common_phony;
+
+                        if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                             $completed_targets{$job->{target}} = 1;
                             $in_progress{$job->{target}} = "done";
                             print STDERR "Task $task_id completed successfully: $job->{target}\n";
@@ -4448,7 +4608,7 @@ sub run_job_master {
 
                             # If all dependencies done, complete the composite target
                             if (@{$comp->{deps}} == 0) {
-                                print STDERR "All dependencies complete for composite target '$comp_target'\n";
+                                vprint "All dependencies complete for composite target '$comp_target'\n";
                                 $completed_targets{$comp_target} = 1;
                                 $in_progress{$comp_target} = "done";
                                 if ($comp->{master_socket}) {

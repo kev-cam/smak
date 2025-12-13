@@ -356,6 +356,7 @@ sub run_cli {
 Available commands:
   build <target>      Build the specified target
   rebuild <target>    Rebuild only if tracked files changed (FUSE)
+  start <N>           Start job server with N workers (if not running)
   watch               Monitor file changes from FUSE filesystem
   unwatch             Stop monitoring file changes
   files, f            List tracked file modifications (FUSE)
@@ -493,6 +494,31 @@ HELP
                     print "  $target\n";
                 }
                 print "\nTotal: " . scalar(@targets) . " targets\n";
+            }
+
+        } elsif ($cmd eq 'start') {
+            if (@words == 0) {
+                print "Usage: start <N>  (where N is the number of workers)\n";
+            } else {
+                my $worker_count = $words[0];
+                if ($worker_count !~ /^\d+$/ || $worker_count < 1) {
+                    print "Error: worker count must be a positive integer\n";
+                } elsif (defined $Smak::job_server_socket) {
+                    print "Job server already running with $jobs workers\n";
+                    print "Use 'restart $worker_count' to change worker count\n";
+                } else {
+                    # Start job server
+                    print "Starting job server with $worker_count workers...\n";
+                    $jobs = $worker_count;
+                    set_jobs($jobs);
+                    start_job_server();
+                    if (defined $Smak::job_server_socket) {
+                        print "Job server started (PID $Smak::job_server_pid)\n";
+                        $jobserver_pid = $Smak::job_server_pid;
+                    } else {
+                        print "Failed to start job server\n";
+                    }
+                }
             }
 
         } elsif ($cmd eq 'status' || $cmd eq 'st') {

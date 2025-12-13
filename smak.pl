@@ -537,7 +537,8 @@ if ($silent) {
 set_jobs($jobs);
 
 # Set verbose mode via environment variable so Smak.pm can access it
-$ENV{SMAK_VERBOSE} = $verbose ? '1' : '0';
+# SMAK_DEBUG implies verbose mode
+$ENV{SMAK_VERBOSE} = ($verbose || $ENV{SMAK_DEBUG}) ? '1' : '0';
 
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it

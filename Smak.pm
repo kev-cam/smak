@@ -3310,6 +3310,49 @@ sub run_job_master {
 
     our %worker_env;
 
+    # Helper to check if a file path is relevant to the build
+    sub is_build_relevant {
+        my ($path) = @_;
+
+        # In debug mode, show everything
+        return 1 if $ENV{SMAK_DEBUG};
+
+        # Skip .git files and directories
+        return 0 if $path =~ /\/\.git\//;
+        return 0 if $path =~ /\.git$/;
+
+        # Skip lock files and temp files
+        return 0 if $path =~ /\.lock$/;
+        return 0 if $path =~ /~$/;
+        return 0 if $path =~ /\.tmp$/;
+        return 0 if $path =~ /\.swp$/;
+
+        # Get just the filename (might be absolute path)
+        my $file = $path;
+        $file =~ s{^.*/}{};  # Remove directory path
+
+        # Check if it's a known target or has a rule
+        return 1 if exists $rules{$file};
+        return 1 if exists $targets{$file};
+
+        # Check if it matches any pattern in rules (for wildcards)
+        for my $rule_pattern (keys %rules) {
+            if ($file =~ /$rule_pattern/) {
+                return 1;
+            }
+        }
+
+        # Check common source file extensions
+        return 1 if $path =~ /\.(c|cc|cpp|cxx|C|h|hpp|hxx|H)$/;
+        return 1 if $path =~ /\.(f|f90|f95|F|F90|F95)$/;
+        return 1 if $path =~ /\.(s|S|asm)$/;
+        return 1 if $path =~ /\.(java|py|pl|pm|rb)$/;
+        return 1 if $path =~ /\.(o|a|so|dylib|dll)$/;
+
+        # Default to not showing
+        return 0;
+    }
+
     sub send_env {
 	my ($worker) = @_;
 	
@@ -4319,10 +4362,10 @@ sub run_job_master {
 
                         # Track modification
                         $file_modifications{$path} ||= {workers => [], last_op => time()};
-                        print STDERR "FUSE: $path (inode $inode)\n";
+                        print STDERR "FUSE: $path (inode $inode)\n" if $ENV{SMAK_DEBUG};
 
-                        # Send watch notification if client is watching
-                        if ($watch_client) {
+                        # Send watch notification if client is watching AND file is build-relevant
+                        if ($watch_client && is_build_relevant($path)) {
                             print $watch_client "WATCH:$path\n";
                         }
 
@@ -4343,10 +4386,10 @@ sub run_job_master {
                             push @{$file_modifications{$path}{workers}}, $pid
                                 unless grep { $_ == $pid } @{$file_modifications{$path}{workers}};
                             $file_modifications{$path}{last_op} = time();
-                            print STDERR "FUSE: $op $path by PID $pid\n";
+                            print STDERR "FUSE: $op $path by PID $pid\n" if $ENV{SMAK_DEBUG};
 
-                            # Send watch notification if client is watching
-                            if ($watch_client) {
+                            # Send watch notification if client is watching AND file is build-relevant
+                            if ($watch_client && is_build_relevant($path)) {
                                 print $watch_client "WATCH:$path\n";
                             }
                         }

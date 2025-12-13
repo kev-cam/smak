@@ -322,9 +322,14 @@ sub run_cli {
             last unless defined $notif;
 
             chomp $notif;
-            # Print file change notifications above the prompt
+            # Print file change notifications, clearing line and forcing redisplay
             if ($notif =~ /^WATCH:(.+)$/) {
-                print "\n[File changed: $1]\n";
+                my $changed_file = $1;
+                # Clear current line, print notification, force prompt redisplay
+                print "\r\033[K";  # CR + clear to end of line
+                print "[File changed: $changed_file]\n";
+                # Term::ReadLine will redisplay the prompt automatically
+                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
             } elsif ($notif =~ /^WATCH_STARTED/) {
                 # Initial confirmation, ignore
             } elsif ($notif =~ /^WATCH_/) {

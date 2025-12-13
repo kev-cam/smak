@@ -29,6 +29,7 @@ my $silent = 0;
 my $yes = 0;  # Auto-answer yes to prompts
 my $jobs = 1;  # Number of parallel jobs (default: 1 = sequential)
 my $cli = 0;  # CLI mode (interactive shell)
+my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
 
 # Parse environment variable options first
@@ -51,6 +52,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
         'yes' => \$yes,
         'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
         'cli' => \$cli,
+        'v|verbose' => \$verbose,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -69,6 +71,7 @@ GetOptions(
     'yes' => \$yes,
     'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
     'cli' => \$cli,
+    'v|verbose' => \$verbose,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -532,6 +535,9 @@ if ($silent) {
 
 # Set number of parallel jobs
 set_jobs($jobs);
+
+# Set verbose mode via environment variable so Smak.pm can access it
+$ENV{SMAK_VERBOSE} = $verbose ? '1' : '0';
 
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it

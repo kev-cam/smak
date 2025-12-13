@@ -36,7 +36,7 @@ my ($host, $port) = split(/:/, $server_addr);
 die "Invalid address format. Use host:port\n" unless defined $port;
 
 # Connect to master
-print STDERR "Worker connecting to $host:$port...\n";
+print STDERR "Worker connecting to $host:$port...\n" if $ENV{SMAK_VERBOSE};
 my $socket = IO::Socket::INET->new(
     PeerHost => $host,
     PeerPort => $port,
@@ -45,7 +45,7 @@ my $socket = IO::Socket::INET->new(
 ) or die "Cannot connect to master at $host:$port: $!\n";
 
 $socket->autoflush(1);
-print STDERR "Worker connected to master\n";
+print STDERR "Worker connected to master\n" if $ENV{SMAK_VERBOSE};
 
 # Send ready signal
 print $socket "READY\n";
@@ -108,7 +108,7 @@ while (my $line = <$socket>) {
         next;
     } elsif ($line eq 'ENV_END') {
         $env_done = 1;
-        print STDERR "Worker received environment\n";
+        print STDERR "Worker received environment\n" if $ENV{SMAK_VERBOSE};
         last;
     } elsif ($line =~ /^ENV (\w+)=(.*)$/) {
         # Set environment variable

@@ -3866,7 +3866,14 @@ sub run_job_master {
 
     # Main event loop
     my $last_consistency_check = time();
+    my $jobs_received = 0;  # Track if we've received any job submissions
     while (1) {
+        # Check if all work is complete (only after we've received jobs)
+        if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0) {
+            print STDERR "All jobs complete. Job-master exiting.\n";
+            last;
+        }
+
         my @ready = $select->can_read(0.1);
 
         # Periodic consistency check - run every 2 seconds
@@ -4021,6 +4028,7 @@ sub run_job_master {
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
                     print STDERR "Received job request for target: $target\n";
+                    $jobs_received = 1;  # Mark that we've received at least one job
 
                     # Lookup dependencies using the key format "makefile\ttarget"
                     my $key = "$makefile\t$target";

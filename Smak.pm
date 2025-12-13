@@ -3770,7 +3770,21 @@ sub run_job_master {
 
                         # Check if dependency is completed or exists as file (relative to job dir)
                         my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$job->{dir}/$single_dep";
-                        unless ($completed_targets{$single_dep} || -e $dep_path) {
+
+                        # If the dependency was recently completed, verify it actually exists on disk
+                        # to avoid race conditions where the file isn't visible yet due to filesystem buffering
+                        if ($completed_targets{$single_dep}) {
+                            # Target was built, verify it exists with retries
+                            unless (verify_target_exists($single_dep, $job->{dir})) {
+                                $deps_satisfied = 0;
+                                print STDERR "Job '$target' waiting for dependency '$single_dep' (completed but not yet visible)\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            }
+                        } elsif (-e $dep_path) {
+                            # File exists on disk (pre-existing source file)
+                            # OK to proceed
+                        } else {
+                            # Dependency not completed and doesn't exist
                             $deps_satisfied = 0;
                             print STDERR "Job '$target' waiting for dependency '$single_dep' (checked: $dep_path)\n" if $ENV{SMAK_DEBUG};
                             last;

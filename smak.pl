@@ -370,7 +370,9 @@ Available commands:
   start <N>           Start job server with N workers (if not running)
   watch               Monitor file changes from FUSE filesystem
   unwatch             Stop monitoring file changes
+  wheel               Toggle spinning wheel mode on/off
   stale               Show targets that need rebuilding (FUSE)
+  needs <file>        Show which targets depend on a file
   files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   tasks, t            List pending and active tasks
@@ -445,6 +447,24 @@ HELP
                 print "Job server not running.\n";
             }
 
+        } elsif ($cmd eq 'wheel') {
+            # Toggle wheel mode
+            if ($ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} eq 'w') {
+                $ENV{SMAK_VERBOSE} = '1';
+                # Send environment update to job-master
+                if (defined $Smak::job_server_socket) {
+                    print $Smak::job_server_socket "ENV SMAK_VERBOSE=1\n";
+                }
+                print "Wheel mode disabled (verbose output enabled)\n";
+            } else {
+                $ENV{SMAK_VERBOSE} = 'w';
+                # Send environment update to job-master
+                if (defined $Smak::job_server_socket) {
+                    print $Smak::job_server_socket "ENV SMAK_VERBOSE=w\n";
+                }
+                print "Wheel mode enabled (spinning wheel active)\n";
+            }
+
         } elsif ($cmd eq 'files' || $cmd eq 'f') {
             if (defined $Smak::job_server_socket) {
                 # Request file list from job-master
@@ -478,6 +498,43 @@ HELP
                 } else {
                     my $target_label = $count == 1 ? "target" : "targets";
                     print "\n$count $target_label need rebuilding\n";
+                }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'needs') {
+            if (@words == 0) {
+                print "Usage: needs <file>\n";
+            } elsif (defined $Smak::job_server_socket) {
+                my $file = $words[0];
+                # Request targets that depend on this file
+                print $Smak::job_server_socket "NEEDS:$file\n";
+                $Smak::job_server_socket->flush();
+
+                # Wait for response with timeout protection
+                my $count = 0;
+                my $got_end = 0;
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    if ($response eq 'NEEDS_END') {
+                        $got_end = 1;
+                        last;
+                    }
+                    if ($response =~ /^NEEDS:(.+)$/) {
+                        print "  $1\n";
+                        $count++;
+                    }
+                }
+
+                # Check if we got a proper response
+                unless ($got_end) {
+                    print "Error: Job server connection lost\n";
+                } elsif ($count == 0) {
+                    print "No targets depend on '$file'\n";
+                } else {
+                    my $target_label = $count == 1 ? "target depends" : "targets depend";
+                    print "\n$count $target_label on '$file'\n";
                 }
             } else {
                 print "Job server not running. Use 'start' to enable.\n";
@@ -682,12 +739,12 @@ if ($silent) {
 set_jobs($jobs);
 
 # Set verbose mode via environment variable so Smak.pm can access it
-# SMAK_DEBUG implies verbose mode, -cli defaults to wheel mode
+# SMAK_DEBUG implies verbose mode, -cli defaults to verbose (mimic make)
 if ($verbose || $ENV{SMAK_DEBUG}) {
     $ENV{SMAK_VERBOSE} = '1';
 } elsif ($cli) {
-    # CLI mode defaults to wheel mode
-    $ENV{SMAK_VERBOSE} = 'w';
+    # CLI mode defaults to verbose mode (print commands like make)
+    $ENV{SMAK_VERBOSE} = '1';
 } else {
     $ENV{SMAK_VERBOSE} = '0';
 }

@@ -223,7 +223,7 @@ sub submit_job {
     return unless $job_server_socket;  # No job server
 
     if ($in_progress{$target}) {
-	warn "In progress: $target\n";
+	warn "In progress: $target\n" if $ENV{SMAK_DEBUG};
 	return;
     }
 
@@ -3973,7 +3973,7 @@ sub run_job_master {
                         if (exists $running_jobs{$task_id}) {
                             $running_jobs{$task_id}{started} = 1;
                         }
-                        print STDERR "Task $task_id started\n";
+                        print STDERR "Task $task_id started\n" if $ENV{SMAK_DEBUG};
 
                     } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
                         my ($task_id, $exit_code) = ($1, $2);
@@ -4002,7 +4002,7 @@ sub run_job_master {
                             if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                                 $completed_targets{$job->{target}} = 1;
                                 $in_progress{$job->{target}} = "done";
-                                print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                                print STDERR "Task $task_id completed successfully: $job->{target}\n" if $ENV{SMAK_DEBUG};
                             } else {
                                 # File doesn't exist even after retries - treat as failure
                                 $in_progress{$job->{target}} = "failed";
@@ -4130,21 +4130,21 @@ sub run_job_master {
                     if (exists $fixed_deps{$key}) {
                         @deps = @{$fixed_deps{$key} || []};
                         $rule = $fixed_rule{$key} || '';
-                        print STDERR "DEBUG: Found '$target' in fixed_deps\n";
+                        print STDERR "DEBUG: Found '$target' in fixed_deps\n" if $ENV{SMAK_DEBUG};
                     } elsif (exists $pattern_deps{$key}) {
                         @deps = @{$pattern_deps{$key} || []};
                         $rule = $pattern_rule{$key} || '';
-                        print STDERR "DEBUG: Found '$target' in pattern_deps\n";
+                        print STDERR "DEBUG: Found '$target' in pattern_deps\n" if $ENV{SMAK_DEBUG};
                     } elsif (exists $pseudo_deps{$key}) {
                         @deps = @{$pseudo_deps{$key} || []};
                         $rule = $pseudo_rule{$key} || '';
-                        print STDERR "DEBUG: Found '$target' in pseudo_deps\n";
+                        print STDERR "DEBUG: Found '$target' in pseudo_deps\n" if $ENV{SMAK_DEBUG};
                     } else {
-                        print STDERR "DEBUG: '$target' NOT found in any dependency tables\n";
+                        print STDERR "DEBUG: '$target' NOT found in any dependency tables\n" if $ENV{SMAK_DEBUG};
                     }
 
-                    print STDERR "DEBUG: Target '$target' has " . scalar(@deps) . " dependencies\n";
-                    print STDERR "DEBUG: Dependencies: " . join(', ', @deps) . "\n" if @deps;
+                    print STDERR "DEBUG: Target '$target' has " . scalar(@deps) . " dependencies\n" if $ENV{SMAK_DEBUG};
+                    print STDERR "DEBUG: Dependencies: " . join(', ', @deps) . "\n" if $ENV{SMAK_DEBUG} && @deps;
 
                     # Use recursive queuing to handle dependencies
                     queue_target_recursive($target, $dir, $master_socket);
@@ -4266,20 +4266,62 @@ sub run_job_master {
                     # List targets that need rebuilding based on tracked modifications
                     my %stale_targets;
 
+                    # Get current working directory to create relative paths
+                    my $cwd = abs_path('.');
+
                     # For each modified file, find targets that depend on it
                     for my $modified_file (keys %file_modifications) {
-                        # Extract just the filename
-                        my $file = $modified_file;
-                        $file =~ s{^.*/}{};
+                        # Try multiple path variations for matching
+                        my @path_variations;
 
-                        # Check all rules to see which targets depend on this file
-                        for my $target (keys %rules) {
-                            my $rule_info = $rules{$target};
-                            my $deps = $rule_info->{deps} || '';
+                        # Original path
+                        push @path_variations, $modified_file;
 
-                            # Check if this file is a dependency
-                            if ($deps =~ /\b\Q$file\E\b/ || $deps =~ /\Q$modified_file\E/) {
-                                $stale_targets{$target} = 1;
+                        # Just filename
+                        my $basename = $modified_file;
+                        $basename =~ s{^.*/}{};
+                        push @path_variations, $basename;
+
+                        # Relative to CWD
+                        if ($modified_file =~ /^\Q$cwd\E\/(.+)$/) {
+                            push @path_variations, $1;
+                        }
+
+                        # Check all dependency hashes for this file
+                        for my $target (keys %fixed_deps) {
+                            my $deps_str = $fixed_deps{$target};
+                            next unless defined $deps_str;
+
+                            # Split dependencies and check each one
+                            my @deps = split(/\s+/, $deps_str);
+                            for my $dep (@deps) {
+                                for my $path_var (@path_variations) {
+                                    if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
+                                        $stale_targets{$target} = 1;
+                                        last;
+                                    }
+                                }
+                            }
+                        }
+
+                        # Also check pattern deps
+                        for my $pattern (keys %pattern_deps) {
+                            my $deps_str = $pattern_deps{$pattern};
+                            next unless defined $deps_str;
+
+                            my @deps = split(/\s+/, $deps_str);
+                            for my $dep (@deps) {
+                                for my $path_var (@path_variations) {
+                                    if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
+                                        # Find targets matching this pattern
+                                        for my $target (keys %fixed_deps) {
+                                            if ($target =~ /$pattern/) {
+                                                $stale_targets{$target} = 1;
+                                            }
+                                        }
+                                        last;
+                                    }
+                                }
                             }
                         }
                     }
@@ -4289,6 +4331,86 @@ sub run_job_master {
                         print $master_socket "STALE:$target\n";
                     }
                     print $master_socket "STALE_END\n";
+
+                } elsif ($line =~ /^NEEDS:(.+)$/) {
+                    # Show which targets depend on a specific file
+                    # Wrap in eval to catch any errors
+                    eval {
+                        my $query_file = $1;
+                        my %matching_targets;
+
+                        # Get current working directory for relative path handling
+                        my $cwd = abs_path('.') || '.';
+
+                        # Generate path variations for the query file
+                        my @path_variations;
+                        push @path_variations, $query_file;
+
+                        # Add absolute path if query is relative
+                        if ($query_file !~ /^\//) {
+                            push @path_variations, "$cwd/$query_file";
+                        }
+
+                        # Add just basename
+                        my $basename = $query_file;
+                        $basename =~ s{^.*/}{};
+                        push @path_variations, $basename unless $basename eq $query_file;
+
+                        # Check all dependency hashes
+                        if (%fixed_deps) {
+                            for my $target (keys %fixed_deps) {
+                                my $deps_str = $fixed_deps{$target};
+                                next unless defined $deps_str;
+
+                                # Split dependencies and check each one
+                                my @deps = split(/\s+/, $deps_str);
+                                for my $dep (@deps) {
+                                    next unless defined $dep && $dep ne '';
+                                    for my $path_var (@path_variations) {
+                                        if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
+                                            $matching_targets{$target} = 1;
+                                            last;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        # Also check pattern deps
+                        if (%pattern_deps) {
+                            for my $pattern (keys %pattern_deps) {
+                                my $deps_str = $pattern_deps{$pattern};
+                                next unless defined $deps_str;
+
+                                my @deps = split(/\s+/, $deps_str);
+                                for my $dep (@deps) {
+                                    next unless defined $dep && $dep ne '';
+                                    for my $path_var (@path_variations) {
+                                        if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
+                                            # Find targets matching this pattern
+                                            for my $target (keys %fixed_deps) {
+                                                if ($target =~ /$pattern/) {
+                                                    $matching_targets{$target} = 1;
+                                                }
+                                            }
+                                            last;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        # Send matching targets
+                        for my $target (sort keys %matching_targets) {
+                            print $master_socket "NEEDS:$target\n";
+                        }
+                    };
+                    if ($@) {
+                        print STDERR "Error processing NEEDS request: $@\n" if $ENV{SMAK_DEBUG};
+                    }
+                    # Always send end marker even if there was an error
+                    print $master_socket "NEEDS_END\n";
+                    $master_socket->flush();
 
                 } elsif ($line =~ /^WATCH_START$/) {
                     # Enable watch mode - send file change notifications to this client
@@ -4309,6 +4431,21 @@ sub run_job_master {
                     } else {
                         print $master_socket "WATCH_NOT_ACTIVE\n";
                     }
+
+                } elsif ($line =~ /^ENV (\w+)=(.*)$/) {
+                    # Update environment variable in job-master and workers
+                    my ($var, $value) = ($1, $2);
+                    $ENV{$var} = $value;
+                    $worker_env{$var} = $value;
+
+                    # Send update to all connected workers
+                    for my $worker (@workers) {
+                        print $worker "ENV_START\n";
+                        print $worker "ENV $var=$value\n";
+                        print $worker "ENV_END\n";
+                    }
+
+                    print STDERR "Updated environment: $var=$value\n" if $ENV{SMAK_DEBUG};
                 }
 
             } elsif ($socket == $worker_server) {
@@ -4458,7 +4595,7 @@ sub run_job_master {
                     if (exists $running_jobs{$task_id}) {
                         $running_jobs{$task_id}{started} = 1;
                     }
-                    print STDERR "Task $task_id started\n";
+                    print STDERR "Task $task_id started\n" if $ENV{SMAK_DEBUG};
 
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
@@ -4588,7 +4725,7 @@ sub run_job_master {
                         if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                             $completed_targets{$job->{target}} = 1;
                             $in_progress{$job->{target}} = "done";
-                            print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                            print STDERR "Task $task_id completed successfully: $job->{target}\n" if $ENV{SMAK_DEBUG};
                         } else {
                             # File doesn't exist even after retries - treat as failure
                             $in_progress{$job->{target}} = "failed";

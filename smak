@@ -40,5 +40,19 @@ export SMAK_LAUNCHER="$SCRIPT_DIR/$script"
 
 export PERLLIB="$SCRIPT_DIR"
 
-# Execute the Perl script with all arguments passed through
-exec perl ${SMAK_PERL_DEBUG} "$SCRIPT_DIR/$script.pl" "$@"
+# Translate GNU Make-style compact options to Perl-friendly long form
+# E.g., "-j4" -> "-j 4"
+declare -a perl_args
+for arg in "$@"; do
+    # Check if argument matches -jN pattern (where N is a number)
+    if [[ "$arg" =~ ^-j([0-9]+)$ ]]; then
+        # Split into "-j" and the number
+        perl_args+=("-j" "${BASH_REMATCH[1]}")
+    else
+        # Pass through as-is
+        perl_args+=("$arg")
+    fi
+done
+
+# Execute the Perl script with translated arguments
+exec perl ${SMAK_PERL_DEBUG} "$SCRIPT_DIR/$script.pl" "${perl_args[@]}"

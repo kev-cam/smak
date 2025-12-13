@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
-use Getopt::Long qw(:config bundling);
+use Getopt::Long;
 use FindBin qw($RealBin);
 use File::Path qw(make_path);
 use POSIX qw(strftime);

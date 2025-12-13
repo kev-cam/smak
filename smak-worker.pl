@@ -73,12 +73,8 @@ sub get_task {
     $command = $1;
 
     if ($env_set) {
-	# Execute command
-	if ($ENV{SMAK_DEBUG}) {
-	    print STDERR "Worker executing task $task_id: $command\n";
-	} else {
-	    print STDERR "$command\n" if $ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} ne 'w';
-	}
+	# Execute command - just show the command without the task ID prefix
+	print STDERR "$command\n" if $ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} ne 'w';
 	
 	# Change to directory
 	$old_dir = `pwd`;

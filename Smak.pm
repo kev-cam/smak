@@ -4124,21 +4124,21 @@ sub run_job_master {
                     if (exists $fixed_deps{$key}) {
                         @deps = @{$fixed_deps{$key} || []};
                         $rule = $fixed_rule{$key} || '';
-                        print STDERR "DEBUG: Found '$target' in fixed_deps\n";
+                        print STDERR "DEBUG: Found '$target' in fixed_deps\n" if $ENV{SMAK_DEBUG};
                     } elsif (exists $pattern_deps{$key}) {
                         @deps = @{$pattern_deps{$key} || []};
                         $rule = $pattern_rule{$key} || '';
-                        print STDERR "DEBUG: Found '$target' in pattern_deps\n";
+                        print STDERR "DEBUG: Found '$target' in pattern_deps\n" if $ENV{SMAK_DEBUG};
                     } elsif (exists $pseudo_deps{$key}) {
                         @deps = @{$pseudo_deps{$key} || []};
                         $rule = $pseudo_rule{$key} || '';
-                        print STDERR "DEBUG: Found '$target' in pseudo_deps\n";
+                        print STDERR "DEBUG: Found '$target' in pseudo_deps\n" if $ENV{SMAK_DEBUG};
                     } else {
-                        print STDERR "DEBUG: '$target' NOT found in any dependency tables\n";
+                        print STDERR "DEBUG: '$target' NOT found in any dependency tables\n" if $ENV{SMAK_DEBUG};
                     }
 
-                    print STDERR "DEBUG: Target '$target' has " . scalar(@deps) . " dependencies\n";
-                    print STDERR "DEBUG: Dependencies: " . join(', ', @deps) . "\n" if @deps;
+                    print STDERR "DEBUG: Target '$target' has " . scalar(@deps) . " dependencies\n" if $ENV{SMAK_DEBUG};
+                    print STDERR "DEBUG: Dependencies: " . join(', ', @deps) . "\n" if $ENV{SMAK_DEBUG} && @deps;
 
                     # Use recursive queuing to handle dependencies
                     queue_target_recursive($target, $dir, $master_socket);

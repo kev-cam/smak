@@ -4260,20 +4260,62 @@ sub run_job_master {
                     # List targets that need rebuilding based on tracked modifications
                     my %stale_targets;
 
+                    # Get current working directory to create relative paths
+                    my $cwd = abs_path('.');
+
                     # For each modified file, find targets that depend on it
                     for my $modified_file (keys %file_modifications) {
-                        # Extract just the filename
-                        my $file = $modified_file;
-                        $file =~ s{^.*/}{};
+                        # Try multiple path variations for matching
+                        my @path_variations;
 
-                        # Check all rules to see which targets depend on this file
-                        for my $target (keys %rules) {
-                            my $rule_info = $rules{$target};
-                            my $deps = $rule_info->{deps} || '';
+                        # Original path
+                        push @path_variations, $modified_file;
 
-                            # Check if this file is a dependency
-                            if ($deps =~ /\b\Q$file\E\b/ || $deps =~ /\Q$modified_file\E/) {
-                                $stale_targets{$target} = 1;
+                        # Just filename
+                        my $basename = $modified_file;
+                        $basename =~ s{^.*/}{};
+                        push @path_variations, $basename;
+
+                        # Relative to CWD
+                        if ($modified_file =~ /^\Q$cwd\E\/(.+)$/) {
+                            push @path_variations, $1;
+                        }
+
+                        # Check all dependency hashes for this file
+                        for my $target (keys %fixed_deps) {
+                            my $deps_str = $fixed_deps{$target};
+                            next unless defined $deps_str;
+
+                            # Split dependencies and check each one
+                            my @deps = split(/\s+/, $deps_str);
+                            for my $dep (@deps) {
+                                for my $path_var (@path_variations) {
+                                    if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
+                                        $stale_targets{$target} = 1;
+                                        last;
+                                    }
+                                }
+                            }
+                        }
+
+                        # Also check pattern deps
+                        for my $pattern (keys %pattern_deps) {
+                            my $deps_str = $pattern_deps{$pattern};
+                            next unless defined $deps_str;
+
+                            my @deps = split(/\s+/, $deps_str);
+                            for my $dep (@deps) {
+                                for my $path_var (@path_variations) {
+                                    if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
+                                        # Find targets matching this pattern
+                                        for my $target (keys %fixed_deps) {
+                                            if ($target =~ /$pattern/) {
+                                                $stale_targets{$target} = 1;
+                                            }
+                                        }
+                                        last;
+                                    }
+                                }
                             }
                         }
                     }

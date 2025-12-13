@@ -5,6 +5,6 @@ case $0 in
 esac
 
 git rm -fr test/failures/*-*-*
-rm     -fr test/failures/*-*-*
+rm     -fr test/failures/*-*-* test/test-{0,1,2,3,4,5,6,7,8,9}*
 
 git commit -m "Purged tests."

@@ -3501,6 +3501,9 @@ sub run_job_master {
         # Check if already completed
         return 1 if exists $completed_targets{$target};
 
+        # Check if in progress (includes queued, running, and pending composite targets)
+        return 1 if exists $in_progress{$target};
+
         # Check if already in queue
         for my $job (@job_queue) {
             return 1 if $job->{target} eq $target;
@@ -3780,11 +3783,18 @@ sub run_job_master {
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
                         if ($completed_targets{$single_dep}) {
-                            # Target was built, verify it exists with retries
-                            unless (verify_target_exists($single_dep, $job->{dir})) {
-                                $deps_satisfied = 0;
-                                print STDERR "Job '$target' waiting for dependency '$single_dep' (completed but not yet visible)\n" if $ENV{SMAK_DEBUG};
-                                last;
+                            # First check if file exists - fast path
+                            if (-e $dep_path) {
+                                # File exists, dependency satisfied
+                            } elsif (exists $pending_composite{$single_dep}) {
+                                # Composite target (phony/aggregator), no file needed
+                            } else {
+                                # Target marked complete but file not visible - verify with retries
+                                unless (verify_target_exists($single_dep, $job->{dir})) {
+                                    $deps_satisfied = 0;
+                                    print STDERR "Job '$target' waiting for dependency '$single_dep' (completed but not yet visible)\n" if $ENV{SMAK_DEBUG};
+                                    last;
+                                }
                             }
                         } elsif (-e $dep_path) {
                             # File exists on disk (pre-existing source file)
@@ -3862,7 +3872,14 @@ sub run_job_master {
 
     # Main event loop
     my $last_consistency_check = time();
+    my $jobs_received = 0;  # Track if we've received any job submissions
     while (1) {
+        # Check if all work is complete (only after we've received jobs)
+        if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0) {
+            print STDERR "All jobs complete. Job-master exiting.\n";
+            last;
+        }
+
         my @ready = $select->can_read(0.1);
 
         # Periodic consistency check - run every 2 seconds
@@ -4017,6 +4034,7 @@ sub run_job_master {
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
                     print STDERR "Received job request for target: $target\n";
+                    $jobs_received = 1;  # Mark that we've received at least one job
 
                     # Lookup dependencies using the key format "makefile\ttarget"
                     my $key = "$makefile\t$target";

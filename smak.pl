@@ -371,6 +371,7 @@ Available commands:
   watch               Monitor file changes from FUSE filesystem
   unwatch             Stop monitoring file changes
   stale               Show targets that need rebuilding (FUSE)
+  needs <file>        Show which targets depend on a file
   files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   tasks, t            List pending and active tasks
@@ -478,6 +479,33 @@ HELP
                 } else {
                     my $target_label = $count == 1 ? "target" : "targets";
                     print "\n$count $target_label need rebuilding\n";
+                }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'needs') {
+            if (@words == 0) {
+                print "Usage: needs <file>\n";
+            } elsif (defined $Smak::job_server_socket) {
+                my $file = $words[0];
+                # Request targets that depend on this file
+                print $Smak::job_server_socket "NEEDS:$file\n";
+                # Wait for response
+                my $count = 0;
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'NEEDS_END';
+                    if ($response =~ /^NEEDS:(.+)$/) {
+                        print "  $1\n";
+                        $count++;
+                    }
+                }
+                if ($count == 0) {
+                    print "No targets depend on '$file'\n";
+                } else {
+                    my $target_label = $count == 1 ? "target depends" : "targets depend";
+                    print "\n$count $target_label on '$file'\n";
                 }
             } else {
                 print "Job server not running. Use 'start' to enable.\n";

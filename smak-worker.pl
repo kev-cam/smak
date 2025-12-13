@@ -72,9 +72,13 @@ sub get_task {
     die "Expected CMD line, got: $cmd_line\n" unless $cmd_line =~ /^CMD (.*)$/;
     $command = $1;
 
-    if ($env_set) {    
+    if ($env_set) {
 	# Execute command
-	print STDERR "Worker executing task $task_id: $command\n";
+	if ($ENV{SMAK_DEBUG}) {
+	    print STDERR "Worker executing task $task_id: $command\n";
+	} else {
+	    print STDERR "$command\n" if $ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} ne 'w';
+	}
 	
 	# Change to directory
 	$old_dir = `pwd`;
@@ -268,6 +272,6 @@ while (my $line = <$socket>) {
 }
 
 # Connection closed
-print STDERR "Worker disconnected from master\n";
+print STDERR "Worker disconnected from master\n" if $ENV{SMAK_DEBUG};
 close($socket);
 exit 0;

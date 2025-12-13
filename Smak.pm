@@ -223,7 +223,7 @@ sub submit_job {
     return unless $job_server_socket;  # No job server
 
     if ($in_progress{$target}) {
-	warn "In progress: $target\n";
+	warn "In progress: $target\n" if $ENV{SMAK_DEBUG};
 	return;
     }
 
@@ -3967,7 +3967,7 @@ sub run_job_master {
                         if (exists $running_jobs{$task_id}) {
                             $running_jobs{$task_id}{started} = 1;
                         }
-                        print STDERR "Task $task_id started\n";
+                        print STDERR "Task $task_id started\n" if $ENV{SMAK_DEBUG};
 
                     } elsif ($line =~ /^TASK_END (\d+) (\d+)$/) {
                         my ($task_id, $exit_code) = ($1, $2);
@@ -3996,7 +3996,7 @@ sub run_job_master {
                             if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                                 $completed_targets{$job->{target}} = 1;
                                 $in_progress{$job->{target}} = "done";
-                                print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                                print STDERR "Task $task_id completed successfully: $job->{target}\n" if $ENV{SMAK_DEBUG};
                             } else {
                                 # File doesn't exist even after retries - treat as failure
                                 $in_progress{$job->{target}} = "failed";
@@ -4574,7 +4574,7 @@ sub run_job_master {
                     if (exists $running_jobs{$task_id}) {
                         $running_jobs{$task_id}{started} = 1;
                     }
-                    print STDERR "Task $task_id started\n";
+                    print STDERR "Task $task_id started\n" if $ENV{SMAK_DEBUG};
 
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
@@ -4704,7 +4704,7 @@ sub run_job_master {
                         if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                             $completed_targets{$job->{target}} = 1;
                             $in_progress{$job->{target}} = "done";
-                            print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                            print STDERR "Task $task_id completed successfully: $job->{target}\n" if $ENV{SMAK_DEBUG};
                         } else {
                             # File doesn't exist even after retries - treat as failure
                             $in_progress{$job->{target}} = "failed";

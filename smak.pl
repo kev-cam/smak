@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
-use Getopt::Long qw(:config bundling);
+use Getopt::Long qw(:config);
 use FindBin qw($RealBin);
 use File::Path qw(make_path);
 use POSIX qw(strftime);
@@ -29,6 +29,7 @@ my $silent = 0;
 my $yes = 0;  # Auto-answer yes to prompts
 my $jobs = 1;  # Number of parallel jobs (default: 1 = sequential)
 my $cli = 0;  # CLI mode (interactive shell)
+my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
 
 # Parse environment variable options first
@@ -51,6 +52,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
         'yes' => \$yes,
         'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
         'cli' => \$cli,
+        'v|verbose' => \$verbose,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -69,6 +71,7 @@ GetOptions(
     'yes' => \$yes,
     'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
     'cli' => \$cli,
+    'v|verbose' => \$verbose,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -302,8 +305,45 @@ sub run_cli {
 
     my $term = Term::ReadLine->new($prompt);
 
+    # Track watch mode state
+    my $watch_enabled = 0;
+
+    # Helper to check for watch notifications from job server
+    my $check_notifications = sub {
+        return unless $watch_enabled && defined $Smak::job_server_socket;
+
+        # Use IO::Select to check if data is available (non-blocking)
+        use IO::Select;
+        my $select = IO::Select->new($Smak::job_server_socket);
+
+        # Check if data is available (0 second timeout = non-blocking)
+        while ($select->can_read(0)) {
+            my $notif = <$Smak::job_server_socket>;
+            last unless defined $notif;
+
+            chomp $notif;
+            # Print file change notifications, clearing line and forcing redisplay
+            if ($notif =~ /^WATCH:(.+)$/) {
+                my $changed_file = $1;
+                # Clear current line, print notification, force prompt redisplay
+                print "\r\033[K";  # CR + clear to end of line
+                print "[File changed: $changed_file]\n";
+                # Term::ReadLine will redisplay the prompt automatically
+                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+            } elsif ($notif =~ /^WATCH_STARTED/) {
+                # Initial confirmation, ignore
+            } elsif ($notif =~ /^WATCH_/) {
+                # Other control messages
+                last;
+            }
+        }
+    };
+
     my $line;
     while (defined($line = $term->readline($prompt))) {
+        # Check for file change notifications before processing command
+        $check_notifications->();
+
         chomp $line;
         $line =~ s/^\s+|\s+$//g;  # Trim whitespace
 
@@ -326,6 +366,13 @@ sub run_cli {
             print <<'HELP';
 Available commands:
   build <target>      Build the specified target
+  rebuild <target>    Rebuild only if tracked files changed (FUSE)
+  start <N>           Start job server with N workers (if not running)
+  watch               Monitor file changes from FUSE filesystem
+  unwatch             Stop monitoring file changes
+  stale               Show targets that need rebuilding (FUSE)
+  needs <file>        Show which targets depend on a file
+  files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   tasks, t            List pending and active tasks
   status              Show job server status (if parallel builds enabled)
@@ -379,6 +426,120 @@ HELP
                 }
             }
 
+        } elsif ($cmd eq 'watch' || $cmd eq 'w') {
+            if (defined $Smak::job_server_socket) {
+                # Enable watch mode - job-master will send file change notifications
+                print $Smak::job_server_socket "WATCH_START\n";
+                $watch_enabled = 1;
+                print "Watch mode enabled (FUSE file change notifications active)\n";
+            } else {
+                print "Job server not running. Use 'start' to enable job server.\n";
+            }
+
+        } elsif ($cmd eq 'unwatch') {
+            if (defined $Smak::job_server_socket) {
+                # Disable watch mode
+                print $Smak::job_server_socket "WATCH_STOP\n";
+                $watch_enabled = 0;
+                print "Watch mode disabled\n";
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'files' || $cmd eq 'f') {
+            if (defined $Smak::job_server_socket) {
+                # Request file list from job-master
+                print $Smak::job_server_socket "LIST_FILES\n";
+                # Wait for response
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'FILES_END';
+                    print "$response\n";
+                }
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'stale') {
+            if (defined $Smak::job_server_socket) {
+                # Request list of stale targets from job-master
+                print $Smak::job_server_socket "LIST_STALE\n";
+                # Wait for response
+                my $count = 0;
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'STALE_END';
+                    if ($response =~ /^STALE:(.+)$/) {
+                        print "  $1\n";
+                        $count++;
+                    }
+                }
+                if ($count == 0) {
+                    print "No stale targets (nothing needs rebuilding)\n";
+                } else {
+                    my $target_label = $count == 1 ? "target" : "targets";
+                    print "\n$count $target_label need rebuilding\n";
+                }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'needs') {
+            if (@words == 0) {
+                print "Usage: needs <file>\n";
+            } elsif (defined $Smak::job_server_socket) {
+                my $file = $words[0];
+                # Request targets that depend on this file
+                print $Smak::job_server_socket "NEEDS:$file\n";
+                $Smak::job_server_socket->flush();
+
+                # Wait for response with timeout protection
+                my $count = 0;
+                my $got_end = 0;
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    if ($response eq 'NEEDS_END') {
+                        $got_end = 1;
+                        last;
+                    }
+                    if ($response =~ /^NEEDS:(.+)$/) {
+                        print "  $1\n";
+                        $count++;
+                    }
+                }
+
+                # Check if we got a proper response
+                unless ($got_end) {
+                    print "Error: Job server connection lost\n";
+                } elsif ($count == 0) {
+                    print "No targets depend on '$file'\n";
+                } else {
+                    my $target_label = $count == 1 ? "target depends" : "targets depend";
+                    print "\n$count $target_label on '$file'\n";
+                }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'rebuild' || $cmd eq 'rb') {
+            if (@words == 0) {
+                print "Usage: rebuild <target>\n";
+            } else {
+                my $target = $words[0];
+                if (defined $Smak::job_server_socket) {
+                    # Send rebuild request - only rebuilds if files changed
+                    print "Checking if rebuild needed for: $target\n";
+                    eval { build_target($target); };
+                    if ($@) {
+                        print "Rebuild failed: $@\n";
+                    } else {
+                        print "Rebuild complete.\n";
+                    }
+                } else {
+                    print "Job server not running (rebuild requires FUSE monitoring). Use 'start' to enable.\n";
+                }
+            }
+
         } elsif ($cmd eq 'list' || $cmd eq 'ls' || $cmd eq 'l') {
             my $pattern = @words > 0 ? $words[0] : '';
             my @targets = list_targets($pattern);
@@ -393,20 +554,44 @@ HELP
                 print "\nTotal: " . scalar(@targets) . " targets\n";
             }
 
+        } elsif ($cmd eq 'start') {
+            # Default to 1 worker if no count specified
+            my $worker_count = (@words > 0) ? $words[0] : 1;
+
+            if ($worker_count !~ /^\d+$/ || $worker_count < 1) {
+                print "Error: worker count must be a positive integer\n";
+            } elsif (defined $Smak::job_server_socket) {
+                print "Job server already running with $jobs workers\n";
+                print "Use 'restart $worker_count' to change worker count\n";
+            } else {
+                # Start job server
+                my $worker_label = $worker_count == 1 ? "worker" : "workers";
+                print "Starting job server with $worker_count $worker_label...\n";
+                $jobs = $worker_count;
+                set_jobs($jobs);
+                start_job_server();
+                if (defined $Smak::job_server_socket) {
+                    print "Job server started (PID $Smak::job_server_pid)\n";
+                    $jobserver_pid = $Smak::job_server_pid;
+                } else {
+                    print "Failed to start job server\n";
+                }
+            }
+
+
         } elsif ($cmd eq 'status' || $cmd eq 'st') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 # Request status from job-master
-                print "Job server running with $jobs workers (PID $Smak::job_server_pid)\n";
+                my $worker_label = $jobs == 1 ? "worker" : "workers";
+                print "Job server running with $jobs $worker_label (PID $Smak::job_server_pid)\n";
                 # Could send STATUS request to job-master here
                 if ($Smak::job_server_master_port) {
                     print "Use: smak-attach -pid $Smak::job_server_pid:$Smak::job_server_master_port\n";
                 } else {
                     print "Use: smak-attach -pid $Smak::job_server_pid\n";
                 }
-            } elsif ($jobs > 1) {
-                print "Job server configured for $jobs jobs but not currently active\n";
             } else {
-                print "Sequential mode (no job server)\n";
+                print "Job server not running. Use 'start' to enable.\n";
             }
 
         } elsif ($cmd eq 'vars' || $cmd eq 'v') {
@@ -433,7 +618,7 @@ HELP
             }
 
         } elsif ($cmd eq 'tasks' || $cmd eq 't') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 # Request task list from job-master
                 print $Smak::job_server_socket "LIST_TASKS\n";
                 # Wait for response
@@ -449,7 +634,7 @@ HELP
         } elsif ($cmd eq 'server-cli') {
 	    server_cli($Smak::job_server_pid,$Smak::job_server_socket,$prompt,$term);
         } elsif ($cmd eq 'kill') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 print "Killing all workers...\n";
                 print $Smak::job_server_socket "KILL_WORKERS\n";
                 # Wait for response
@@ -461,9 +646,10 @@ HELP
             }
 
         } elsif ($cmd eq 'restart') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 my $count = @words > 0 ? $words[0] : $jobs;
-                print "Restarting workers ($count workers)...\n";
+                my $worker_label = $count == 1 ? "worker" : "workers";
+                print "Restarting workers ($count $worker_label)...\n";
                 print $Smak::job_server_socket "RESTART_WORKERS $count\n";
                 # Wait for response
                 my $response = <$Smak::job_server_socket>;
@@ -532,6 +718,17 @@ if ($silent) {
 
 # Set number of parallel jobs
 set_jobs($jobs);
+
+# Set verbose mode via environment variable so Smak.pm can access it
+# SMAK_DEBUG implies verbose mode, -cli defaults to wheel mode
+if ($verbose || $ENV{SMAK_DEBUG}) {
+    $ENV{SMAK_VERBOSE} = '1';
+} elsif ($cli) {
+    # CLI mode defaults to wheel mode
+    $ENV{SMAK_VERBOSE} = 'w';
+} else {
+    $ENV{SMAK_VERBOSE} = '0';
+}
 
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it

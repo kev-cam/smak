@@ -3292,6 +3292,7 @@ sub run_job_master {
     my %inode_cache;  # inode => path
     my %pending_path_requests;  # inode => 1 (waiting for resolution)
     my %file_modifications;  # path => {workers => [pids], last_op => time}
+    my $watch_client;  # Client socket to send watch notifications to
 
     our %worker_env;
 
@@ -4033,6 +4034,8 @@ sub run_job_master {
                     print STDERR "Master disconnected. Waiting for reconnection...\n";
                     $select->remove($master_socket);
                     close($master_socket);
+                    # Clear watch client if this was the watching client
+                    $watch_client = undef if $watch_client && $watch_client == $master_socket;
                     $master_socket = undef;
                     next;
                 }
@@ -4193,6 +4196,26 @@ sub run_job_master {
                         print $master_socket "FUSE monitoring not available\n";
                         print $master_socket "FILES_END\n";
                     }
+
+                } elsif ($line =~ /^WATCH_START$/) {
+                    # Enable watch mode - send file change notifications to this client
+                    if ($fuse_socket) {
+                        $watch_client = $master_socket;
+                        print $master_socket "WATCH_STARTED\n";
+                        print STDERR "Watch mode enabled for client\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        print $master_socket "WATCH_UNAVAILABLE (no FUSE)\n";
+                    }
+
+                } elsif ($line =~ /^WATCH_STOP$/) {
+                    # Disable watch mode
+                    if ($watch_client && $watch_client == $master_socket) {
+                        $watch_client = undef;
+                        print $master_socket "WATCH_STOPPED\n";
+                        print STDERR "Watch mode disabled\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        print $master_socket "WATCH_NOT_ACTIVE\n";
+                    }
                 }
 
             } elsif ($socket == $worker_server) {
@@ -4284,6 +4307,11 @@ sub run_job_master {
                         $file_modifications{$path} ||= {workers => [], last_op => time()};
                         print STDERR "FUSE: $path (inode $inode)\n";
 
+                        # Send watch notification if client is watching
+                        if ($watch_client) {
+                            print $watch_client "WATCH:$path\n";
+                        }
+
                     } else {
                         # File operation: OP:pid:inode
                         my ($pid, $inode) = ($arg1, $arg2);
@@ -4302,6 +4330,11 @@ sub run_job_master {
                                 unless grep { $_ == $pid } @{$file_modifications{$path}{workers}};
                             $file_modifications{$path}{last_op} = time();
                             print STDERR "FUSE: $op $path by PID $pid\n";
+
+                            # Send watch notification if client is watching
+                            if ($watch_client) {
+                                print $watch_client "WATCH:$path\n";
+                            }
                         }
                     }
                 }

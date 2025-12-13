@@ -305,8 +305,34 @@ sub run_cli {
 
     my $term = Term::ReadLine->new($prompt);
 
+    # Helper to check for watch notifications from job server
+    my $check_notifications = sub {
+        return unless $jobs > 1 && defined $Smak::job_server_socket;
+
+        # Try to read notifications (non-blocking if watch mode is active)
+        while (1) {
+            my $notif = <$Smak::job_server_socket>;
+            last unless defined $notif;  # No more data
+
+            chomp $notif;
+            # Print file change notifications above the prompt
+            if ($notif =~ /^WATCH:(.+)$/) {
+                print "\n[File changed: $1]\n";
+            } elsif ($notif =~ /^WATCH_/) {
+                # Control messages, ignore in notification display
+                last;
+            } else {
+                # Not a watch notification, put it back somehow or just skip
+                last;
+            }
+        }
+    };
+
     my $line;
     while (defined($line = $term->readline($prompt))) {
+        # Check for file change notifications before processing command
+        $check_notifications->();
+
         chomp $line;
         $line =~ s/^\s+|\s+$//g;  # Trim whitespace
 
@@ -329,6 +355,10 @@ sub run_cli {
             print <<'HELP';
 Available commands:
   build <target>      Build the specified target
+  rebuild <target>    Rebuild only if tracked files changed (FUSE)
+  watch               Monitor file changes from FUSE filesystem
+  unwatch             Stop monitoring file changes
+  files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   tasks, t            List pending and active tasks
   status              Show job server status (if parallel builds enabled)
@@ -379,6 +409,75 @@ HELP
                     } else {
                         print "Build succeeded.\n";
                     }
+                }
+            }
+
+        } elsif ($cmd eq 'watch' || $cmd eq 'w') {
+            if ($jobs > 1 && defined $Smak::job_server_socket) {
+                # Enable watch mode - job-master will send file change notifications
+                print $Smak::job_server_socket "WATCH_START\n";
+                my $response = <$Smak::job_server_socket>;
+                chomp $response if $response;
+                print "$response\n" if $response;
+
+                # Make socket non-blocking so we can poll for notifications
+                use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+                my $flags = fcntl($Smak::job_server_socket, F_GETFL, 0)
+                    or warn "Can't get flags: $!\n";
+                fcntl($Smak::job_server_socket, F_SETFL, $flags | O_NONBLOCK)
+                    or warn "Can't set non-blocking: $!\n";
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'unwatch') {
+            if ($jobs > 1 && defined $Smak::job_server_socket) {
+                # Disable watch mode
+                print $Smak::job_server_socket "WATCH_STOP\n";
+                my $response = <$Smak::job_server_socket>;
+                chomp $response if $response;
+                print "$response\n" if $response;
+
+                # Make socket blocking again
+                use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+                my $flags = fcntl($Smak::job_server_socket, F_GETFL, 0)
+                    or warn "Can't get flags: $!\n";
+                fcntl($Smak::job_server_socket, F_SETFL, $flags & ~O_NONBLOCK)
+                    or warn "Can't set blocking: $!\n";
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'files' || $cmd eq 'f') {
+            if ($jobs > 1 && defined $Smak::job_server_socket) {
+                # Request file list from job-master
+                print $Smak::job_server_socket "LIST_FILES\n";
+                # Wait for response
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'FILES_END';
+                    print "$response\n";
+                }
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'rebuild' || $cmd eq 'rb') {
+            if (@words == 0) {
+                print "Usage: rebuild <target>\n";
+            } else {
+                my $target = $words[0];
+                if ($jobs > 1 && defined $Smak::job_server_socket) {
+                    # Send rebuild request - only rebuilds if files changed
+                    print "Checking if rebuild needed for: $target\n";
+                    eval { build_target($target); };
+                    if ($@) {
+                        print "Rebuild failed: $@\n";
+                    } else {
+                        print "Rebuild complete.\n";
+                    }
+                } else {
+                    print "Job server not running (rebuild requires FUSE monitoring).\n";
                 }
             }
 

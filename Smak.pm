@@ -3541,6 +3541,48 @@ sub run_job_master {
 	print STDERR "wait_for_worker_done: NIY\n";
     }
 
+    # Verify that a target file actually exists on disk
+    # Retries with fsync if needed to handle filesystem buffering delays
+    sub verify_target_exists {
+        my ($target, $dir) = @_;
+
+        # Construct full path
+        my $target_path = $dir ? "$dir/$target" : $target;
+
+        # First quick check
+        return 1 if -e $target_path;
+
+        # If not found, try syncing the directory and retry
+        # This handles cases where the file is buffered but not yet visible
+        for my $attempt (1..3) {
+            # Sync the directory to flush filesystem buffers
+            if ($dir && -d $dir) {
+                # Open and sync the directory
+                if (opendir(my $dh, $dir)) {
+                    # On Linux, we can't fsync a directory handle directly in Perl
+                    # But closing will flush some buffers
+                    closedir($dh);
+                }
+            }
+
+            # Small delay to allow filesystem to catch up
+            select(undef, undef, undef, 0.01 * $attempt);  # 10ms, 20ms, 30ms
+
+            return 1 if -e $target_path;
+
+            print STDERR "Warning: Target '$target' not found at '$target_path', retry $attempt/3\n";
+        }
+
+        # Final check
+        if (-e $target_path) {
+            print STDERR "Target '$target' found after retries\n";
+            return 1;
+        }
+
+        print STDERR "ERROR: Target '$target' does not exist at '$target_path' after task completion\n";
+        return 0;
+    }
+
     # Recursively queue a target and all its dependencies
     sub queue_target_recursive {
         my ($target, $dir, $msocket) = @_;
@@ -3734,7 +3776,21 @@ sub run_job_master {
 
                         # Check if dependency is completed or exists as file (relative to job dir)
                         my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$job->{dir}/$single_dep";
-                        unless ($completed_targets{$single_dep} || -e $dep_path) {
+
+                        # If the dependency was recently completed, verify it actually exists on disk
+                        # to avoid race conditions where the file isn't visible yet due to filesystem buffering
+                        if ($completed_targets{$single_dep}) {
+                            # Target was built, verify it exists with retries
+                            unless (verify_target_exists($single_dep, $job->{dir})) {
+                                $deps_satisfied = 0;
+                                print STDERR "Job '$target' waiting for dependency '$single_dep' (completed but not yet visible)\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            }
+                        } elsif (-e $dep_path) {
+                            # File exists on disk (pre-existing source file)
+                            # OK to proceed
+                        } else {
+                            # Dependency not completed and doesn't exist
                             $deps_satisfied = 0;
                             print STDERR "Job '$target' waiting for dependency '$single_dep' (checked: $dep_path)\n" if $ENV{SMAK_DEBUG};
                             last;
@@ -3841,9 +3897,22 @@ sub run_job_master {
                         delete $running_jobs{$task_id};
 
                         if ($exit_code == 0 && $job->{target}) {
-                            $completed_targets{$job->{target}} = 1;
-                            $in_progress{$job->{target}} = "done";
-                            print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                            # Verify the target file actually exists before marking as complete
+                            # This prevents race conditions where dependent tasks start before file is on disk
+                            if (verify_target_exists($job->{target}, $job->{dir})) {
+                                $completed_targets{$job->{target}} = 1;
+                                $in_progress{$job->{target}} = "done";
+                                print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                            } else {
+                                # File doesn't exist even after retries - treat as failure
+                                $in_progress{$job->{target}} = "failed";
+                                print STDERR "Task $task_id FAILED: $job->{target} - output file not found\n";
+                                $exit_code = 1;  # Mark as failed for composite target handling below
+                            }
+                        }
+
+                        # Handle successful completion
+                        if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
 
                             # Check composite targets
                             for my $comp_target (keys %pending_composite) {
@@ -4336,9 +4405,22 @@ sub run_job_master {
 
                     # Track successfully completed targets to avoid rebuilding
                     if ($exit_code == 0 && $job->{target}) {
-                        $completed_targets{$job->{target}} = 1;
-                        $in_progress{$job->{target}} = "done";
-                        print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                        # Verify the target file actually exists before marking as complete
+                        # This prevents race conditions where dependent tasks start before file is on disk
+                        if (verify_target_exists($job->{target}, $job->{dir})) {
+                            $completed_targets{$job->{target}} = 1;
+                            $in_progress{$job->{target}} = "done";
+                            print STDERR "Task $task_id completed successfully: $job->{target}\n";
+                        } else {
+                            # File doesn't exist even after retries - treat as failure
+                            $in_progress{$job->{target}} = "failed";
+                            print STDERR "Task $task_id FAILED: $job->{target} - output file not found\n";
+                            $exit_code = 1;  # Mark as failed for composite target handling below
+                        }
+                    }
+
+                    # Handle successful completion
+                    if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
 
                         # Check if any pending composite targets can now complete
                         for my $comp_target (keys %pending_composite) {

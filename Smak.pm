@@ -3249,6 +3249,8 @@ sub run_job_master {
     our %pseudo_rule;
     our %MV;  # Variables
     our $makefile;  # Current makefile path
+    our %rules;  # All rules (for is_build_relevant and stale checking)
+    our %targets;  # All targets
 
     our @workers;
     our %worker_status;  # socket => {ready => 0/1, task_id => N}

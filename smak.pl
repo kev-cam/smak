@@ -636,8 +636,15 @@ if ($silent) {
 set_jobs($jobs);
 
 # Set verbose mode via environment variable so Smak.pm can access it
-# SMAK_DEBUG implies verbose mode
-$ENV{SMAK_VERBOSE} = ($verbose || $ENV{SMAK_DEBUG}) ? '1' : '0';
+# SMAK_DEBUG implies verbose mode, -cli defaults to wheel mode
+if ($verbose || $ENV{SMAK_DEBUG}) {
+    $ENV{SMAK_VERBOSE} = '1';
+} elsif ($cli) {
+    # CLI mode defaults to wheel mode
+    $ENV{SMAK_VERBOSE} = 'w';
+} else {
+    $ENV{SMAK_VERBOSE} = '0';
+}
 
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it

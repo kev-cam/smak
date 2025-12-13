@@ -12,9 +12,21 @@ use Carp 'verbose'; # for debug trace
 our $VERSION = '1.0';
 
 # Helper function to print verbose messages (smak-specific, not GNU make compatible)
+# If SMAK_VERBOSE='w', shows a spinning wheel instead of printing
+my @wheel_chars = qw(/ - \\);
+my $wheel_pos = 0;
+
 sub vprint {
     return unless $ENV{SMAK_VERBOSE};
-    print STDERR @_;
+
+    if ($ENV{SMAK_VERBOSE} eq 'w') {
+        # Spinning wheel mode
+        print STDERR "\r" . $wheel_chars[$wheel_pos] . " ";
+        $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
+    } else {
+        # Normal verbose mode
+        print STDERR @_;
+    }
 }
 
 our @EXPORT_OK = qw(

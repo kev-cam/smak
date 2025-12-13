@@ -32,15 +32,15 @@ src2.txt:
 	@echo "Source 2" > $@
 
 # Object file rules
-obj1.o:  src2.txt src1.txt
-	$(DUMMY) -in  src2.txt src1.txt -out $@
-
-obj2.o:  src2.txt
+obj1.o:  src2.txt
 	$(DUMMY) -in  src2.txt -out $@
 
+obj2.o:  src1.txt src2.txt
+	$(DUMMY) -in  src1.txt src2.txt -out $@
+
 # Final target rules
-target1:  obj1.o obj2.o
-	$(DUMMY) -in  obj1.o obj2.o -out $@
+target1:  obj2.o obj1.o
+	$(DUMMY) -in  obj2.o obj1.o -out $@
 
 # Clean up generated files
 clean:

@@ -4804,7 +4804,7 @@ sub wait_for_jobs
             next unless kill(0, $p);  # Check if process exists
 
             my $msg = "process: $p";
-            if (open(CMD,"tr \\0 ' ' </proc/$p/cmdline 2>/dev/null |")) {
+            if (open(CMD,"cat/proc/$p/cmdline 2>/dev/null | tr \\0 ' ' |")) {
                 my $cmd = <CMD>;
                 close(CMD);
                 if (defined $cmd) {

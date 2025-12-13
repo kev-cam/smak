@@ -370,6 +370,7 @@ Available commands:
   start <N>           Start job server with N workers (if not running)
   watch               Monitor file changes from FUSE filesystem
   unwatch             Stop monitoring file changes
+  stale               Show targets that need rebuilding (FUSE)
   files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   tasks, t            List pending and active tasks
@@ -456,6 +457,30 @@ HELP
                 }
             } else {
                 print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'stale') {
+            if (defined $Smak::job_server_socket) {
+                # Request list of stale targets from job-master
+                print $Smak::job_server_socket "LIST_STALE\n";
+                # Wait for response
+                my $count = 0;
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'STALE_END';
+                    if ($response =~ /^STALE:(.+)$/) {
+                        print "  $1\n";
+                        $count++;
+                    }
+                }
+                if ($count == 0) {
+                    print "No stale targets (nothing needs rebuilding)\n";
+                } else {
+                    my $target_label = $count == 1 ? "target" : "targets";
+                    print "\n$count $target_label need rebuilding\n";
+                }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
             }
 
         } elsif ($cmd eq 'rebuild' || $cmd eq 'rb') {

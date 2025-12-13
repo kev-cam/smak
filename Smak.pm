@@ -4254,6 +4254,34 @@ sub run_job_master {
                         print $master_socket "FILES_END\n";
                     }
 
+                } elsif ($line =~ /^LIST_STALE$/) {
+                    # List targets that need rebuilding based on tracked modifications
+                    my %stale_targets;
+
+                    # For each modified file, find targets that depend on it
+                    for my $modified_file (keys %file_modifications) {
+                        # Extract just the filename
+                        my $file = $modified_file;
+                        $file =~ s{^.*/}{};
+
+                        # Check all rules to see which targets depend on this file
+                        for my $target (keys %rules) {
+                            my $rule_info = $rules{$target};
+                            my $deps = $rule_info->{deps} || '';
+
+                            # Check if this file is a dependency
+                            if ($deps =~ /\b\Q$file\E\b/ || $deps =~ /\Q$modified_file\E/) {
+                                $stale_targets{$target} = 1;
+                            }
+                        }
+                    }
+
+                    # Send stale targets
+                    for my $target (sort keys %stale_targets) {
+                        print $master_socket "STALE:$target\n";
+                    }
+                    print $master_socket "STALE_END\n";
+
                 } elsif ($line =~ /^WATCH_START$/) {
                     # Enable watch mode - send file change notifications to this client
                     if ($fuse_socket) {

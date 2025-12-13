@@ -165,8 +165,13 @@ while (my $line = <$socket>) {
                         # Handle socket messages while command runs
                         my $msg = <$socket>;
                         if (!defined $msg) {
-                            # Socket closed
+                            # Socket closed - try to send TASK_END before exiting
                             kill 'TERM', $pid if $pid;
+                            # Try to send termination message (may fail if socket is truly dead)
+                            eval {
+                                print $socket "TASK_END $task_id 1\n";
+                                print $socket "OUTPUT ERROR: Socket closed during task execution\n";
+                            };
                             exit 1;
                         }
                         chomp $msg;

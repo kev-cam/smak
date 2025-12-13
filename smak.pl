@@ -739,14 +739,16 @@ if ($silent) {
 set_jobs($jobs);
 
 # Set verbose mode via environment variable so Smak.pm can access it
-# SMAK_DEBUG implies verbose mode, -cli defaults to verbose (mimic make)
-if ($verbose || $ENV{SMAK_DEBUG}) {
-    $ENV{SMAK_VERBOSE} = '1';
-} elsif ($cli) {
-    # CLI mode defaults to verbose mode (print commands like make)
+# Default behavior mimics make: print commands unless -s (silent) is used
+if ($silent) {
+    # Silent mode (-s flag): don't print anything
+    $ENV{SMAK_VERBOSE} = '0';
+} elsif ($verbose || $ENV{SMAK_DEBUG} || $cli) {
+    # Verbose/debug/CLI mode: print commands
     $ENV{SMAK_VERBOSE} = '1';
 } else {
-    $ENV{SMAK_VERBOSE} = '0';
+    # Default: print commands (like make does)
+    $ENV{SMAK_VERBOSE} = '1';
 }
 
 # Parse the makefile FIRST (before forking job-master)

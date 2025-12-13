@@ -370,6 +370,7 @@ Available commands:
   start <N>           Start job server with N workers (if not running)
   watch               Monitor file changes from FUSE filesystem
   unwatch             Stop monitoring file changes
+  wheel               Toggle spinning wheel mode on/off
   stale               Show targets that need rebuilding (FUSE)
   needs <file>        Show which targets depend on a file
   files, f            List tracked file modifications (FUSE)
@@ -444,6 +445,16 @@ HELP
                 print "Watch mode disabled\n";
             } else {
                 print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'wheel') {
+            # Toggle wheel mode
+            if ($ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} eq 'w') {
+                $ENV{SMAK_VERBOSE} = '1';
+                print "Wheel mode disabled (verbose output enabled)\n";
+            } else {
+                $ENV{SMAK_VERBOSE} = 'w';
+                print "Wheel mode enabled (spinning wheel active)\n";
             }
 
         } elsif ($cmd eq 'files' || $cmd eq 'f') {

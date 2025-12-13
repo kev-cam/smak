@@ -1,7 +1,9 @@
 #!/bin/bash
 # Smak/Fuse - launch fuse commands using the version of libfuse here
 
-FUSE_SO=$(readlink libfuse3.so)
+SCRIPT_DIR=$(dirname $0)
+
+FUSE_SO=$(readlink $SCRIPT_DIR/libfuse3.so)
 FUSE_DIR=$(dirname $FUSE_SO)
 
 export LD_LIBRARY_PATH=${FUSE_DIR}:{LD_LIBRARY_PATH}

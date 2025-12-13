@@ -1608,6 +1608,27 @@ sub write_makefile {
     print "Makefile written to: $output_file\n";
 }
 
+sub looks_phony {
+    my ($target) = @_;
+    # Skip special/meta targets
+    return 1 if $target eq 'PHONY';
+    return 1 if $target eq 'all';
+    return 1 if $target =~ /^\.DEFAULT_GOAL/;
+    # Skip targets that look like variables or directives
+    return 1 if $target =~ /^\$/;
+    # Skip targets with spaces (multi-file targets from meson)
+    return 1 if $target =~ /\s/;
+    # Skip paths that point outside the build directory
+    return 1 if $target =~ /^\.\./;
+    # Skip the ninja file itself and meson internals
+    return 1 if $target =~ /\.ninja$/;
+    if ($target =~ /^meson-/) {
+	return 1 if (! $target =~ /.dat$/);
+    }
+    
+    return 0;
+}
+
 sub get_all_ninja_outputs {
     # Collect all output files from parsed ninja file
     my @outputs;
@@ -1616,19 +1637,7 @@ sub get_all_ninja_outputs {
     # Collect from fixed_deps (most common for ninja builds)
     for my $key (keys %fixed_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
-        # Skip special/meta targets
-        next if $target eq 'PHONY';
-        next if $target eq 'all';
-        next if $target =~ /^\.DEFAULT_GOAL/;
-        # Skip targets that look like variables or directives
-        next if $target =~ /^\$/;
-        # Skip targets with spaces (multi-file targets from meson)
-        next if $target =~ /\s/;
-        # Skip paths that point outside the build directory
-        next if $target =~ /^\.\./;
-        # Skip the ninja file itself and meson internals
-        next if $target =~ /\.ninja$/;
-        next if $target =~ /^meson-/;
+        next if looks_phony($target);
         # Add if not seen before
         unless ($seen{$target}++) {
             push @outputs, $target;
@@ -1638,12 +1647,7 @@ sub get_all_ninja_outputs {
     # Collect from pattern_deps (rare for ninja, but check anyway)
     for my $key (keys %pattern_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
-        next if $target eq 'PHONY';
-        next if $target eq 'all';
-        next if $target =~ /\s/;
-        next if $target =~ /^\.\./;
-        next if $target =~ /\.ninja$/;
-        next if $target =~ /^meson-/;
+        next if looks_phony($target);
         unless ($seen{$target}++) {
             push @outputs, $target;
         }
@@ -1652,12 +1656,7 @@ sub get_all_ninja_outputs {
     # Collect from pseudo_deps
     for my $key (keys %pseudo_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
-        next if $target eq 'PHONY';
-        next if $target eq 'all';
-        next if $target =~ /\s/;
-        next if $target =~ /^\.\./;
-        next if $target =~ /\.ninja$/;
-        next if $target =~ /^meson-/;
+        next if looks_phony($target);
         unless ($seen{$target}++) {
             push @outputs, $target;
         }

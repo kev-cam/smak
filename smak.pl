@@ -307,7 +307,7 @@ sub run_cli {
 
     # Helper to check for watch notifications from job server
     my $check_notifications = sub {
-        return unless $jobs > 1 && defined $Smak::job_server_socket;
+        return unless defined $Smak::job_server_socket;
 
         # Try to read notifications (non-blocking if watch mode is active)
         while (1) {
@@ -414,30 +414,25 @@ HELP
             }
 
         } elsif ($cmd eq 'watch' || $cmd eq 'w') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
-                # Enable watch mode - job-master will send file change notifications
-                print $Smak::job_server_socket "WATCH_START\n";
-                my $response = <$Smak::job_server_socket>;
-                chomp $response if $response;
-                print "$response\n" if $response;
-
-                # Make socket non-blocking so we can poll for notifications
+            if (defined $Smak::job_server_socket) {
+                # Make socket non-blocking FIRST so we don't hang
                 use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
                 my $flags = fcntl($Smak::job_server_socket, F_GETFL, 0)
                     or warn "Can't get flags: $!\n";
                 fcntl($Smak::job_server_socket, F_SETFL, $flags | O_NONBLOCK)
                     or warn "Can't set non-blocking: $!\n";
+
+                # Enable watch mode - job-master will send file change notifications
+                print $Smak::job_server_socket "WATCH_START\n";
+                print "Watch mode enabled (FUSE file change notifications active)\n";
             } else {
-                print "Job server not running.\n";
+                print "Job server not running. Use 'start' to enable job server.\n";
             }
 
         } elsif ($cmd eq 'unwatch') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 # Disable watch mode
                 print $Smak::job_server_socket "WATCH_STOP\n";
-                my $response = <$Smak::job_server_socket>;
-                chomp $response if $response;
-                print "$response\n" if $response;
 
                 # Make socket blocking again
                 use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
@@ -445,12 +440,14 @@ HELP
                     or warn "Can't get flags: $!\n";
                 fcntl($Smak::job_server_socket, F_SETFL, $flags & ~O_NONBLOCK)
                     or warn "Can't set blocking: $!\n";
+
+                print "Watch mode disabled\n";
             } else {
                 print "Job server not running.\n";
             }
 
         } elsif ($cmd eq 'files' || $cmd eq 'f') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 # Request file list from job-master
                 print $Smak::job_server_socket "LIST_FILES\n";
                 # Wait for response
@@ -468,7 +465,7 @@ HELP
                 print "Usage: rebuild <target>\n";
             } else {
                 my $target = $words[0];
-                if ($jobs > 1 && defined $Smak::job_server_socket) {
+                if (defined $Smak::job_server_socket) {
                     # Send rebuild request - only rebuilds if files changed
                     print "Checking if rebuild needed for: $target\n";
                     eval { build_target($target); };
@@ -478,7 +475,7 @@ HELP
                         print "Rebuild complete.\n";
                     }
                 } else {
-                    print "Job server not running (rebuild requires FUSE monitoring).\n";
+                    print "Job server not running (rebuild requires FUSE monitoring). Use 'start' to enable.\n";
                 }
             }
 
@@ -497,44 +494,43 @@ HELP
             }
 
         } elsif ($cmd eq 'start') {
-            if (@words == 0) {
-                print "Usage: start <N>  (where N is the number of workers)\n";
+            # Default to 1 worker if no count specified
+            my $worker_count = (@words > 0) ? $words[0] : 1;
+
+            if ($worker_count !~ /^\d+$/ || $worker_count < 1) {
+                print "Error: worker count must be a positive integer\n";
+            } elsif (defined $Smak::job_server_socket) {
+                print "Job server already running with $jobs workers\n";
+                print "Use 'restart $worker_count' to change worker count\n";
             } else {
-                my $worker_count = $words[0];
-                if ($worker_count !~ /^\d+$/ || $worker_count < 1) {
-                    print "Error: worker count must be a positive integer\n";
-                } elsif (defined $Smak::job_server_socket) {
-                    print "Job server already running with $jobs workers\n";
-                    print "Use 'restart $worker_count' to change worker count\n";
+                # Start job server
+                my $worker_label = $worker_count == 1 ? "worker" : "workers";
+                print "Starting job server with $worker_count $worker_label...\n";
+                $jobs = $worker_count;
+                set_jobs($jobs);
+                start_job_server();
+                if (defined $Smak::job_server_socket) {
+                    print "Job server started (PID $Smak::job_server_pid)\n";
+                    $jobserver_pid = $Smak::job_server_pid;
                 } else {
-                    # Start job server
-                    print "Starting job server with $worker_count workers...\n";
-                    $jobs = $worker_count;
-                    set_jobs($jobs);
-                    start_job_server();
-                    if (defined $Smak::job_server_socket) {
-                        print "Job server started (PID $Smak::job_server_pid)\n";
-                        $jobserver_pid = $Smak::job_server_pid;
-                    } else {
-                        print "Failed to start job server\n";
-                    }
+                    print "Failed to start job server\n";
                 }
             }
 
+
         } elsif ($cmd eq 'status' || $cmd eq 'st') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 # Request status from job-master
-                print "Job server running with $jobs workers (PID $Smak::job_server_pid)\n";
+                my $worker_label = $jobs == 1 ? "worker" : "workers";
+                print "Job server running with $jobs $worker_label (PID $Smak::job_server_pid)\n";
                 # Could send STATUS request to job-master here
                 if ($Smak::job_server_master_port) {
                     print "Use: smak-attach -pid $Smak::job_server_pid:$Smak::job_server_master_port\n";
                 } else {
                     print "Use: smak-attach -pid $Smak::job_server_pid\n";
                 }
-            } elsif ($jobs > 1) {
-                print "Job server configured for $jobs jobs but not currently active\n";
             } else {
-                print "Sequential mode (no job server)\n";
+                print "Job server not running. Use 'start' to enable.\n";
             }
 
         } elsif ($cmd eq 'vars' || $cmd eq 'v') {
@@ -561,7 +557,7 @@ HELP
             }
 
         } elsif ($cmd eq 'tasks' || $cmd eq 't') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 # Request task list from job-master
                 print $Smak::job_server_socket "LIST_TASKS\n";
                 # Wait for response
@@ -577,7 +573,7 @@ HELP
         } elsif ($cmd eq 'server-cli') {
 	    server_cli($Smak::job_server_pid,$Smak::job_server_socket,$prompt,$term);
         } elsif ($cmd eq 'kill') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 print "Killing all workers...\n";
                 print $Smak::job_server_socket "KILL_WORKERS\n";
                 # Wait for response
@@ -589,9 +585,10 @@ HELP
             }
 
         } elsif ($cmd eq 'restart') {
-            if ($jobs > 1 && defined $Smak::job_server_socket) {
+            if (defined $Smak::job_server_socket) {
                 my $count = @words > 0 ? $words[0] : $jobs;
-                print "Restarting workers ($count workers)...\n";
+                my $worker_label = $count == 1 ? "worker" : "workers";
+                print "Restarting workers ($count $worker_label)...\n";
                 print $Smak::job_server_socket "RESTART_WORKERS $count\n";
                 # Wait for response
                 my $response = <$Smak::job_server_socket>;

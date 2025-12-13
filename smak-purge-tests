@@ -1,0 +1,10 @@
+#!/bin/bash
+
+case $0 in
+    /*) cd $(dirname $0) ;;
+esac
+
+git rm -fr test/failures/*-*-*
+rm     -fr test/failures/*-*-*
+
+git commit -m "Purged tests."

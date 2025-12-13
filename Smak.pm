@@ -20,8 +20,10 @@ sub vprint {
     return unless $ENV{SMAK_VERBOSE};
 
     if ($ENV{SMAK_VERBOSE} eq 'w') {
-        # Spinning wheel mode
-        print STDERR "\r" . $wheel_chars[$wheel_pos] . " ";
+        # Spinning wheel mode - update in place
+        # Clear line, show wheel, flush
+        print STDERR "\r" . $wheel_chars[$wheel_pos] . "  \r" . $wheel_chars[$wheel_pos];
+        STDERR->flush();
         $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
     } else {
         # Normal verbose mode
@@ -132,7 +134,7 @@ sub start_job_server {
     use IO::Select;
     use FindBin qw($RealBin);
 
-    return if $jobs <= 1;  # No job server needed for sequential builds
+    return if $jobs < 1;  # Need at least 1 worker for job server (enables FUSE monitoring)
 
     $job_server_pid = fork();
     die "Cannot fork job-master: $!\n" unless defined $job_server_pid;

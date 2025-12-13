@@ -305,24 +305,30 @@ sub run_cli {
 
     my $term = Term::ReadLine->new($prompt);
 
+    # Track watch mode state
+    my $watch_enabled = 0;
+
     # Helper to check for watch notifications from job server
     my $check_notifications = sub {
-        return unless defined $Smak::job_server_socket;
+        return unless $watch_enabled && defined $Smak::job_server_socket;
 
-        # Try to read notifications (non-blocking if watch mode is active)
-        while (1) {
+        # Use IO::Select to check if data is available (non-blocking)
+        use IO::Select;
+        my $select = IO::Select->new($Smak::job_server_socket);
+
+        # Check if data is available (0 second timeout = non-blocking)
+        while ($select->can_read(0)) {
             my $notif = <$Smak::job_server_socket>;
-            last unless defined $notif;  # No more data
+            last unless defined $notif;
 
             chomp $notif;
             # Print file change notifications above the prompt
             if ($notif =~ /^WATCH:(.+)$/) {
                 print "\n[File changed: $1]\n";
+            } elsif ($notif =~ /^WATCH_STARTED/) {
+                # Initial confirmation, ignore
             } elsif ($notif =~ /^WATCH_/) {
-                # Control messages, ignore in notification display
-                last;
-            } else {
-                # Not a watch notification, put it back somehow or just skip
+                # Other control messages
                 last;
             }
         }
@@ -415,15 +421,9 @@ HELP
 
         } elsif ($cmd eq 'watch' || $cmd eq 'w') {
             if (defined $Smak::job_server_socket) {
-                # Make socket non-blocking FIRST so we don't hang
-                use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
-                my $flags = fcntl($Smak::job_server_socket, F_GETFL, 0)
-                    or warn "Can't get flags: $!\n";
-                fcntl($Smak::job_server_socket, F_SETFL, $flags | O_NONBLOCK)
-                    or warn "Can't set non-blocking: $!\n";
-
                 # Enable watch mode - job-master will send file change notifications
                 print $Smak::job_server_socket "WATCH_START\n";
+                $watch_enabled = 1;
                 print "Watch mode enabled (FUSE file change notifications active)\n";
             } else {
                 print "Job server not running. Use 'start' to enable job server.\n";
@@ -433,14 +433,7 @@ HELP
             if (defined $Smak::job_server_socket) {
                 # Disable watch mode
                 print $Smak::job_server_socket "WATCH_STOP\n";
-
-                # Make socket blocking again
-                use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
-                my $flags = fcntl($Smak::job_server_socket, F_GETFL, 0)
-                    or warn "Can't get flags: $!\n";
-                fcntl($Smak::job_server_socket, F_SETFL, $flags & ~O_NONBLOCK)
-                    or warn "Can't set blocking: $!\n";
-
+                $watch_enabled = 0;
                 print "Watch mode disabled\n";
             } else {
                 print "Job server not running.\n";

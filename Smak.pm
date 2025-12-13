@@ -3495,6 +3495,9 @@ sub run_job_master {
         # Check if already completed
         return 1 if exists $completed_targets{$target};
 
+        # Check if in progress (includes queued, running, and pending composite targets)
+        return 1 if exists $in_progress{$target};
+
         # Check if already in queue
         for my $job (@job_queue) {
             return 1 if $job->{target} eq $target;
@@ -3774,11 +3777,18 @@ sub run_job_master {
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
                         if ($completed_targets{$single_dep}) {
-                            # Target was built, verify it exists with retries
-                            unless (verify_target_exists($single_dep, $job->{dir})) {
-                                $deps_satisfied = 0;
-                                print STDERR "Job '$target' waiting for dependency '$single_dep' (completed but not yet visible)\n" if $ENV{SMAK_DEBUG};
-                                last;
+                            # First check if file exists - fast path
+                            if (-e $dep_path) {
+                                # File exists, dependency satisfied
+                            } elsif (exists $pending_composite{$single_dep}) {
+                                # Composite target (phony/aggregator), no file needed
+                            } else {
+                                # Target marked complete but file not visible - verify with retries
+                                unless (verify_target_exists($single_dep, $job->{dir})) {
+                                    $deps_satisfied = 0;
+                                    print STDERR "Job '$target' waiting for dependency '$single_dep' (completed but not yet visible)\n" if $ENV{SMAK_DEBUG};
+                                    last;
+                                }
                             }
                         } elsif (-e $dep_path) {
                             # File exists on disk (pre-existing source file)

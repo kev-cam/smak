@@ -3908,9 +3908,24 @@ sub run_job_master {
                         delete $running_jobs{$task_id};
 
                         if ($exit_code == 0 && $job->{target}) {
-                            # Verify the target file actually exists before marking as complete
-                            # This prevents race conditions where dependent tasks start before file is on disk
-                            if (verify_target_exists($job->{target}, $job->{dir})) {
+                            # Check if this looks like a phony target (doesn't produce a file)
+                            # Phony targets typically have no extension or are common make targets
+                            my $target = $job->{target};
+                            my $looks_like_file = $target =~ /\.[a-zA-Z0-9]+$/ ||  # has extension
+                                                  $target =~ /\// ||                # has path separator
+                                                  $target =~ /^lib.*\.a$/ ||        # library file
+                                                  $target =~ /^.*\.so(\.\d+)*$/;    # shared library
+
+                            # Common phony targets that don't produce files
+                            my $is_common_phony = $target =~ /^(all|clean|install|test|check|depend|dist|
+                                                                distclean|maintainer-clean|mostlyclean|
+                                                                cmake_check_build_system|help|list|
+                                                                package|preinstall|rebuild_cache|edit_cache)$/x;
+
+                            # Only verify file existence for targets that look like real files
+                            my $should_verify = $looks_like_file && !$is_common_phony;
+
+                            if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                                 $completed_targets{$job->{target}} = 1;
                                 $in_progress{$job->{target}} = "done";
                                 print STDERR "Task $task_id completed successfully: $job->{target}\n";
@@ -4417,9 +4432,24 @@ sub run_job_master {
 
                     # Track successfully completed targets to avoid rebuilding
                     if ($exit_code == 0 && $job->{target}) {
-                        # Verify the target file actually exists before marking as complete
-                        # This prevents race conditions where dependent tasks start before file is on disk
-                        if (verify_target_exists($job->{target}, $job->{dir})) {
+                        # Check if this looks like a phony target (doesn't produce a file)
+                        # Phony targets typically have no extension or are common make targets
+                        my $target = $job->{target};
+                        my $looks_like_file = $target =~ /\.[a-zA-Z0-9]+$/ ||  # has extension
+                                              $target =~ /\// ||                # has path separator
+                                              $target =~ /^lib.*\.a$/ ||        # library file
+                                              $target =~ /^.*\.so(\.\d+)*$/;    # shared library
+
+                        # Common phony targets that don't produce files
+                        my $is_common_phony = $target =~ /^(all|clean|install|test|check|depend|dist|
+                                                            distclean|maintainer-clean|mostlyclean|
+                                                            cmake_check_build_system|help|list|
+                                                            package|preinstall|rebuild_cache|edit_cache)$/x;
+
+                        # Only verify file existence for targets that look like real files
+                        my $should_verify = $looks_like_file && !$is_common_phony;
+
+                        if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                             $completed_targets{$job->{target}} = 1;
                             $in_progress{$job->{target}} = "done";
                             print STDERR "Task $task_id completed successfully: $job->{target}\n";

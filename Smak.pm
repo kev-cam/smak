@@ -4328,69 +4328,83 @@ sub run_job_master {
 
                 } elsif ($line =~ /^NEEDS:(.+)$/) {
                     # Show which targets depend on a specific file
-                    my $query_file = $1;
-                    my %matching_targets;
+                    # Wrap in eval to catch any errors
+                    eval {
+                        my $query_file = $1;
+                        my %matching_targets;
 
-                    # Get current working directory for relative path handling
-                    my $cwd = abs_path('.');
+                        # Get current working directory for relative path handling
+                        my $cwd = abs_path('.') || '.';
 
-                    # Generate path variations for the query file
-                    my @path_variations;
-                    push @path_variations, $query_file;
+                        # Generate path variations for the query file
+                        my @path_variations;
+                        push @path_variations, $query_file;
 
-                    # Add absolute path if query is relative
-                    if ($query_file !~ /^\//) {
-                        push @path_variations, "$cwd/$query_file";
-                    }
-
-                    # Add just basename
-                    my $basename = $query_file;
-                    $basename =~ s{^.*/}{};
-                    push @path_variations, $basename unless $basename eq $query_file;
-
-                    # Check all dependency hashes
-                    for my $target (keys %fixed_deps) {
-                        my $deps_str = $fixed_deps{$target};
-                        next unless defined $deps_str;
-
-                        # Split dependencies and check each one
-                        my @deps = split(/\s+/, $deps_str);
-                        for my $dep (@deps) {
-                            for my $path_var (@path_variations) {
-                                if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
-                                    $matching_targets{$target} = 1;
-                                    last;
-                                }
-                            }
+                        # Add absolute path if query is relative
+                        if ($query_file !~ /^\//) {
+                            push @path_variations, "$cwd/$query_file";
                         }
-                    }
 
-                    # Also check pattern deps
-                    for my $pattern (keys %pattern_deps) {
-                        my $deps_str = $pattern_deps{$pattern};
-                        next unless defined $deps_str;
+                        # Add just basename
+                        my $basename = $query_file;
+                        $basename =~ s{^.*/}{};
+                        push @path_variations, $basename unless $basename eq $query_file;
 
-                        my @deps = split(/\s+/, $deps_str);
-                        for my $dep (@deps) {
-                            for my $path_var (@path_variations) {
-                                if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
-                                    # Find targets matching this pattern
-                                    for my $target (keys %fixed_deps) {
-                                        if ($target =~ /$pattern/) {
+                        # Check all dependency hashes
+                        if (%fixed_deps) {
+                            for my $target (keys %fixed_deps) {
+                                my $deps_str = $fixed_deps{$target};
+                                next unless defined $deps_str;
+
+                                # Split dependencies and check each one
+                                my @deps = split(/\s+/, $deps_str);
+                                for my $dep (@deps) {
+                                    next unless defined $dep && $dep ne '';
+                                    for my $path_var (@path_variations) {
+                                        if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
                                             $matching_targets{$target} = 1;
+                                            last;
                                         }
                                     }
-                                    last;
                                 }
                             }
                         }
-                    }
 
-                    # Send matching targets
-                    for my $target (sort keys %matching_targets) {
-                        print $master_socket "NEEDS:$target\n";
+                        # Also check pattern deps
+                        if (%pattern_deps) {
+                            for my $pattern (keys %pattern_deps) {
+                                my $deps_str = $pattern_deps{$pattern};
+                                next unless defined $deps_str;
+
+                                my @deps = split(/\s+/, $deps_str);
+                                for my $dep (@deps) {
+                                    next unless defined $dep && $dep ne '';
+                                    for my $path_var (@path_variations) {
+                                        if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
+                                            # Find targets matching this pattern
+                                            for my $target (keys %fixed_deps) {
+                                                if ($target =~ /$pattern/) {
+                                                    $matching_targets{$target} = 1;
+                                                }
+                                            }
+                                            last;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        # Send matching targets
+                        for my $target (sort keys %matching_targets) {
+                            print $master_socket "NEEDS:$target\n";
+                        }
+                    };
+                    if ($@) {
+                        print STDERR "Error processing NEEDS request: $@\n" if $ENV{SMAK_DEBUG};
                     }
+                    # Always send end marker even if there was an error
                     print $master_socket "NEEDS_END\n";
+                    $master_socket->flush();
 
                 } elsif ($line =~ /^WATCH_START$/) {
                     # Enable watch mode - send file change notifications to this client

@@ -491,17 +491,27 @@ HELP
                 my $file = $words[0];
                 # Request targets that depend on this file
                 print $Smak::job_server_socket "NEEDS:$file\n";
-                # Wait for response
+                $Smak::job_server_socket->flush();
+
+                # Wait for response with timeout protection
                 my $count = 0;
+                my $got_end = 0;
                 while (my $response = <$Smak::job_server_socket>) {
                     chomp $response;
-                    last if $response eq 'NEEDS_END';
+                    if ($response eq 'NEEDS_END') {
+                        $got_end = 1;
+                        last;
+                    }
                     if ($response =~ /^NEEDS:(.+)$/) {
                         print "  $1\n";
                         $count++;
                     }
                 }
-                if ($count == 0) {
+
+                # Check if we got a proper response
+                unless ($got_end) {
+                    print "Error: Job server connection lost\n";
+                } elsif ($count == 0) {
                     print "No targets depend on '$file'\n";
                 } else {
                     my $target_label = $count == 1 ? "target depends" : "targets depend";

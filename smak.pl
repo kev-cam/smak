@@ -372,6 +372,7 @@ Available commands:
   unwatch             Stop monitoring file changes
   wheel               Toggle spinning wheel mode on/off
   stale               Show targets that need rebuilding (FUSE)
+  dirty <file>        Mark a file as out-of-date (dirty)
   needs <file>        Show which targets depend on a file
   files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
@@ -499,6 +500,19 @@ HELP
                     my $target_label = $count == 1 ? "target" : "targets";
                     print "\n$count $target_label need rebuilding\n";
                 }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'dirty') {
+            if (@words == 0) {
+                print "Usage: dirty <file>\n";
+                print "  Marks a file as out-of-date (dirty)\n";
+            } elsif (defined $Smak::job_server_socket) {
+                my $file = $words[0];
+                # Send dirty notification to job-master
+                print $Smak::job_server_socket "MARK_DIRTY:$file\n";
+                print "Marked '$file' as dirty (out-of-date)\n";
             } else {
                 print "Job server not running. Use 'start' to enable.\n";
             }

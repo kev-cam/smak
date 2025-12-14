@@ -154,8 +154,22 @@ for i in $(seq 1 $num_objects); do
         deps="$deps src$src_idx.txt"
     done
 
+    # Generate 0-5 random dummy commands
+    num_commands=$((RANDOM % 6))
+
     cat >> Makefile << EOF
 obj$i.o: $deps
+EOF
+
+    # Add random number of dummy commands (0-5)
+    for k in $(seq 1 $num_commands); do
+        cat >> Makefile << EOF
+	\$(DUMMY) -in $deps -out \$@.tmp$k
+EOF
+    done
+
+    # Final command to create the actual output
+    cat >> Makefile << EOF
 	\$(DUMMY) -in $deps -out \$@
 
 EOF
@@ -177,8 +191,22 @@ for i in $(seq 1 $num_targets); do
         deps="$deps obj$obj_idx.o"
     done
 
+    # Generate 0-5 random dummy commands
+    num_commands=$((RANDOM % 6))
+
     cat >> Makefile << EOF
 target$i: $deps
+EOF
+
+    # Add random number of dummy commands (0-5)
+    for k in $(seq 1 $num_commands); do
+        cat >> Makefile << EOF
+	\$(DUMMY) -in $deps -out \$@.tmp$k
+EOF
+    done
+
+    # Final command to create the actual output
+    cat >> Makefile << EOF
 	\$(DUMMY) -in $deps -out \$@
 
 EOF

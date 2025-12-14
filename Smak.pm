@@ -3904,7 +3904,7 @@ sub run_job_master {
                         } else {
                             # Dependency not completed and doesn't exist
                             $deps_satisfied = 0;
-                            print STDERR "Job '$target' waiting for dependency '$single_dep' (checked: $dep_path)\n" if $ENV{SMAK_DEBUG};
+                            print STDERR "  Job '$target' waiting for dependency '$single_dep'\n";
                             last;
                         }
                     }
@@ -3920,16 +3920,14 @@ sub run_job_master {
 
             # No job with satisfied dependencies found
             if ($job_index < 0) {
-                if ($ENV{SMAK_DEBUG}) {
-                    vprint "No jobs with satisfied dependencies\n";
-                    print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
-                    my $max_show = @job_queue < 10 ? $#job_queue : 9;
-                    for my $i (0 .. $max_show) {
-                        my $job = $job_queue[$i];
-                        print STDERR "  [$i] $job->{target}\n";
-                    }
-                    print STDERR "  ...\n" if @job_queue > 10;
+                print STDERR "No jobs with satisfied dependencies (stuck!)\n";
+                print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
+                my $max_show = @job_queue < 10 ? $#job_queue : 9;
+                for my $i (0 .. $max_show) {
+                    my $job = $job_queue[$i];
+                    print STDERR "  [$i] $job->{target}\n";
                 }
+                print STDERR "  ...\n" if @job_queue > 10;
                 last;
             }
 

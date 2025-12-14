@@ -239,10 +239,6 @@ sub submit_job {
     print $job_server_socket "$target\n";
     print $job_server_socket "$dir\n";
     print $job_server_socket "$command\n";
-
-    unless ($silent_mode) {
-	print "$command\n";
-    }
 }
 
 sub execute_command_sequential {
@@ -256,13 +252,6 @@ sub execute_command_sequential {
         $old_dir = getcwd();
         warn "DEBUG[" . __LINE__ . "]: Changing to directory: $dir\n" if $ENV{SMAK_DEBUG};
         chdir($dir) or die "Cannot chdir to $dir: $!\n";
-    }
-
-    # Echo command unless silent
-    unless ($silent_mode) {
-        warn "DEBUG[" . __LINE__ . "]: About to tee_print command\n" if $ENV{SMAK_DEBUG};
-        tee_print("$command\n");
-        warn "DEBUG[" . __LINE__ . "]: After tee_print\n" if $ENV{SMAK_DEBUG};
     }
 
     # Execute command
@@ -2117,6 +2106,11 @@ sub build_target {
                 next;
             }
 
+	    # Echo command unless silent
+	    unless ($silent_mode) {
+		print "$cmd_line\n";
+	    }
+
             # Execute command - use job system if available, otherwise sequential
             use Cwd 'getcwd';
             my $cwd = getcwd();
@@ -3945,9 +3939,25 @@ sub run_job_master {
             # Find next job whose dependencies are all satisfied
             my $job_index = -1;
             for my $i (0 .. $#job_queue) {
-                my $job = $job_queue[$i];
-                my $target = $job->{target};
+                my $job;
+                my $target;
+		
+		while ($i <= $#job_queue) {
+		    $job = $job_queue[$i];
+		    if (! defined $job) {
+			warn "ERROR: bad job-queue entry at $i, removed\n";
+			splice (@job_queue,$i,1);			
+		    } else {
+			$target = $job->{target};
+			if (! defined $target) {
+			    warn "ERROR: no target for job-queue entry at $i, removed\n";
+			    splice (@job_queue,$i,1);			
+			}
+		    }
+		}
 
+	        last if ($i <= $#job_queue); 
+	       		
                 # Check if this job's dependencies are satisfied
                 my $key = "$makefile\t$target";
                 my @deps;
@@ -4999,7 +5009,7 @@ sub wait_for_jobs
             next unless kill(0, $p);  # Check if process exists
 
             my $msg = "process: $p";
-            if (open(CMD,"cat /proc/$p/cmdline 2>/dev/null | tr \\0 ' ' |")) {
+            if (open(CMD,"cat /proc/$p/cmdline 2>/dev/null | tr '\\0' ' ' |")) {
                 my $cmd = <CMD>;
                 close(CMD);
                 if (defined $cmd) {

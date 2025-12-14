@@ -3890,6 +3890,25 @@ sub run_job_master {
         return undef;
     }
 
+    # Check if failed target is a dependency of any composite target, and fail them
+    sub fail_dependent_composite_targets {
+        my ($failed_target, $exit_code) = @_;
+
+        for my $comp_target (keys %pending_composite) {
+            my $comp = $pending_composite{$comp_target};
+            # Check if this failed target is in the composite's dependencies
+            if (grep { $_ eq $failed_target } @{$comp->{deps}}) {
+                print STDERR "Composite target '$comp_target' FAILED because dependency '$failed_target' failed (exit code $exit_code)\n";
+                $in_progress{$comp_target} = "failed";
+                $failed_targets{$comp_target} = $exit_code;
+                if ($comp->{master_socket}) {
+                    print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                }
+                delete $pending_composite{$comp_target};
+            }
+        }
+    }
+
     sub dispatch_jobs {
 	my ($do,$block) = @_;
 	my $j = 0;
@@ -3939,6 +3958,8 @@ sub run_job_master {
                             $in_progress{$target} = "failed";
                             $failed_targets{$target} = $failed_targets{$single_dep};
                             splice(@job_queue, $i, 1);  # Remove from queue
+                            # Check if this failed target is a dependency of any composite target
+                            fail_dependent_composite_targets($target, $failed_targets{$single_dep});
                             $has_failed_dep = 1;
                             last;
                         }
@@ -3998,6 +4019,8 @@ sub run_job_master {
                                 $in_progress{$target} = "failed";
                                 $failed_targets{$target} = $failed_targets{$failed_dep};
                                 splice(@job_queue, $i, 1);  # Remove from queue
+                                # Check if this failed target is a dependency of any composite target
+                                fail_dependent_composite_targets($target, $failed_targets{$failed_dep});
                                 $has_unbuildable_dep = 1;
                                 last;
                             } else {

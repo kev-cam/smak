@@ -4104,6 +4104,25 @@ sub run_job_master {
                     print $master_socket "JOBSERVER_WORKERS_READY\n";
                     print STDERR "New master ready\n";
 
+                    # Check queue state and worker availability
+                    if ($ENV{SMAK_DEBUG}) {
+                        my $ready_workers = 0;
+                        for my $w (@workers) {
+                            $ready_workers++ if $worker_status{$w}{ready};
+                        }
+                        print STDERR "Queue state: " . scalar(@job_queue) . " queued jobs, ";
+                        print STDERR "$ready_workers/" . scalar(@workers) . " workers ready, ";
+                        print STDERR scalar(keys %running_jobs) . " running jobs\n";
+
+                        if (@job_queue > 0) {
+                            print STDERR "Queued jobs:\n";
+                            for my $i (0 .. ($#job_queue < 4 ? $#job_queue : 4)) {
+                                print STDERR "  - $job_queue[$i]{target}\n";
+                            }
+                            print STDERR "  ...\n" if @job_queue > 5;
+                        }
+                    }
+
                     # Dispatch any queued jobs that may have been waiting
                     dispatch_jobs();
                 }

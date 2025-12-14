@@ -4085,6 +4085,9 @@ sub run_job_master {
                     }
                     print $master_socket "JOBSERVER_WORKERS_READY\n";
                     print STDERR "New master ready\n";
+
+                    # Dispatch any queued jobs that may have been waiting
+                    dispatch_jobs();
                 }
 
             } elsif (defined $master_socket && $socket == $master_socket) {

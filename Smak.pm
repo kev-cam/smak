@@ -3800,28 +3800,36 @@ sub run_job_master {
         }
     }
 
-    sub check_queues {
-	my ($where) = @_;
-	my $ready_workers = 0;
-	for my $w (@workers) {
-	    $ready_workers++ if $worker_status{$w}{ready};
-	}
-	print STDERR "Queue state: " . scalar(@job_queue) . " queued jobs, ";
-	print STDERR "$ready_workers/" . scalar(@workers) . " workers ready, ";
-	print STDERR scalar(keys %running_jobs) . " running jobs\n";
-	
-	if (@job_queue > 0) {
-	    print STDERR "Queued jobs:\n";
-	    for my $i (0 .. ($#job_queue < 4 ? $#job_queue : 4)) {
-		print STDERR "  - $job_queue[$i]{target}\n";
-	    }
-	    print STDERR "  ...\n" if @job_queue > 5;
-	}
+    sub check_queue_state {
+        my ($label) = @_;
+
+        my $ready_workers = 0;
+        for my $w (@workers) {
+            $ready_workers++ if $worker_status{$w}{ready};
+        }
+
+        print STDERR "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
+        print STDERR "$ready_workers/" . scalar(@workers) . " ready, ";
+        print STDERR scalar(keys %running_jobs) . " running\n";
+
+        if (@job_queue > 0 && @job_queue <= 5) {
+            for my $job (@job_queue) {
+                print STDERR "  queued: $job->{target}\n";
+            }
+        } elsif (@job_queue > 5) {
+            for my $i (0..4) {
+                print STDERR "  queued: $job_queue[$i]{target}\n";
+            }
+            print STDERR "  ... and " . (@job_queue - 5) . " more\n";
+        }
     }
 
     sub dispatch_jobs {
 	my ($do,$block) = @_;
 	my $j = 0;
+
+        check_queue_state("dispatch_jobs start") if @job_queue;
+
         while (@job_queue) {
             # Find a ready worker
             my $ready_worker;
@@ -3966,6 +3974,8 @@ sub run_job_master {
 	    }
         }
 
+        check_queue_state("dispatch_jobs end") if @job_queue;
+
 	return $j;
     }
 
@@ -4095,7 +4105,7 @@ sub run_job_master {
                 $worker->blocking(1);
             }
 
-	    check_queues("stuck check");
+	    check_queue_state("intermittent check");
         }
 
         for my $socket (@ready) {
@@ -4125,8 +4135,8 @@ sub run_job_master {
                     print $master_socket "JOBSERVER_WORKERS_READY\n";
                     print STDERR "New master ready\n";
 
-                    # Check queue state and worker availability
-                    check_queues("pre dispatch");
+                    # Check queue state before dispatching
+                    check_queue_state("master reconnect");
 
                     # Dispatch any queued jobs that may have been waiting
                     dispatch_jobs();

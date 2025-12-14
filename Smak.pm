@@ -3818,9 +3818,20 @@ sub run_job_master {
                 }
             }
         } else {
-            # No command and no deps - just mark complete
-            $completed_targets{$target} = 1;
-            $in_progress{$target} = "done";
+            # No command and no deps - check if file exists
+            my $target_path = $target =~ m{^/} ? $target : "$dir/$target";
+            if (-e $target_path) {
+                $completed_targets{$target} = 1;
+                $in_progress{$target} = "done";
+                print STDERR "Target '$target' exists at '$target_path', marking complete (no rule or deps)\n" if $ENV{SMAK_DEBUG};
+            } else {
+                # Target doesn't exist and has no rule to build it - this is an error
+                print STDERR "ERROR: No rule to make target '$target' (needed by other targets)\n";
+                $in_progress{$target} = "failed";
+                $failed_targets{$target} = 1;
+                # Fail any composite targets waiting for this
+                fail_dependent_composite_targets($target, 1);
+            }
         }
     }
 

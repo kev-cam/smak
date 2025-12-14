@@ -3800,9 +3800,37 @@ sub run_job_master {
         }
     }
 
+    sub check_queue_state {
+        my ($label) = @_;
+        return unless $ENV{SMAK_DEBUG};
+
+        my $ready_workers = 0;
+        for my $w (@workers) {
+            $ready_workers++ if $worker_status{$w}{ready};
+        }
+
+        print STDERR "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
+        print STDERR "$ready_workers/" . scalar(@workers) . " ready, ";
+        print STDERR scalar(keys %running_jobs) . " running\n";
+
+        if (@job_queue > 0 && @job_queue <= 5) {
+            for my $job (@job_queue) {
+                print STDERR "  queued: $job->{target}\n";
+            }
+        } elsif (@job_queue > 5) {
+            for my $i (0..4) {
+                print STDERR "  queued: $job_queue[$i]{target}\n";
+            }
+            print STDERR "  ... and " . (@job_queue - 5) . " more\n";
+        }
+    }
+
     sub dispatch_jobs {
 	my ($do,$block) = @_;
 	my $j = 0;
+
+        check_queue_state("dispatch_jobs start") if @job_queue;
+
         while (@job_queue) {
             # Find a ready worker
             my $ready_worker;
@@ -3946,6 +3974,8 @@ sub run_job_master {
 		last if (1 == $do); # done for now
 	    }
         }
+
+        check_queue_state("dispatch_jobs end") if @job_queue;
 
 	return $j;
     }
@@ -4104,24 +4134,8 @@ sub run_job_master {
                     print $master_socket "JOBSERVER_WORKERS_READY\n";
                     print STDERR "New master ready\n";
 
-                    # Check queue state and worker availability
-                    if ($ENV{SMAK_DEBUG}) {
-                        my $ready_workers = 0;
-                        for my $w (@workers) {
-                            $ready_workers++ if $worker_status{$w}{ready};
-                        }
-                        print STDERR "Queue state: " . scalar(@job_queue) . " queued jobs, ";
-                        print STDERR "$ready_workers/" . scalar(@workers) . " workers ready, ";
-                        print STDERR scalar(keys %running_jobs) . " running jobs\n";
-
-                        if (@job_queue > 0) {
-                            print STDERR "Queued jobs:\n";
-                            for my $i (0 .. ($#job_queue < 4 ? $#job_queue : 4)) {
-                                print STDERR "  - $job_queue[$i]{target}\n";
-                            }
-                            print STDERR "  ...\n" if @job_queue > 5;
-                        }
-                    }
+                    # Check queue state before dispatching
+                    check_queue_state("master reconnect");
 
                     # Dispatch any queued jobs that may have been waiting
                     dispatch_jobs();

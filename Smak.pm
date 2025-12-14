@@ -3522,6 +3522,7 @@ sub run_job_master {
     our @job_queue;  # Queue of jobs to dispatch
     our %running_jobs;  # task_id => {target, worker, dir, command, started}
     our %completed_targets;  # target => 1 (successfully built targets)
+    our %failed_targets;  # target => exit_code (failed targets)
     our %pending_composite;  # composite targets waiting for dependencies
                             # target => {deps => [list], master_socket => socket}
     our $next_task_id = 1;
@@ -3861,6 +3862,26 @@ sub run_job_master {
                     @deps = @{$pseudo_deps{$key} || []};
                 }
 
+                # Check if any dependency has failed - if so, fail this job too
+                my $has_failed_dep = 0;
+                for my $dep (@deps) {
+                    next if $dep =~ /^\.PHONY$/;
+                    next if $dep !~ /\S/;
+                    for my $single_dep (split /\s+/, $dep) {
+                        next unless $single_dep =~ /\S/;
+                        if (exists $failed_targets{$single_dep}) {
+                            print STDERR "Job '$target' FAILED: dependency '$single_dep' failed (exit $failed_targets{$single_dep})\n";
+                            $in_progress{$target} = "failed";
+                            $failed_targets{$target} = $failed_targets{$single_dep};
+                            splice(@job_queue, $i, 1);  # Remove from queue
+                            $has_failed_dep = 1;
+                            last;
+                        }
+                    }
+                    last if $has_failed_dep;
+                }
+                next if $has_failed_dep;
+
                 # Check if all dependencies are completed
                 my $deps_satisfied = 1;
                 for my $dep (@deps) {
@@ -4072,6 +4093,7 @@ sub run_job_master {
                         } else {
                             if ($job->{target}) {
                                 $in_progress{$job->{target}} = "failed";
+                                $failed_targets{$job->{target}} = $exit_code;
                             }
                             print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 
@@ -4812,6 +4834,7 @@ sub run_job_master {
                     } else {
                         if ($job->{target}) {
                             $in_progress{$job->{target}} = "failed";
+                            $failed_targets{$job->{target}} = $exit_code;
                         }
                         print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 

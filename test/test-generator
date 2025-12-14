@@ -161,16 +161,31 @@ for i in $(seq 1 $num_objects); do
 obj$i.o: $deps
 EOF
 
-    # Add random number of dummy commands (0-5)
-    for k in $(seq 1 $num_commands); do
+    # Add random number of dummy commands (0-5) with chained dependencies
+    if [ $num_commands -gt 0 ]; then
+        # First command uses original dependencies
         cat >> Makefile << EOF
-	\$(DUMMY) -in $deps -out \$@.tmp$k
+	\$(DUMMY) -in $deps -out \$@.tmp1
 EOF
-    done
-
-    # Final command to create the actual output
-    cat >> Makefile << EOF
+        # Subsequent commands use output of previous command
+        for k in $(seq 2 $num_commands); do
+            prev=$((k - 1))
+            cat >> Makefile << EOF
+	\$(DUMMY) -in \$@.tmp$prev -out \$@.tmp$k
+EOF
+        done
+        # Final command uses last tmp file
+        cat >> Makefile << EOF
+	\$(DUMMY) -in \$@.tmp$num_commands -out \$@
+EOF
+    else
+        # No intermediate commands, create output directly
+        cat >> Makefile << EOF
 	\$(DUMMY) -in $deps -out \$@
+EOF
+    fi
+
+    cat >> Makefile << EOF
 
 EOF
 done
@@ -198,16 +213,31 @@ for i in $(seq 1 $num_targets); do
 target$i: $deps
 EOF
 
-    # Add random number of dummy commands (0-5)
-    for k in $(seq 1 $num_commands); do
+    # Add random number of dummy commands (0-5) with chained dependencies
+    if [ $num_commands -gt 0 ]; then
+        # First command uses original dependencies
         cat >> Makefile << EOF
-	\$(DUMMY) -in $deps -out \$@.tmp$k
+	\$(DUMMY) -in $deps -out \$@.tmp1
 EOF
-    done
-
-    # Final command to create the actual output
-    cat >> Makefile << EOF
+        # Subsequent commands use output of previous command
+        for k in $(seq 2 $num_commands); do
+            prev=$((k - 1))
+            cat >> Makefile << EOF
+	\$(DUMMY) -in \$@.tmp$prev -out \$@.tmp$k
+EOF
+        done
+        # Final command uses last tmp file
+        cat >> Makefile << EOF
+	\$(DUMMY) -in \$@.tmp$num_commands -out \$@
+EOF
+    else
+        # No intermediate commands, create output directly
+        cat >> Makefile << EOF
 	\$(DUMMY) -in $deps -out \$@
+EOF
+    fi
+
+    cat >> Makefile << EOF
 
 EOF
 done

@@ -3321,6 +3321,7 @@ sub run_job_master {
     my %inode_cache;  # inode => path
     my %pending_path_requests;  # inode => 1 (waiting for resolution)
     my %file_modifications;  # path => {workers => [pids], last_op => time}
+    my %dirty_files;  # Manually marked dirty files: path => 1
     my $watch_client;  # Client socket to send watch notifications to
 
     our %worker_env;
@@ -4102,6 +4103,9 @@ sub run_job_master {
                     }
                     print $master_socket "JOBSERVER_WORKERS_READY\n";
                     print STDERR "New master ready\n";
+
+                    # Dispatch any queued jobs that may have been waiting
+                    dispatch_jobs();
                 }
 
             } elsif (defined $master_socket && $socket == $master_socket) {
@@ -4274,15 +4278,24 @@ sub run_job_master {
                         print $master_socket "FILES_END\n";
                     }
 
+                } elsif ($line =~ /^MARK_DIRTY:(.+)$/) {
+                    # Mark a file as dirty (out-of-date)
+                    my $file = $1;
+                    $dirty_files{$file} = 1;
+                    print STDERR "Marked file as dirty: $file\n" if $ENV{SMAK_DEBUG};
+
                 } elsif ($line =~ /^LIST_STALE$/) {
-                    # List targets that need rebuilding based on tracked modifications
+                    # List targets that need rebuilding based on tracked modifications and dirty files
                     my %stale_targets;
 
                     # Get current working directory to create relative paths
                     my $cwd = abs_path('.');
 
+                    # Combine FUSE-tracked modifications and manually marked dirty files
+                    my @all_modified_files = (keys %file_modifications, keys %dirty_files);
+
                     # For each modified file, find targets that depend on it
-                    for my $modified_file (keys %file_modifications) {
+                    for my $modified_file (@all_modified_files) {
                         # Try multiple path variations for matching
                         my @path_variations;
 

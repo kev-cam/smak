@@ -3800,6 +3800,25 @@ sub run_job_master {
         }
     }
 
+    sub check_queues {
+	my ($where) = @_;
+	my $ready_workers = 0;
+	for my $w (@workers) {
+	    $ready_workers++ if $worker_status{$w}{ready};
+	}
+	print STDERR "Queue state: " . scalar(@job_queue) . " queued jobs, ";
+	print STDERR "$ready_workers/" . scalar(@workers) . " workers ready, ";
+	print STDERR scalar(keys %running_jobs) . " running jobs\n";
+	
+	if (@job_queue > 0) {
+	    print STDERR "Queued jobs:\n";
+	    for my $i (0 .. ($#job_queue < 4 ? $#job_queue : 4)) {
+		print STDERR "  - $job_queue[$i]{target}\n";
+	    }
+	    print STDERR "  ...\n" if @job_queue > 5;
+	}
+    }
+
     sub dispatch_jobs {
 	my ($do,$block) = @_;
 	my $j = 0;
@@ -4075,6 +4094,8 @@ sub run_job_master {
                 }
                 $worker->blocking(1);
             }
+
+	    check_queues("stuck check");
         }
 
         for my $socket (@ready) {
@@ -4105,23 +4126,7 @@ sub run_job_master {
                     print STDERR "New master ready\n";
 
                     # Check queue state and worker availability
-                    if ($ENV{SMAK_DEBUG}) {
-                        my $ready_workers = 0;
-                        for my $w (@workers) {
-                            $ready_workers++ if $worker_status{$w}{ready};
-                        }
-                        print STDERR "Queue state: " . scalar(@job_queue) . " queued jobs, ";
-                        print STDERR "$ready_workers/" . scalar(@workers) . " workers ready, ";
-                        print STDERR scalar(keys %running_jobs) . " running jobs\n";
-
-                        if (@job_queue > 0) {
-                            print STDERR "Queued jobs:\n";
-                            for my $i (0 .. ($#job_queue < 4 ? $#job_queue : 4)) {
-                                print STDERR "  - $job_queue[$i]{target}\n";
-                            }
-                            print STDERR "  ...\n" if @job_queue > 5;
-                        }
-                    }
+                    check_queues("pre dispatch");
 
                     # Dispatch any queued jobs that may have been waiting
                     dispatch_jobs();

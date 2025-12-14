@@ -3676,17 +3676,40 @@ sub run_job_master {
         my $rule = '';
         my $stem = '';
 
+        my $has_fixed_deps = 0;
         if (exists $fixed_deps{$key}) {
             @deps = @{$fixed_deps{$key} || []};
             $rule = $fixed_rule{$key} || '';
+            $has_fixed_deps = 1;
         } elsif (exists $pattern_deps{$key}) {
             @deps = @{$pattern_deps{$key} || []};
             $rule = $pattern_rule{$key} || '';
         } elsif (exists $pseudo_deps{$key}) {
             @deps = @{$pseudo_deps{$key} || []};
             $rule = $pseudo_rule{$key} || '';
-        } else {
-            # Try to find pattern rule match
+        }
+
+        # If we have fixed deps but no rule, try to find a matching pattern rule
+        if ($has_fixed_deps && !($rule && $rule =~ /\S/)) {
+            print STDERR "Target '$target' in fixed_deps but no rule, checking for pattern rules\n" if $ENV{SMAK_DEBUG};
+            for my $pkey (keys %pattern_rule) {
+                if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                    my $pattern = $1;
+                    my $pattern_re = $pattern;
+                    $pattern_re =~ s/%/(.+)/g;
+                    if ($target =~ /^$pattern_re$/) {
+                        # Found matching pattern rule - use its rule, keep fixed deps
+                        $rule = $pattern_rule{$pkey} || '';
+                        $stem = $1;  # Save stem for $* expansion
+                        print STDERR "Found pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
+                        last;
+                    }
+                }
+            }
+        }
+
+        # If still no deps/rule, try to find pattern rule match
+        if (!$has_fixed_deps && !@deps) {
             for my $pkey (keys %pattern_rule) {
                 if ($pkey =~ /^[^\t]+\t(.+)$/) {
                     my $pattern = $1;

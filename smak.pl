@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
-use Getopt::Long;
+use Getopt::Long qw(:config);
 use FindBin qw($RealBin);
 use File::Path qw(make_path);
 use POSIX qw(strftime);
@@ -370,7 +370,6 @@ Available commands:
   start <N>           Start job server with N workers (if not running)
   watch               Monitor file changes from FUSE filesystem
   unwatch             Stop monitoring file changes
-  wheel               Toggle spinning wheel mode on/off
   stale               Show targets that need rebuilding (FUSE)
   dirty <file>        Mark a file as out-of-date (dirty)
   needs <file>        Show which targets depend on a file
@@ -446,24 +445,6 @@ HELP
                 print "Watch mode disabled\n";
             } else {
                 print "Job server not running.\n";
-            }
-
-        } elsif ($cmd eq 'wheel') {
-            # Toggle wheel mode
-            if ($ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} eq 'w') {
-                $ENV{SMAK_VERBOSE} = '1';
-                # Send environment update to job-master
-                if (defined $Smak::job_server_socket) {
-                    print $Smak::job_server_socket "ENV SMAK_VERBOSE=1\n";
-                }
-                print "Wheel mode disabled (verbose output enabled)\n";
-            } else {
-                $ENV{SMAK_VERBOSE} = 'w';
-                # Send environment update to job-master
-                if (defined $Smak::job_server_socket) {
-                    print $Smak::job_server_socket "ENV SMAK_VERBOSE=w\n";
-                }
-                print "Wheel mode enabled (spinning wheel active)\n";
             }
 
         } elsif ($cmd eq 'files' || $cmd eq 'f') {
@@ -753,16 +734,14 @@ if ($silent) {
 set_jobs($jobs);
 
 # Set verbose mode via environment variable so Smak.pm can access it
-# Default behavior mimics make: print commands unless -s (silent) is used
-if ($silent) {
-    # Silent mode (-s flag): don't print anything
-    $ENV{SMAK_VERBOSE} = '0';
-} elsif ($verbose || $ENV{SMAK_DEBUG} || $cli) {
-    # Verbose/debug/CLI mode: print commands
+# SMAK_DEBUG implies verbose mode, -cli defaults to wheel mode
+if ($verbose || $ENV{SMAK_DEBUG}) {
     $ENV{SMAK_VERBOSE} = '1';
+} elsif ($cli) {
+    # CLI mode defaults to wheel mode
+    $ENV{SMAK_VERBOSE} = 'w';
 } else {
-    # Default: print commands (like make does)
-    $ENV{SMAK_VERBOSE} = '1';
+    $ENV{SMAK_VERBOSE} = '0';
 }
 
 # Parse the makefile FIRST (before forking job-master)

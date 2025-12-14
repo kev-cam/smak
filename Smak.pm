@@ -17,15 +17,17 @@ my @wheel_chars = qw(/ - \\);
 my $wheel_pos = 0;
 
 sub vprint {
-    return unless $ENV{SMAK_VERBOSE};
+    my $mode;
 
-    if ($ENV{SMAK_VERBOSE} eq 'w') {
+    return if (! defined ($mode = $ENV{SMAK_VERBOSE}));
+    
+    if ($mode eq 'w') {
         # Spinning wheel mode - update in place
         # Clear line, show wheel, flush
-        print STDERR "\r" . $wheel_chars[$wheel_pos] . "  \r" . $wheel_chars[$wheel_pos];
+        print STDERR "\r" . $wheel_chars[$wheel_pos] . "  \r";
         STDERR->flush();
         $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
-    } else {
+    } elsif (1 == $mode) {
         # Normal verbose mode
         print STDERR @_;
     }
@@ -58,6 +60,7 @@ our @EXPORT_OK = qw(
     get_variable
     show_dependencies
     wait_for_jobs
+    vprint
 );
 
 our %EXPORT_TAGS = (
@@ -236,6 +239,10 @@ sub submit_job {
     print $job_server_socket "$target\n";
     print $job_server_socket "$dir\n";
     print $job_server_socket "$command\n";
+
+    unless ($silent_mode) {
+	print "$command\n";
+    }
 }
 
 sub execute_command_sequential {
@@ -716,6 +723,8 @@ sub transform_make_vars {
     return $text;
 }
 
+our %missing_inc; # bug workaround
+
 sub parse_makefile {
     my ($makefile_path) = @_;
 
@@ -839,7 +848,11 @@ sub parse_makefile {
             for my $include_file (split /\s+/, $include_files) {
                 # Skip empty entries
                 next if $include_file eq '';
-
+		
+		if (defined $missing_inc{$include_file}) {
+		    die "Already missing: $include_file !!!\n";
+		}
+			
                 # Determine include path
                 my $include_path = $include_file;
 
@@ -876,7 +889,8 @@ sub parse_makefile {
                     # Restore current makefile name
                     $makefile = $saved_makefile;
                 } elsif ($line !~ /^-include/) {
-                    warn "Warning: included file not found: $include_path\n";
+                    warn "Warning: included file not found: $include_path [$include_file]\n";
+		    $missing_inc{$include_file} = 1;
                 } elsif ($ENV{SMAK_DEBUG}) {
                     print STDERR "DEBUG: optional include not found (ignored): $include_path\n";
                 }
@@ -1621,6 +1635,27 @@ sub write_makefile {
     print "Makefile written to: $output_file\n";
 }
 
+sub looks_phony {
+    my ($target) = @_;
+    # Skip special/meta targets
+    return 1 if $target eq 'PHONY';
+    return 1 if $target eq 'all';
+    return 1 if $target =~ /^\.DEFAULT_GOAL/;
+    # Skip targets that look like variables or directives
+    return 1 if $target =~ /^\$/;
+    # Skip targets with spaces (multi-file targets from meson)
+    return 1 if $target =~ /\s/;
+    # Skip paths that point outside the build directory
+    return 1 if $target =~ /^\.\./;
+    # Skip the ninja file itself and meson internals
+    return 1 if $target =~ /\.ninja$/;
+    if ($target =~ /^meson-/) {
+	return 1 if (! $target =~ /.dat$/);
+    }
+    
+    return 0;
+}
+
 sub get_all_ninja_outputs {
     # Collect all output files from parsed ninja file
     my @outputs;
@@ -1629,19 +1664,7 @@ sub get_all_ninja_outputs {
     # Collect from fixed_deps (most common for ninja builds)
     for my $key (keys %fixed_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
-        # Skip special/meta targets
-        next if $target eq 'PHONY';
-        next if $target eq 'all';
-        next if $target =~ /^\.DEFAULT_GOAL/;
-        # Skip targets that look like variables or directives
-        next if $target =~ /^\$/;
-        # Skip targets with spaces (multi-file targets from meson)
-        next if $target =~ /\s/;
-        # Skip paths that point outside the build directory
-        next if $target =~ /^\.\./;
-        # Skip the ninja file itself and meson internals
-        next if $target =~ /\.ninja$/;
-        next if $target =~ /^meson-/;
+        next if looks_phony($target);
         # Add if not seen before
         unless ($seen{$target}++) {
             push @outputs, $target;
@@ -1651,12 +1674,7 @@ sub get_all_ninja_outputs {
     # Collect from pattern_deps (rare for ninja, but check anyway)
     for my $key (keys %pattern_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
-        next if $target eq 'PHONY';
-        next if $target eq 'all';
-        next if $target =~ /\s/;
-        next if $target =~ /^\.\./;
-        next if $target =~ /\.ninja$/;
-        next if $target =~ /^meson-/;
+        next if looks_phony($target);
         unless ($seen{$target}++) {
             push @outputs, $target;
         }
@@ -1665,12 +1683,7 @@ sub get_all_ninja_outputs {
     # Collect from pseudo_deps
     for my $key (keys %pseudo_deps) {
         my ($file, $target) = split(/\t/, $key, 2);
-        next if $target eq 'PHONY';
-        next if $target eq 'all';
-        next if $target =~ /\s/;
-        next if $target =~ /^\.\./;
-        next if $target =~ /\.ninja$/;
-        next if $target =~ /^meson-/;
+        next if looks_phony($target);
         unless ($seen{$target}++) {
             push @outputs, $target;
         }
@@ -3635,7 +3648,7 @@ sub run_job_master {
 
             return 1 if -e $target_path;
 
-            print STDERR "Warning: Target '$target' not found at '$target_path', retry $attempt/3\n";
+            vprint "Warning: Target '$target' not found at '$target_path', retry $attempt/3\n";
         }
 
         # Final check
@@ -3644,7 +3657,7 @@ sub run_job_master {
             return 1;
         }
 
-        print STDERR "ERROR: Target '$target' does not exist at '$target_path' after task completion\n";
+        vprint "ERROR: Target '$target' does not exist at '$target_path' after task completion\n";
         return 0;
     }
 
@@ -3918,6 +3931,11 @@ sub run_job_master {
             print $ready_worker "CMD $job->{command}\n";
 
             vprint "Dispatched task $task_id to worker\n";
+
+	    if (! $silent_mode) {
+		print "$job->{command}\n";
+	    }
+	    
             broadcast_observers("DISPATCHED $task_id $job->{target}");
 
             if ($block) {
@@ -4487,7 +4505,7 @@ sub run_job_master {
                         $select->add($worker);
                         push @workers, $worker;
                         $worker_status{$worker} = {ready => 0, task_id => 0};
-                        print STDERR "Worker connected during runtime\n";
+                        warn "Worker connected during runtime\n";
 
                         # Send environment to new worker
                         print $worker "ENV_START\n";
@@ -4600,8 +4618,7 @@ sub run_job_master {
                 my $line = <$socket>;
                 unless (defined $line) {
                     # Worker disconnected
-                    vprint "Worker disconnected
-";
+                    vprint "Worker disconnected\n";
                     $select->remove($socket);
                     next;
                 }
@@ -4610,8 +4627,7 @@ sub run_job_master {
                 if ($line eq 'READY') {
                     # Worker is ready for a job
                     $worker_status{$socket}{ready} |= 2;
-                    vprint "Worker ready
-";
+                    vprint "Worker ready\n";
                     # Try to dispatch queued jobs
                     dispatch_jobs();
 

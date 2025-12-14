@@ -3832,20 +3832,22 @@ sub run_job_master {
             $ready_workers++ if $worker_status{$w}{ready};
         }
 
-        print STDERR "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
-        print STDERR "$ready_workers/" . scalar(@workers) . " ready, ";
-        print STDERR scalar(keys %running_jobs) . " running\n";
-
-        if (@job_queue > 0 && @job_queue <= 5) {
-            for my $job (@job_queue) {
-                print STDERR "  queued: $job->{target}\n";
-            }
-        } elsif (@job_queue > 5) {
-            for my $i (0..4) {
-                print STDERR "  queued: $job_queue[$i]{target}\n";
-            }
-            print STDERR "  ... and " . (@job_queue - 5) . " more\n";
+	vprint "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
+	vprint "$ready_workers/" . scalar(@workers) . " ready, ";
+	vprint scalar(keys %running_jobs) . " running\n";
+	
+	if (@job_queue > 0 && @job_queue <= 5) {
+	    for my $job (@job_queue) {
+		vprint "  queued: $job->{target}\n";
+	    }
+	} elsif (@job_queue > 5) {
+	    for my $i (0..4) {
+		vprint "  queued: $job_queue[$i]{target}\n";
+	    }
+	    vprint "  ... and " . (@job_queue - 5) . " more\n";
         }
+
+	# can abort here if things are bad
     }
 
     # Check if a target has any failed dependencies (recursively)
@@ -4002,7 +4004,7 @@ sub run_job_master {
                                 # Target marked complete but file not visible - verify with retries
                                 unless (verify_target_exists($single_dep, $job->{dir})) {
                                     $deps_satisfied = 0;
-                                    print STDERR "Job '$target' waiting for dependency '$single_dep' (completed but not yet visible)\n" if $ENV{SMAK_DEBUG};
+                                    vprint "Job '$target' waiting for dependency '$single_dep' (completed but not yet visible)\n" if $ENV{SMAK_DEBUG};
                                     last;
                                 }
                             }

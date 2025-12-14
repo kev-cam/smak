@@ -3825,6 +3825,48 @@ sub run_job_master {
         }
     }
 
+    # Check if a target has any failed dependencies (recursively)
+    # Returns the failed dependency name if found, undef otherwise
+    sub has_failed_dependency {
+        my ($target, $visited) = @_;
+        $visited //= {};
+
+        # Avoid infinite recursion
+        return undef if $visited->{$target}++;
+
+        # Direct check - is this target itself failed?
+        return $target if exists $failed_targets{$target};
+
+        # Get dependencies for this target
+        my @deps;
+        if (exists $fixed_deps{$target}) {
+            @deps = @{$fixed_deps{$target}};
+        }
+
+        # Check each dependency recursively
+        for my $dep (@deps) {
+            next if $dep =~ /^\.PHONY$/;
+            next if $dep !~ /\S/;
+
+            # Expand variables in dependency
+            my $expanded_dep = $dep;
+            while ($expanded_dep =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $expanded_dep =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+
+            for my $single_dep (split /\s+/, $expanded_dep) {
+                next unless $single_dep =~ /\S/;
+
+                my $failed = has_failed_dependency($single_dep, $visited);
+                return $failed if defined $failed;
+            }
+        }
+
+        return undef;
+    }
+
     sub dispatch_jobs {
 	my ($do,$block) = @_;
 	my $j = 0;
@@ -3884,6 +3926,7 @@ sub run_job_master {
 
                 # Check if all dependencies are completed
                 my $deps_satisfied = 1;
+                my $has_unbuildable_dep = 0;
                 for my $dep (@deps) {
                     next if $dep =~ /^\.PHONY$/;
                     next if $dep !~ /\S/;
@@ -3924,14 +3967,29 @@ sub run_job_master {
                             # OK to proceed
                         } else {
                             # Dependency not completed and doesn't exist
-                            $deps_satisfied = 0;
-                            print STDERR "  Job '$target' waiting for dependency '$single_dep'\n";
-                            last;
+                            # Check if the dependency has failed dependencies (transitively)
+                            my $failed_dep = has_failed_dependency($single_dep);
+                            if (defined $failed_dep) {
+                                # Dependency cannot be built - fail this job too
+                                print STDERR "Job '$target' FAILED: dependency '$single_dep' cannot be built (depends on failed target '$failed_dep')\n";
+                                $in_progress{$target} = "failed";
+                                $failed_targets{$target} = $failed_targets{$failed_dep};
+                                splice(@job_queue, $i, 1);  # Remove from queue
+                                $has_unbuildable_dep = 1;
+                                last;
+                            } else {
+                                # Dependency is still building or queued
+                                $deps_satisfied = 0;
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep'\n";
+                                last;
+                            }
                         }
                     }
 
+                    last if $has_unbuildable_dep;
                     last unless $deps_satisfied;
                 }
+                next if $has_unbuildable_dep;
 
                 if ($deps_satisfied) {
                     $job_index = $i;

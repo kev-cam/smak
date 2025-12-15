@@ -399,7 +399,7 @@ sub expand_vars {
                     # Convert replacement pattern
                     $repl =~ s/%/\$1/g;
                     my @words = split /\s+/, $text;
-                    @words = map { s/$regex/$repl/r } @words;
+                    @words = map { s/$regex/$repl/eer } @words;
                     $replacement = join(' ', @words);
                 }
             } elsif ($func eq 'subst') {

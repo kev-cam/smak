@@ -2643,11 +2643,26 @@ sub interactive_debug {
     if (! $do1) {
 	$OUT = $term->OUT || \*STDOUT;
     }
-    
+
+    # Check if STDIN is a terminal
+    my $is_tty = -t STDIN;
+
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
 
-    while ((1 == $do1++) ||
-	   defined($input = $term->readline($echo ? $prompt : $prompt))) {
+    while (1) {
+        # Read input differently based on whether we're in a TTY
+        if ($do1 && $do1++ > 1) {
+            last;  # Only one iteration when $OUT is defined
+        }
+
+        if ($is_tty) {
+            $input = $term->readline($echo ? $prompt : $prompt);
+            last unless defined $input;
+        } else {
+            # Read from STDIN directly when piped
+            $input = <STDIN>;
+            last unless defined $input;
+        }
 
         chomp $input;
 

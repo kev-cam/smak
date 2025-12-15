@@ -3670,13 +3670,17 @@ sub run_job_master {
     }
 
     # Recursively queue a target and all its dependencies
+    our @recurse_log; # for debug
+    our $recurse_limit = 20;
     sub queue_target_recursive {
-        my ($target, $dir, $msocket) = @_;
+        my ($target, $dir, $msocket, $depth) = @_;
         $msocket ||= $master_socket;  # Use provided or fall back to global
 
         # Skip if already handled
         return if is_target_pending($target);
 
+	$recurse_log[$depth] = "${dir}:$target";
+	
         # Lookup dependencies
         my $key = "$makefile\t$target";
         my @deps;
@@ -3774,7 +3778,16 @@ sub run_job_master {
                 }
 
                 # Recursively queue this dependency
-                queue_target_recursive($single_dep, $dir, $msocket);
+		if ($depth > $recurse_limit) {
+		    warn "Recursion queuing ${dir}:$single_dep\nTraceback - \n";
+		    my $i = 0;
+		    while ($i < $#recurse_log) {
+			warn "\t ".$recurse_log[$i++]."\n";
+		    }
+		    return;
+		} else {
+		    queue_target_recursive($single_dep, $dir, $msocket, $depth+1);
+		}
             }
         }
 
@@ -4357,7 +4370,7 @@ sub run_job_master {
                     print STDERR "DEBUG: Dependencies: " . join(', ', @deps) . "\n" if $ENV{SMAK_DEBUG} && @deps;
 
                     # Use recursive queuing to handle dependencies
-                    queue_target_recursive($target, $dir, $master_socket);
+                    queue_target_recursive($target, $dir, $master_socket, 0);
 
                     vprint "Job queue now has " . scalar(@job_queue) . " jobs\n";
                     broadcast_observers("QUEUED $target");

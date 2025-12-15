@@ -33,6 +33,10 @@ sub vprint {
     }
 }
 
+sub dprint { # for debugging v->d
+    print STDERR @_;
+}
+
 our @EXPORT_OK = qw(
     parse_makefile
     build_target
@@ -129,7 +133,7 @@ sub set_silent_mode {
 
 sub set_jobs {
     my ($num_jobs) = @_;
-    $jobs = $num_jobs || 1;
+    $jobs = $num_jobs;
 }
 
 sub start_job_server {
@@ -223,11 +227,18 @@ our %in_progress;
 sub submit_job {
     my ($target, $command, $dir) = @_;
 
-    return unless $job_server_socket;  # No job server
+    unless ($job_server_socket) {
+	warn "ERROR: no job server\n";
+	return -1;
+    }
 
-    if ($in_progress{$target}) {
-	warn "In progress: $target\n" if $ENV{SMAK_DEBUG};
-	return;
+    if (my $prog = $in_progress{$target}) {
+	if ("queued" eq $prog) {
+	    dispatch_jobs(1);
+	    $prog = $in_progress{$target};
+	    return 1 if ("queued" ne $prog);
+	}
+	return 2;
     }
 
     $in_progress{$target} = "queued";
@@ -239,6 +250,8 @@ sub submit_job {
     print $job_server_socket "$target\n";
     print $job_server_socket "$dir\n";
     print $job_server_socket "$command\n";
+
+    return 0;
 }
 
 sub execute_command_sequential {
@@ -2114,8 +2127,8 @@ sub build_target {
             # Execute command - use job system if available, otherwise sequential
             use Cwd 'getcwd';
             my $cwd = getcwd();
-            if ($job_server_socket) {
-                warn "DEBUG[" . __LINE__ . "]:     Using job server\n" if $ENV{SMAK_DEBUG};
+            if ($job_server_socket && 0 != $jobs) {
+                warn "DEBUG[" . __LINE__ . "]:     Using job server ($jobs)\n" if $ENV{SMAK_DEBUG};
                 # Parallel mode - submit to job server
                 submit_job($target, $cmd_line, $cwd);
             } else {
@@ -3920,7 +3933,7 @@ sub run_job_master {
 	my ($do,$block) = @_;
 	my $j = 0;
 
-        check_queue_state("dispatch_jobs start") if @job_queue;
+        check_queue_state("dispatch_jobs start");
 
         while (@job_queue) {
             # Find a ready worker
@@ -3956,7 +3969,7 @@ sub run_job_master {
 		    }
 		}
 
-	        last if ($i <= $#job_queue); 
+	        last if ($i > $#job_queue); 
 	       		
                 # Check if this job's dependencies are satisfied
                 my $key = "$makefile\t$target";

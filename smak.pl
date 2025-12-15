@@ -27,7 +27,7 @@ my $log_fh;
 my $dry_run = 0;
 my $silent = 0;
 my $yes = 0;  # Auto-answer yes to prompts
-my $jobs = 1;  # Number of parallel jobs (default: 1 = sequential)
+my $jobs = 0;  # Number of parallel jobs (default: 0 => sequential)
 my $cli = 0;  # CLI mode (interactive shell)
 my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
@@ -50,7 +50,7 @@ if (defined $ENV{USR_SMAK_OPT}) {
         'n|just-print|dry-run|recon' => \$dry_run,
         's|silent|quiet' => \$silent,
         'yes' => \$yes,
-        'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
+        'j|jobs:i' => \$jobs,
         'cli' => \$cli,
         'v|verbose' => \$verbose,
     );
@@ -69,13 +69,13 @@ GetOptions(
     'n|just-print|dry-run|recon' => \$dry_run,
     's|silent|quiet' => \$silent,
     'yes' => \$yes,
-    'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
+    'j|jobs' => \$jobs,
     'cli' => \$cli,
     'v|verbose' => \$verbose,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
-if (defined $jobs && $jobs == 0) {
+if (defined $jobs && $jobs eq "auto") {
     # Try to detect CPU count
     my $cpu_count = 1;
     if (-f '/proc/cpuinfo') {

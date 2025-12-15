@@ -69,7 +69,7 @@ GetOptions(
     'n|just-print|dry-run|recon' => \$dry_run,
     's|silent|quiet' => \$silent,
     'yes' => \$yes,
-    'j|jobs' => \$jobs,
+    'j|jobs:i' => \$jobs,
     'cli' => \$cli,
     'v|verbose' => \$verbose,
 ) or die "Error in command line arguments\n";

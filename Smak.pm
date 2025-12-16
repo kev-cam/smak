@@ -4070,8 +4070,16 @@ sub run_job_master {
                                 }
                             }
                         } elsif (-e $dep_path) {
-                            # File exists on disk (pre-existing source file)
-                            # OK to proceed
+                            # File exists on disk - but check if it's being rebuilt
+                            if ($in_progress{$single_dep} &&
+                                $in_progress{$single_dep} ne "done" &&
+                                $in_progress{$single_dep} ne "failed") {
+                                # Dependency is being rebuilt - wait for it
+                                $deps_satisfied = 0;
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (being rebuilt)\n";
+                                last;
+                            }
+                            # Pre-existing source file or already built, OK to proceed
                         } else {
                             # Dependency not completed and doesn't exist
                             # Check if the dependency has failed dependencies (transitively)

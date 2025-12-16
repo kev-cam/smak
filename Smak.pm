@@ -3927,8 +3927,10 @@ sub run_job_master {
     sub fail_dependent_composite_targets {
         my ($failed_target, $exit_code) = @_;
 
+        print STDERR "DEBUG: fail_dependent_composite_targets called with failed_target='$failed_target'\n";
         for my $comp_target (keys %pending_composite) {
             my $comp = $pending_composite{$comp_target};
+            print STDERR "DEBUG: Checking composite '$comp_target' with deps: [" . join(", ", @{$comp->{deps}}) . "] against failed target '$failed_target'\n";
             # Check if this failed target is in the composite's dependencies
             if (grep { $_ eq $failed_target } @{$comp->{deps}}) {
                 print STDERR "Composite target '$comp_target' FAILED because dependency '$failed_target' failed (exit code $exit_code)\n";
@@ -3938,6 +3940,8 @@ sub run_job_master {
                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                 }
                 delete $pending_composite{$comp_target};
+            } else {
+                print STDERR "DEBUG: No match found for '$failed_target' in composite '$comp_target'\n";
             }
         }
     }
@@ -4275,6 +4279,7 @@ sub run_job_master {
                             # Check if this failed task is a dependency of any composite target
                             for my $comp_target (keys %pending_composite) {
                                 my $comp = $pending_composite{$comp_target};
+                                print STDERR "DEBUG: Checking composite '$comp_target' with deps: [" . join(", ", @{$comp->{deps}}) . "] against failed target '$job->{target}'\n";
                                 # Check if this failed target is in the composite's dependencies
                                 if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                     print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
@@ -4283,6 +4288,8 @@ sub run_job_master {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                     }
                                     delete $pending_composite{$comp_target};
+                                } else {
+                                    print STDERR "DEBUG: No match found for '$job->{target}' in composite '$comp_target'\n";
                                 }
                             }
                         }
@@ -5016,6 +5023,7 @@ sub run_job_master {
                         # Check if this failed task is a dependency of any composite target
                         for my $comp_target (keys %pending_composite) {
                             my $comp = $pending_composite{$comp_target};
+                            print STDERR "DEBUG: Checking composite '$comp_target' with deps: [" . join(", ", @{$comp->{deps}}) . "] against failed target '$job->{target}'\n";
                             # Check if this failed target is in the composite's dependencies
                             if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                 print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
@@ -5024,6 +5032,8 @@ sub run_job_master {
                                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                 }
                                 delete $pending_composite{$comp_target};
+                            } else {
+                                print STDERR "DEBUG: No match found for '$job->{target}' in composite '$comp_target'\n";
                             }
                         }
                     }

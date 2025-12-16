@@ -3064,12 +3064,15 @@ sub cmd_start {
     # Start the job server
     require Smak;  # Make sure we have access to start_job_server
     Smak::start_job_server($num_jobs);
+    if (defined $Smak::job_server_pid) {
+	# Update state
+	${$state->{socket}} = $Smak::job_server_socket;
+	${$state->{server_pid}} = $Smak::job_server_pid;
 
-    # Update state
-    ${$state->{socket}} = $Smak::job_server_socket;
-    ${$state->{server_pid}} = $Smak::job_server_pid;
-
-    print "Job server started (PID: $Smak::job_server_pid)\n";
+	print "Job server started (PID: $Smak::job_server_pid)\n";
+    } else {
+	print "Failed to start job server\n";
+    }
 }
 
 sub cmd_kill {
@@ -4531,7 +4534,7 @@ sub run_job_master {
                                 $in_progress{$single_dep} ne "failed") {
                                 # Dependency is being rebuilt - wait for it
                                 $deps_satisfied = 0;
-                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (being rebuilt)\n";
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (being rebuilt)\n" if $ENV{SMAK_DEBUG};
                                 last;
                             }
                             # Pre-existing source file or already built, OK to proceed
@@ -4571,14 +4574,16 @@ sub run_job_master {
 
             # No job with satisfied dependencies found
             if ($job_index < 0) {
-                print STDERR "No jobs with satisfied dependencies (stuck!)\n";
-                print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
-                my $max_show = @job_queue < 10 ? $#job_queue : 9;
-                for my $i (0 .. $max_show) {
-                    my $job = $job_queue[$i];
-                    print STDERR "  [$i] $job->{target}\n";
-                }
-                print STDERR "  ...\n" if @job_queue > 10;
+		if ($ENV{SMAK_DEBUG}) {
+		    print STDERR "No jobs with satisfied dependencies (stuck!)\n";
+		    print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
+		    my $max_show = @job_queue < 10 ? $#job_queue : 9;
+		    for my $i (0 .. $max_show) {
+			my $job = $job_queue[$i];
+			print STDERR "  [$i] $job->{target}\n";
+		    }
+		    print STDERR "  ...\n" if @job_queue > 10;
+		}
                 last;
             }
 

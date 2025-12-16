@@ -4054,6 +4054,13 @@ sub run_job_master {
                                 # File exists, dependency satisfied
                             } elsif (exists $pending_composite{$single_dep}) {
                                 # Composite target (phony/aggregator), no file needed
+                            } elsif (exists $pseudo_deps{"$makefile\t$single_dep"}) {
+                                # Phony target defined in Makefile, no file needed
+                            } elsif ($single_dep =~ /^(all|clean|install|test|check|depend|dist|
+                                                       distclean|maintainer-clean|mostlyclean|
+                                                       cmake_check_build_system|cmake_force|help|list|
+                                                       package|preinstall|rebuild_cache|edit_cache)$/x) {
+                                # Common phony target, no file needed
                             } else {
                                 # Target marked complete but file not visible - verify with retries
                                 unless (verify_target_exists($single_dep, $job->{dir})) {

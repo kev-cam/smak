@@ -321,7 +321,7 @@ if ($verbose || $ENV{SMAK_DEBUG}) {
     $ENV{SMAK_VERBOSE} = '1';
 } elsif ($cli) {
     # CLI mode defaults to wheel mode
-    $ENV{SMAK_VERBOSE} = 'w';
+    $ENV{SMAK_VERBOSE} = '0'; # needs fixed !!!
 } else {
     $ENV{SMAK_VERBOSE} = '0';
 }

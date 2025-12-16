@@ -3757,6 +3757,26 @@ sub run_job_master {
         }
         @deps = @expanded_deps;
 
+        # For composite targets (no rule but has deps), register them BEFORE queuing dependencies
+        # This ensures they can be failed if a dependency fails during recursive queuing
+        if (!($rule && $rule =~ /\S/) && @deps > 0) {
+            my $target_path = $target =~ m{^/} ? $target : "$dir/$target";
+            if (-e $target_path) {
+                # File already exists, will mark complete after queuing deps
+            } else {
+                # Register composite target early so it can be failed by dependencies
+                my @pending_deps = grep { !exists $completed_targets{$_} && !exists $failed_targets{$_} } @deps;
+                if (@pending_deps) {
+                    $in_progress{$target} = "pending";
+                    $pending_composite{$target} = {
+                        deps => \@pending_deps,
+                        master_socket => $msocket,
+                    };
+                    print STDERR "Pre-registering composite target '$target' with " . scalar(@pending_deps) . " pending deps\n" if $ENV{SMAK_DEBUG};
+                }
+            }
+        }
+
         # Recursively queue each dependency first
         for my $dep (@deps) {
             next if $dep =~ /^\.PHONY$/;
@@ -3820,21 +3840,38 @@ sub run_job_master {
                 $in_progress{$target} = "done";
                 print STDERR "Target '$target' exists at '$target_path', marking complete (no rule found)\n" if $ENV{SMAK_DEBUG};
             } else {
-                # Track pending dependencies
-                my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
-                if (@pending_deps) {
-                    $in_progress{$target} = "pending";
-                    $pending_composite{$target} = {
-                        deps => \@pending_deps,
-                        master_socket => $msocket,
-                    };
-                    vprint "Composite target $target waiting for " . scalar(@pending_deps) . " dependencies\n";
-                    print STDERR "  Pending: " . join(", ", @pending_deps) . "\n" if $ENV{SMAK_DEBUG};
+                # Update or finalize composite target registration
+                # Check if any dependencies failed during recursive queuing
+                my @failed_deps = grep { exists $failed_targets{$_} } @deps;
+                if (@failed_deps) {
+                    # One or more dependencies failed - this should have been caught already
+                    # but handle it here as a safety net
+                    if (exists $pending_composite{$target}) {
+                        delete $pending_composite{$target};
+                    }
+                    $in_progress{$target} = "failed";
+                    $failed_targets{$target} = $failed_targets{$failed_deps[0]};
+                    print STDERR "Composite target '$target' FAILED due to failed dependency '$failed_deps[0]'\n";
                 } else {
-                    # All deps already complete
-                    $completed_targets{$target} = 1;
-                    $in_progress{$target} = "done";
-                    print $msocket "JOB_COMPLETE $target 0\n" if $msocket;
+                    my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
+                    if (@pending_deps) {
+                        # Update the composite target (may have been pre-registered)
+                        $in_progress{$target} = "pending";
+                        $pending_composite{$target} = {
+                            deps => \@pending_deps,
+                            master_socket => $msocket,
+                        };
+                        vprint "Composite target $target waiting for " . scalar(@pending_deps) . " dependencies\n";
+                        print STDERR "  Pending: " . join(", ", @pending_deps) . "\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        # All deps already complete
+                        if (exists $pending_composite{$target}) {
+                            delete $pending_composite{$target};
+                        }
+                        $completed_targets{$target} = 1;
+                        $in_progress{$target} = "done";
+                        print $msocket "JOB_COMPLETE $target 0\n" if $msocket;
+                    }
                 }
             }
         } else {
@@ -4054,6 +4091,13 @@ sub run_job_master {
                                 # File exists, dependency satisfied
                             } elsif (exists $pending_composite{$single_dep}) {
                                 # Composite target (phony/aggregator), no file needed
+                            } elsif (exists $pseudo_deps{"$makefile\t$single_dep"}) {
+                                # Phony target defined in Makefile, no file needed
+                            } elsif ($single_dep =~ /^(all|clean|install|test|check|depend|dist|
+                                                       distclean|maintainer-clean|mostlyclean|
+                                                       cmake_check_build_system|cmake_force|help|list|
+                                                       package|preinstall|rebuild_cache|edit_cache)$/x) {
+                                # Common phony target, no file needed
                             } else {
                                 # Target marked complete but file not visible - verify with retries
                                 unless (verify_target_exists($single_dep, $job->{dir})) {
@@ -4063,8 +4107,16 @@ sub run_job_master {
                                 }
                             }
                         } elsif (-e $dep_path) {
-                            # File exists on disk (pre-existing source file)
-                            # OK to proceed
+                            # File exists on disk - but check if it's being rebuilt
+                            if ($in_progress{$single_dep} &&
+                                $in_progress{$single_dep} ne "done" &&
+                                $in_progress{$single_dep} ne "failed") {
+                                # Dependency is being rebuilt - wait for it
+                                $deps_satisfied = 0;
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (being rebuilt)\n";
+                                last;
+                            }
+                            # Pre-existing source file or already built, OK to proceed
                         } else {
                             # Dependency not completed and doesn't exist
                             # Check if the dependency has failed dependencies (transitively)

@@ -2502,204 +2502,622 @@ sub save_modifications {
     print "Saved modifications to '$output_file'\n";
 }
 
-sub server_cli
-{
-    my ($jobserver_pid,$socket,$prompt,$term,$selected_js) = @_;
-    # Enter CLI mode
-    use Term::ReadLine;
-    
-    # Set up signal handler for graceful exit
-    my $exit_requested = 0;
-    local $SIG{INT} = sub { $exit_requested = 1; };
-    
-    my $line;
-    while (!$exit_requested && defined($line = $term->readline($prompt))) {
-	chomp $line;
-	$line =~ s/^\s+|\s+$//g;
-	
-	next if $line eq '';
-	$term->addhistory($line) if $line =~ /\S/;
-	
-	my @words = split(/\s+/, $line);
-	my $cmd = shift @words;
+# Unified CLI - handles both standalone and attached modes
+sub unified_cli {
+    my %opts = @_;
+    # Options:
+    #   socket         => Job server socket (if attached)
+    #   server_pid     => Job server PID (if we own it)
+    #   mode           => 'standalone' | 'attached'
+    #   jobs           => Number of parallel jobs
+    #   makefile       => Makefile path
+    #   own_server     => 1 if we started the server, 0 if attaching
+    #   prompt         => CLI prompt string (optional)
+    #   term           => Term::ReadLine object (optional)
 
-	if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') {
-	    print "Shutting down job server...\n";
-	    print $socket "SHUTDOWN\n";
-	    my $ack = <$socket>;
-	    last;
-	    
-	} elsif ($cmd eq 'detach') {
-	    print "Detaching from job server...\n";
-	    last;
-	    
-	} elsif ($cmd eq 'help' || $cmd eq 'h' || $cmd eq '?') {
-	    print <<'HELP';
+    use Term::ReadLine;
+    use IO::Select;
+
+    my $mode = $opts{mode} || 'standalone';
+    my $socket = $opts{socket};
+    my $server_pid = $opts{server_pid};
+    my $own_server = $opts{own_server} // ($mode eq 'standalone' ? 1 : 0);
+    my $jobs = $opts{jobs} || 1;
+    my $makefile = $opts{makefile} || 'Makefile';
+
+    # Create or use existing terminal
+    my $term = $opts{term} || Term::ReadLine->new('smak> ');
+    my $prompt = $opts{prompt} || 'smak> ';
+
+    # Track state
+    my $watch_enabled = 0;
+    my $exit_requested = 0;
+    my $detached = 0;
+
+    # Signal handlers
+    my $detach_handler = sub { $detached = 1; };
+    local $SIG{INT} = $detach_handler;
+
+    print "Smak unified CLI - type 'help' for commands\n";
+    print "Mode: $mode\n";
+    print "Makefile: $makefile\n";
+    print "Parallel jobs: $jobs\n" if $jobs > 1;
+    print "\n";
+
+    # Helper: check for watch notifications
+    my $check_notifications = sub {
+        return unless $watch_enabled && defined $socket;
+        my $select = IO::Select->new($socket);
+        while ($select->can_read(0)) {
+            my $notif = <$socket>;
+            last unless defined $notif;
+            chomp $notif;
+            if ($notif =~ /^WATCH:(.+)$/) {
+                print "\r\033[K[File changed: $1]\n";
+                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+            } elsif ($notif =~ /^WATCH_STARTED|^WATCH_/) {
+                last;
+            }
+        }
+    };
+
+    # Main command loop
+    my $line;
+    while (!$exit_requested && !$detached && defined($line = $term->readline($prompt))) {
+        $check_notifications->();
+
+        chomp $line;
+        $line =~ s/^\s+|\s+$//g;
+        next if $line eq '';
+
+        $term->addhistory($line) if $line =~ /\S/;
+
+        my @words = split(/\s+/, $line);
+        my $cmd = shift @words;
+
+        # Dispatch commands
+        dispatch_command($cmd, \@words, \%opts, {
+            socket => \$socket,
+            server_pid => \$server_pid,
+            watch_enabled => \$watch_enabled,
+            exit_requested => \$exit_requested,
+            detached => \$detached,
+            term => $term,
+        });
+    }
+
+    # Cleanup on exit
+    if ($exit_requested && $own_server && $socket) {
+        print "Shutting down job server...\n";
+        print $socket "SHUTDOWN\n";
+        my $ack = <$socket>;
+    } elsif ($detached) {
+        print "Detaching from CLI...\n";
+    }
+
+    return $exit_requested ? 'stop' : 'detach';
+}
+
+# Command dispatcher
+sub dispatch_command {
+    my ($cmd, $words, $opts, $state) = @_;
+
+    my $socket = ${$state->{socket}};
+    my $server_pid = ${$state->{server_pid}};
+
+    # Command dispatch table
+    if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') {
+        ${$state->{exit_requested}} = 1;
+
+    } elsif ($cmd eq 'detach') {
+        ${$state->{detached}} = 1;
+
+    } elsif ($cmd eq 'help' || $cmd eq 'h' || $cmd eq '?') {
+        show_unified_help();
+
+    } elsif ($cmd eq 'build' || $cmd eq 'b') {
+        cmd_build($words, $socket, $opts, $state);
+
+    } elsif ($cmd eq 'rebuild') {
+        cmd_rebuild($words, $socket, $opts);
+
+    } elsif ($cmd eq 'watch' || $cmd eq 'w') {
+        cmd_watch($socket, $state);
+
+    } elsif ($cmd eq 'unwatch') {
+        cmd_unwatch($socket, $state);
+
+    } elsif ($cmd eq 'tasks' || $cmd eq 't') {
+        cmd_tasks($socket);
+
+    } elsif ($cmd eq 'status') {
+        cmd_status($socket);
+
+    } elsif ($cmd eq 'progress') {
+        cmd_progress($words, $socket);
+
+    } elsif ($cmd eq 'files' || $cmd eq 'f') {
+        cmd_files($socket);
+
+    } elsif ($cmd eq 'stale') {
+        cmd_stale($socket);
+
+    } elsif ($cmd eq 'dirty') {
+        cmd_dirty($words, $socket);
+
+    } elsif ($cmd eq 'needs') {
+        cmd_needs($words, $socket);
+
+    } elsif ($cmd eq 'list' || $cmd eq 'l') {
+        cmd_list($words, $socket);
+
+    } elsif ($cmd eq 'vars' || $cmd eq 'v') {
+        cmd_vars($words, $socket);
+
+    } elsif ($cmd eq 'deps' || $cmd eq 'd') {
+        cmd_deps($words, $socket);
+
+    } elsif ($cmd eq 'vpath') {
+        cmd_vpath($words, $socket);
+
+    } elsif ($cmd eq 'start') {
+        cmd_start($words, $opts, $state);
+
+    } elsif ($cmd eq 'kill') {
+        cmd_kill($socket);
+
+    } elsif ($cmd eq 'restart') {
+        cmd_restart($words, $socket, $opts);
+
+    } else {
+        print "Unknown command: $cmd (try 'help')\n";
+    }
+}
+
+sub show_unified_help {
+    print <<'HELP';
 Available commands:
-  build <target>      Build the specified target
+  build <target>      Build the specified target (or default if none given)
+  rebuild <target>    Rebuild only if tracked files changed (FUSE)
+  watch, w            Monitor file changes from FUSE filesystem
+  unwatch             Stop monitoring file changes
   tasks, t            List pending and active tasks
   status              Show job server status
-  progress            Show job status
-  vpath <file>        Test vpath resolution for a file
+  progress            Show detailed job progress
   files, f            List tracked file modifications (FUSE)
+  stale               Show targets that need rebuilding (FUSE)
+  dirty <file>        Mark a file as out-of-date (dirty)
+  needs <file>        Show which targets depend on a file
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
   deps <target>       Show dependencies for target
+  vpath <file>        Test vpath resolution for a file
+  start [N]           Start job server with N workers (if not running)
   kill                Kill all workers
   restart [N]         Restart workers (optionally specify count)
-  detach              Detach from job server (leave it running)
+  detach              Detach from CLI, leave job server running
   help, h, ?          Show this help
   quit, exit, q       Shut down job server and exit
 
 Keyboard shortcuts:
-  Ctrl-C              Detach from job server
+  Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)
 
+Examples:
+  build all           Build the 'all' target
+  build               Build the default target
+  list task           List targets matching 'task'
+  deps foo.o          Show dependencies for foo.o
+  watch               Enable file change monitoring
+  restart 8           Restart workers with 8 workers
 HELP
+}
 
-	} elsif ($cmd eq 'build' || $cmd eq 'b') {
-	    if (@words == 0) {
-		print "Usage: build <target>\n";
-	    } else {
-		for my $target (@words) {
-		    print $socket "SUBMIT_JOB\n";
-		    print $socket "$target\n";
-		    print $socket ".\n";
-		    print $socket "cd . && make $target\n";
-		    
-		    # Wait for completion with interruptible reads
-		    my $select = IO::Select->new($socket);
-		    my $job_done = 0;
-		    while (!$exit_requested && !$job_done) {
-			if ($select->can_read(0.1)) {
-			    my $response = <$socket>;
-			    last unless defined $response;
-			    chomp $response;
-			    if ($response =~ /^OUTPUT (.*)$/) {
-				print "$1\n";
-			    } elsif ($response =~ /^ERROR (.*)$/) {
-				print "❌ ERROR: $1\n";
-			    } elsif ($response =~ /^WARN (.*)$/) {
-				print "⚠️  WARN: $1\n";
-			    } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
-				my ($completed_target, $exit_code) = ($1, $2);
-				if ($exit_code == 0) {
-				    print "✓ Build succeeded: $completed_target\n";
-				} else {
-				    print "✗ Build failed: $completed_target (exit code $exit_code)\n";
-				}
-				$job_done = 1;
-			    }
-			}
-		    }
-		    
-		    if ($exit_requested) {
-			print "\nBuild interrupted.\n";
-			last;
-		    }
-		}
-	    }
-	    
-	} elsif ($cmd eq 'progress') {
-	    my $op = join(' ',@words);
-	    print $socket "IN_PROGRESS $op\n";
-	    while (my $response = <$socket>) {
-		chomp $response;
-		last if $response eq 'END_PROGRESS';
-		print "$response\n";
-	    }
+# Command handlers - work in both standalone and attached modes
 
-	} elsif ($cmd eq 'vpath') {
-	    if (@words == 0) {
-		print "Usage: vpath <file>\n";
-	    } else {
-		my $file = $words[0];
-		use Cwd 'getcwd';
-		my $cwd = getcwd();
+sub cmd_build {
+    my ($words, $socket, $opts, $state) = @_;
 
-		# Show vpath patterns
-		print "Available vpath patterns:\n";
-		if (keys %vpath) {
-		    for my $p (keys %vpath) {
-			print "  '$p' => [" . join(", ", @{$vpath{$p}}) . "]\n";
-		    }
-		} else {
-		    print "  (none)\n";
-		}
-
-		# Test resolution
-		print "\nResolving '$file':\n";
-		my $resolved = resolve_vpath($file, $cwd);
-		if ($resolved ne $file) {
-		    print "  ✓ Resolved to: $resolved\n";
-		} else {
-		    print "  ✗ Not resolved (returned as-is)\n";
-		}
-	    }
-
-	} elsif ($cmd eq 'tasks' || $cmd eq 't') {
-	    print $socket "LIST_TASKS\n";
-	    while (my $response = <$socket>) {
-		chomp $response;
-		last if $response eq 'TASKS_END';
-		print "$response\n";
-	    }
-	    
-	} elsif ($cmd eq 'status' || $cmd eq 'st') {
-	    print "Our PID: $$\n";
-	    print "Job server PID: $jobserver_pid $socket\n";
-	    if (defined $selected_js->{workers}) {
-		print "Workers: $selected_js->{workers}\n";
-	    }
-	    print "Working directory: $selected_js->{cwd}\n" if $selected_js->{cwd};
-	    
-	} elsif ($cmd eq 'kill') {
-	    print "Killing all workers...\n";
-	    print $socket "KILL_WORKERS\n";
-	    my $response = <$socket>;
-            chomp $response if $response;
-	    print "$response\n" if $response;
-	    
-	} elsif ($cmd eq 'restart') {
-	    my $count = @words > 0 ? $words[0] : $selected_js->{workers};
-	    print "Restarting workers ($count workers)...\n";
-	    print $socket "RESTART_WORKERS $count\n";
-	    my $response = <$socket>;
-	    chomp $response if $response;
-	    print "$response\n" if $response;
-	    
-	} elsif ($cmd eq 'files' || $cmd eq 'f') {
-	    print $socket "LIST_FILES\n";
-	    while (my $response = <$socket>) {
-		chomp $response;
-		last if $response eq 'FILES_END';
-		print "$response\n";
-	    }
-	    
-	} elsif ($cmd eq 'list' || $cmd eq 'ls' || $cmd eq 'l') {
-	    print "list command not yet implemented in attach mode\n";
-	    
-	} elsif ($cmd eq 'vars' || $cmd eq 'v') {
-	    print "vars command not yet implemented in attach mode\n";
-	    
-	} elsif ($cmd eq 'deps' || $cmd eq 'd') {
-	    print "deps command not yet implemented in attach mode\n";
-	    
-	} else {
-	    print "Unknown command: $cmd\n";
-	    print "Type 'help' for available commands.\n";
-	}
-	
-	# Check for exit request from Ctrl-C
-	if ($exit_requested) {
-	    last;
-	}
+    if (!$socket) {
+        print "Job server not running. Use 'start' to enable parallel builds.\n";
+        return;
     }
 
-    if ($exit_requested || !defined($line)) {
-	print "\nDetaching from job server.\n";
-	print "Job server still running (PID $jobserver_pid).\n";
-	print "To reattach: smak-attach\n";
+    my @targets = @$words;
+    if (@targets == 0) {
+        # Build default target
+        my $default = get_default_target();
+        if ($default) {
+            @targets = ($default);
+            print "Building default target: $default\n";
+        } else {
+            print "No default target found.\n";
+            return;
+        }
     }
+
+    my $exit_req = ${$state->{exit_requested}};
+    for my $target (@targets) {
+        print $socket "SUBMIT_JOB\n";
+        print $socket "$target\n";
+        print $socket ".\n";
+        print $socket "cd . && make $target\n";
+
+        # Wait for completion
+        my $select = IO::Select->new($socket);
+        my $job_done = 0;
+        while (!$exit_req && !$job_done) {
+            if ($select->can_read(0.1)) {
+                my $response = <$socket>;
+                last unless defined $response;
+                chomp $response;
+                if ($response =~ /^OUTPUT (.*)$/) {
+                    print "$1\n";
+                } elsif ($response =~ /^ERROR (.*)$/) {
+                    print "ERROR: $1\n";
+                } elsif ($response =~ /^WARN (.*)$/) {
+                    print "WARN: $1\n";
+                } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+                    my ($completed_target, $exit_code) = ($1, $2);
+                    if ($exit_code == 0) {
+                        print "✓ Build succeeded: $completed_target\n";
+                    } else {
+                        print "✗ Build failed: $completed_target (exit code $exit_code)\n";
+                    }
+                    $job_done = 1;
+                }
+            }
+        }
+
+        last if $exit_req;
+    }
+}
+
+sub cmd_rebuild {
+    my ($words, $socket, $opts) = @_;
+
+    if (!$socket) {
+        print "Job server not running. Use 'start' to enable.\n";
+        return;
+    }
+
+    if (@$words == 0) {
+        print "Usage: rebuild <target>\n";
+        return;
+    }
+
+    # Check if target is stale first
+    my $target = $words->[0];
+    print $socket "IS_STALE:$target\n";
+    my $response = <$socket>;
+    if ($response && $response =~ /^STALE:yes/) {
+        print "Target '$target' is stale, rebuilding...\n";
+        cmd_build($words, $socket, $opts, {exit_requested => \0});
+    } elsif ($response && $response =~ /^STALE:no/) {
+        print "Target '$target' is up-to-date, skipping rebuild.\n";
+    } else {
+        print "Could not determine if target is stale.\n";
+    }
+}
+
+sub cmd_watch {
+    my ($socket, $state) = @_;
+
+    if (!$socket) {
+        print "Job server not running. Use 'start' to enable.\n";
+        return;
+    }
+
+    print $socket "WATCH_START\n";
+    ${$state->{watch_enabled}} = 1;
+    print "Watch mode enabled (FUSE file change notifications active)\n";
+}
+
+sub cmd_unwatch {
+    my ($socket, $state) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    print $socket "WATCH_STOP\n";
+    ${$state->{watch_enabled}} = 0;
+    print "Watch mode disabled\n";
+}
+
+sub cmd_tasks {
+    my ($socket) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    print $socket "LIST_TASKS\n";
+    while (my $response = <$socket>) {
+        chomp $response;
+        last if $response eq 'TASKS_END';
+        print "$response\n";
+    }
+}
+
+sub cmd_status {
+    my ($socket) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    print $socket "STATUS\n";
+    while (my $response = <$socket>) {
+        chomp $response;
+        last if $response eq 'STATUS_END';
+        print "$response\n";
+    }
+}
+
+sub cmd_progress {
+    my ($words, $socket) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    my $op = join(' ', @$words);
+    print $socket "IN_PROGRESS $op\n";
+    while (my $response = <$socket>) {
+        chomp $response;
+        last if $response eq 'PROGRESS_END';
+        print "$response\n";
+    }
+}
+
+sub cmd_files {
+    my ($socket) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    print $socket "LIST_FILES\n";
+    while (my $response = <$socket>) {
+        chomp $response;
+        last if $response eq 'FILES_END';
+        print "$response\n";
+    }
+}
+
+sub cmd_stale {
+    my ($socket) = @_;
+
+    if (!$socket) {
+        print "Job server not running. Use 'start' to enable.\n";
+        return;
+    }
+
+    print $socket "LIST_STALE\n";
+    my $count = 0;
+    while (my $response = <$socket>) {
+        chomp $response;
+        last if $response eq 'STALE_END';
+        if ($response =~ /^STALE:(.+)$/) {
+            print "  $1\n";
+            $count++;
+        }
+    }
+
+    if ($count == 0) {
+        print "No stale targets (nothing needs rebuilding)\n";
+    } else {
+        my $label = $count == 1 ? "target" : "targets";
+        print "\n$count $label need rebuilding\n";
+    }
+}
+
+sub cmd_dirty {
+    my ($words, $socket) = @_;
+
+    if (@$words == 0) {
+        print "Usage: dirty <file>\n";
+        print "  Marks a file as out-of-date (dirty)\n";
+        return;
+    }
+
+    if (!$socket) {
+        print "Job server not running. Use 'start' to enable.\n";
+        return;
+    }
+
+    my $file = $words->[0];
+    print $socket "MARK_DIRTY:$file\n";
+    print "Marked '$file' as dirty (out-of-date)\n";
+}
+
+sub cmd_needs {
+    my ($words, $socket) = @_;
+
+    if (@$words == 0) {
+        print "Usage: needs <file>\n";
+        return;
+    }
+
+    if (!$socket) {
+        print "Job server not running. Use 'start' to enable.\n";
+        return;
+    }
+
+    my $file = $words->[0];
+    print $socket "NEEDS:$file\n";
+    $socket->flush() if $socket->can('flush');
+
+    my $count = 0;
+    my $got_end = 0;
+    while (my $response = <$socket>) {
+        chomp $response;
+        if ($response eq 'NEEDS_END') {
+            $got_end = 1;
+            last;
+        }
+        if ($response =~ /^NEEDS:(.+)$/) {
+            print "  $1\n";
+            $count++;
+        }
+    }
+
+    if (!$got_end) {
+        print "Error: Job server connection lost\n";
+    } elsif ($count == 0) {
+        print "No targets depend on '$file'\n";
+    }
+}
+
+sub cmd_list {
+    my ($words, $socket) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    my $pattern = @$words > 0 ? $words->[0] : '';
+    print $socket "LIST_TARGETS $pattern\n";
+    while (my $response = <$socket>) {
+        chomp $response;
+        last if $response eq 'TARGETS_END';
+        print "$response\n";
+    }
+}
+
+sub cmd_vars {
+    my ($words, $socket) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    my $pattern = @$words > 0 ? $words->[0] : '';
+    print $socket "LIST_VARS $pattern\n";
+    while (my $response = <$socket>) {
+        chomp $response;
+        last if $response eq 'VARS_END';
+        print "$response\n";
+    }
+}
+
+sub cmd_deps {
+    my ($words, $socket) = @_;
+
+    if (@$words == 0) {
+        print "Usage: deps <target>\n";
+        return;
+    }
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    my $target = $words->[0];
+    print $socket "SHOW_DEPS $target\n";
+    while (my $response = <$socket>) {
+        chomp $response;
+        last if $response eq 'DEPS_END';
+        print "$response\n";
+    }
+}
+
+sub cmd_vpath {
+    my ($words, $socket) = @_;
+
+    if (@$words == 0) {
+        print "Usage: vpath <file>\n";
+        return;
+    }
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    my $file = $words->[0];
+    print $socket "VPATH $file\n";
+    my $response = <$socket>;
+    print "$response" if $response;
+}
+
+sub cmd_start {
+    my ($words, $opts, $state) = @_;
+
+    my $socket = ${$state->{socket}};
+    if ($socket) {
+        print "Job server already running.\n";
+        return;
+    }
+
+    my $num_jobs = @$words > 0 ? $words->[0] : ($opts->{jobs} || 1);
+    print "Starting job server with $num_jobs workers...\n";
+
+    # Start the job server
+    require Smak;  # Make sure we have access to start_job_server
+    Smak::start_job_server($num_jobs);
+
+    # Update state
+    ${$state->{socket}} = $Smak::job_server_socket;
+    ${$state->{server_pid}} = $Smak::job_server_pid;
+
+    print "Job server started (PID: $Smak::job_server_pid)\n";
+}
+
+sub cmd_kill {
+    my ($socket) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    print "Killing all workers...\n";
+    print $socket "KILL_WORKERS\n";
+    my $response = <$socket>;
+    chomp $response if $response;
+    print "$response\n" if $response;
+}
+
+sub cmd_restart {
+    my ($words, $socket, $opts) = @_;
+
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    my $count = @$words > 0 ? $words->[0] : ($opts->{jobs} || 1);
+    print "Restarting workers with $count workers...\n";
+    print $socket "RESTART_WORKERS $count\n";
+    my $response = <$socket>;
+    chomp $response if $response;
+    print "$response\n" if $response;
+}
+
+sub server_cli
+{
+    my ($jobserver_pid,$socket,$prompt,$term,$selected_js) = @_;
+
+    # Call unified CLI in attached mode
+    return unified_cli(
+        mode => 'attached',
+        socket => $socket,
+        server_pid => $jobserver_pid,
+        own_server => 0,  # We're attaching to existing server
+        jobs => 1,  # Unknown, will use server's config
+        makefile => 'Makefile',  # Default
+        prompt => $prompt || 'smak> ',
+        term => $term,
+    );
 }
 
 sub interactive_debug {

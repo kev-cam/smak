@@ -40,6 +40,13 @@ export SMAK_LAUNCHER="$SCRIPT_DIR/$script"
 
 export PERLLIB="$SCRIPT_DIR"
 
+while [ 0 != $# ] ; do
+    case "$1" in
+	-attach) script=${script}$1 ; shift ;;
+	*)       break ;;
+    esac
+done
+
 # Translate GNU Make-style compact options to Perl-friendly long form
 # E.g., "-j4" -> "-j 4"
 declare -a perl_args

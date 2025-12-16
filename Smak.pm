@@ -3967,21 +3967,28 @@ sub run_job_master {
             for my $i (0 .. $#job_queue) {
                 my $job;
                 my $target;
-		
+
+		# Skip/remove any undefined entries at this position
 		while ($i <= $#job_queue) {
 		    $job = $job_queue[$i];
 		    if (! defined $job) {
 			warn "ERROR: bad job-queue entry at $i, removed\n";
-			splice (@job_queue,$i,1);			
-		    } else {
-			$target = $job->{target};
-			if (! defined $target) {
-			    warn "ERROR: no target for job-queue entry at $i, removed\n";
-			    splice (@job_queue,$i,1);			
-			}
+			splice (@job_queue,$i,1);
+			# Check same position again (new job moved into this slot)
+			next;
 		    }
+		    $target = $job->{target};
+		    if (! defined $target) {
+			warn "ERROR: no target for job-queue entry at $i, removed\n";
+			splice (@job_queue,$i,1);
+			# Check same position again
+			next;
+		    }
+		    # Found valid job, exit the while loop
+		    last;
 		}
 
+	        # If we've gone past the end of the queue, exit the for loop
 	        last if ($i > $#job_queue); 
 	       		
                 # Check if this job's dependencies are satisfied

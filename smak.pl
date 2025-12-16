@@ -280,20 +280,13 @@ HELP
 }
 
 sub run_cli {
-    use Term::ReadLine;
-
-    print "Smak CLI mode - type 'help' for commands\n";
-    print "Makefile: $makefile\n";
-    print "Parallel jobs: $jobs\n";
-
-    # Start job server now if parallel builds are configured
+    # Start job server if parallel builds are configured
     my $jobserver_pid;
     if ($jobs > 1) {
         print "Starting job server...\n";
         start_job_server();
         $jobserver_pid = $Smak::job_server_pid;
     }
-    print "\n";
 
     # Set up signal handlers for detach
     my $detached = 0;

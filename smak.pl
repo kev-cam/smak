@@ -32,8 +32,17 @@ my $cli = 0;  # CLI mode (interactive shell)
 my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
 
-# Parse environment variable options first
-if (defined $ENV{USR_SMAK_OPT}) {
+# Detect recursive invocation early to prevent USR_SMAK_OPT from enabling parallel builds
+my $is_recursive = 0;
+if (defined $ENV{SMAK_RECURSION_LEVEL}) {
+    $is_recursive = 1;
+    $ENV{SMAK_RECURSION_LEVEL}++;
+} else {
+    $ENV{SMAK_RECURSION_LEVEL} = 0;
+}
+
+# Parse environment variable options first (skip if recursive to avoid deadlock)
+if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
     # Split the environment variable into arguments
     my @env_args = split(/\s+/, $ENV{USR_SMAK_OPT});
     # Save original @ARGV
@@ -105,6 +114,13 @@ if ($help) {
 # Change directory if -C option is specified
 if ($directory) {
     chdir($directory) or die "smak: Cannot change to directory '$directory': $!\n";
+}
+
+# Warn about recursive invocation and force sequential mode
+if ($is_recursive && $jobs != 0) {
+    my $level = $ENV{SMAK_RECURSION_LEVEL};
+    print STDERR "smak: Recursive invocation detected (level $level), forcing sequential mode to prevent deadlock\n";
+    $jobs = 0;
 }
 
 # Setup report directory if -Kreport is enabled

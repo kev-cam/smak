@@ -2119,21 +2119,19 @@ sub build_target {
                 next;
             }
 
-	    # Echo command unless silent
-	    unless ($silent_mode) {
-		print "$cmd_line\n";
-	    }
-
             # Execute command - use job system if available, otherwise sequential
             use Cwd 'getcwd';
             my $cwd = getcwd();
             if ($job_server_socket && 0 != $jobs) {
                 warn "DEBUG[" . __LINE__ . "]:     Using job server ($jobs)\n" if $ENV{SMAK_DEBUG};
-                # Parallel mode - submit to job server
+                # Parallel mode - submit to job server (job master will echo the command)
                 submit_job($target, $cmd_line, $cwd);
             } else {
                 warn "DEBUG[" . __LINE__ . "]:     Sequential execution\n" if $ENV{SMAK_DEBUG};
-                # Sequential mode - execute directly
+                # Sequential mode - echo command here, then execute directly
+                unless ($silent_mode) {
+                    print "$cmd_line\n";
+                }
                 execute_command_sequential($target, $cmd_line, $cwd);
                 warn "DEBUG[" . __LINE__ . "]:     Command completed\n" if $ENV{SMAK_DEBUG};
             }
@@ -5330,17 +5328,23 @@ sub run_job_master {
 
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
-                    # Forward to master
+                    # Always print to stdout (job master's stdout is inherited from parent)
+                    print "$output\n";
+                    # Also forward to attached clients if any
                     print $master_socket "OUTPUT $output\n" if $master_socket;
 
                 } elsif ($line =~ /^ERROR (.*)$/) {
                     my $error = $1;
-                    # Forward error to master
+                    # Always print to stderr (job master's stderr is inherited from parent)
+                    print STDERR "ERROR: $error\n";
+                    # Also forward to attached clients if any
                     print $master_socket "ERROR $error\n" if $master_socket;
 
                 } elsif ($line =~ /^WARN (.*)$/) {
                     my $warning = $1;
-                    # Forward warning to master
+                    # Always print to stderr (job master's stderr is inherited from parent)
+                    print STDERR "WARN: $warning\n";
+                    # Also forward to attached clients if any
                     print $master_socket "WARN $warning\n" if $master_socket;
 
                 } elsif ($line =~ /^TASK_RETURN (\d+)(.*)$/) {

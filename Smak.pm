@@ -4897,14 +4897,18 @@ sub run_job_master {
 				    # Response format: "RUNNING task_id" or "READY"
 				    if ("" eq $message) {
 					$message = "with worker(?)";
-				    }					
+				    }
 				}
 			    };
 			    if ($@) {
 				$message = "worker unresponsive";
 			    }
-			} elsif ('done' eq $status && $clear) {
+			}
+
+			# When clearing, skip printing 'done' entries and remove them
+			if ('done' eq $status && $clear) {
 			    delete $in_progress{$target};
+			    next;  # Skip printing this entry
 			}
 
 			print $master_socket "$target\t$message\n";

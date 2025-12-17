@@ -28,6 +28,21 @@ sub is_acceptable_failure {
     return 0;
 }
 
+# Determine if an error looks like a transient failure worth retrying
+sub is_transient_failure {
+    my ($output) = @_;
+
+    # Compiler errors about missing input files (race condition)
+    return 1 if $output =~ /fatal error:.*No such file or directory/i;
+    return 1 if $output =~ /error:.*No such file or directory/i;
+    return 1 if $output =~ /cannot open.*No such file or directory/i;
+
+    # Linker errors about missing object files
+    return 1 if $output =~ /cannot find.*\.o\b/i;
+
+    return 0;
+}
+
 # Usage: smak-worker <host:port>
 my $server_addr = $ARGV[0] or die "Usage: $0 <host:port>\n";
 
@@ -142,14 +157,24 @@ while (my $line = <$socket>) {
         # Execute command with non-blocking I/O to remain responsive
         use IO::Select;
         use POSIX ":sys_wait_h";
+        use Time::HiRes qw(sleep);
 
         my $exit_code = 0;
         my @errors;
         my @warnings;
+        my $max_retries = 3;
+        my $attempt = 0;
 
-        # Fork to execute command, keep parent responsive
-        my $pid = open(my $cmd_fh, '-|', "$command 2>&1");
-        if ($pid) {
+        # Retry loop for transient failures
+        while ($attempt < $max_retries) {
+            $attempt++;
+            @errors = ();
+            @warnings = ();
+            $exit_code = 0;
+
+            # Fork to execute command, keep parent responsive
+            my $pid = open(my $cmd_fh, '-|', "$command 2>&1");
+            if ($pid) {
             # Make command output non-blocking
             $cmd_fh->blocking(0);
 
@@ -243,15 +268,31 @@ while (my $line = <$socket>) {
                 print $socket "OUTPUT \n";
                 print $socket "OUTPUT Summary: $err_count error(s), $warn_count warning(s)\n";
             }
-        } else {
-            # Fork failed
-            print $socket "ERROR Failed to execute command: $!\n";
-            $exit_code = 1;
-        }
+            } else {
+                # Fork failed
+                print $socket "ERROR Failed to execute command: $!\n";
+                $exit_code = 1;
+            }
 
-        # Check if failure is acceptable
-        if ($exit_code != 0 && is_acceptable_failure($command, $exit_code, $dir)) {
-            $exit_code = 0;  # Treat as success
+            # Check if failure is acceptable
+            if ($exit_code != 0 && is_acceptable_failure($command, $exit_code, $dir)) {
+                $exit_code = 0;  # Treat as success
+            }
+
+            # Check for transient failures and retry if needed
+            if ($exit_code != 0 && $attempt < $max_retries) {
+                # Check if any error looks transient
+                my $all_errors = join("\n", @errors);
+                if (is_transient_failure($all_errors)) {
+                    my $delay = 0.1 * (2 ** ($attempt - 1));  # Exponential backoff: 0.1s, 0.2s, 0.4s
+                    print $socket "OUTPUT [Transient failure detected, retrying in ${delay}s... (attempt $attempt/$max_retries)]\n";
+                    sleep($delay);
+                    next;  # Retry
+                }
+            }
+
+            # Exit retry loop on success or non-transient failure
+            last;
         }
 
         # Send completion

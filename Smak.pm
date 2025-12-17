@@ -2587,12 +2587,23 @@ sub unified_cli {
     }
 
     # Cleanup on exit
-    if ($exit_requested && $own_server && $socket) {
-        print "Shutting down job server...\n";
-        print $socket "SHUTDOWN\n";
-        my $ack = <$socket>;
+    if ($exit_requested) {
+        if ($own_server && $socket) {
+            # We own the server - shut it down
+            print "Shutting down job server...\n";
+            print $socket "SHUTDOWN\n";
+            my $ack = <$socket>;
+        } elsif (!$own_server) {
+            # We're attached to someone else's server - just disconnect
+            print "Disconnecting from job server (leaving it running)...\n";
+        }
     } elsif ($detached) {
-        print "Detaching from CLI...\n";
+        # Detach was requested (Ctrl-C or explicit detach command)
+        if ($own_server) {
+            print "Detaching from CLI (job server still running)...\n";
+        } else {
+            print "Detaching from job server...\n";
+        }
     }
 
     return $exit_requested ? 'stop' : 'detach';
@@ -2697,10 +2708,14 @@ Available commands:
   restart [N]         Restart workers (optionally specify count)
   detach              Detach from CLI, leave job server running
   help, h, ?          Show this help
-  quit, exit, q       Shut down job server and exit
+  quit, exit, q       Exit CLI (shuts down server if owned, else disconnects)
 
 Keyboard shortcuts:
   Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)
+
+Behavior notes:
+  - When you own the server (smak -cli): 'quit' stops server, 'detach' leaves it
+  - When attached (smak-attach): both 'quit' and 'detach' just disconnect
 
 Examples:
   build all           Build the 'all' target

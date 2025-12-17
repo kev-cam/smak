@@ -4913,7 +4913,7 @@ sub run_job_master {
 
 			print $master_socket "$target\t$message\n";
 		    }
-		    print $master_socket "END_PROGRESS\n";
+		    print $master_socket "PROGRESS_END\n";
 		    
                 } elsif ($line =~ /^LIST_TASKS$/) {
                     # Send task list to master

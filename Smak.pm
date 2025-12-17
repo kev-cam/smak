@@ -5323,18 +5323,33 @@ sub run_job_master {
 
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
-                    # Forward to master
-                    print $master_socket "OUTPUT $output\n" if $master_socket;
+                    if ($master_socket) {
+                        # Forward to master in attached mode
+                        print $master_socket "OUTPUT $output\n";
+                    } else {
+                        # Standalone mode - print directly
+                        print "$output\n";
+                    }
 
                 } elsif ($line =~ /^ERROR (.*)$/) {
                     my $error = $1;
-                    # Forward error to master
-                    print $master_socket "ERROR $error\n" if $master_socket;
+                    if ($master_socket) {
+                        # Forward to master in attached mode
+                        print $master_socket "ERROR $error\n";
+                    } else {
+                        # Standalone mode - print directly
+                        print STDERR "ERROR: $error\n";
+                    }
 
                 } elsif ($line =~ /^WARN (.*)$/) {
                     my $warning = $1;
-                    # Forward warning to master
-                    print $master_socket "WARN $warning\n" if $master_socket;
+                    if ($master_socket) {
+                        # Forward to master in attached mode
+                        print $master_socket "WARN $warning\n";
+                    } else {
+                        # Standalone mode - print directly
+                        print STDERR "WARN: $warning\n";
+                    }
 
                 } elsif ($line =~ /^TASK_RETURN (\d+)(.*)$/) {
                     my $task_id = $1;

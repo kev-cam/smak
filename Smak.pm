@@ -5323,33 +5323,24 @@ sub run_job_master {
 
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
-                    if ($master_socket) {
-                        # Forward to master in attached mode
-                        print $master_socket "OUTPUT $output\n";
-                    } else {
-                        # Standalone mode - print directly
-                        print "$output\n";
-                    }
+                    # Always print to stdout (job master's stdout is inherited from parent)
+                    print "$output\n";
+                    # Also forward to attached clients if any
+                    print $master_socket "OUTPUT $output\n" if $master_socket;
 
                 } elsif ($line =~ /^ERROR (.*)$/) {
                     my $error = $1;
-                    if ($master_socket) {
-                        # Forward to master in attached mode
-                        print $master_socket "ERROR $error\n";
-                    } else {
-                        # Standalone mode - print directly
-                        print STDERR "ERROR: $error\n";
-                    }
+                    # Always print to stderr (job master's stderr is inherited from parent)
+                    print STDERR "ERROR: $error\n";
+                    # Also forward to attached clients if any
+                    print $master_socket "ERROR $error\n" if $master_socket;
 
                 } elsif ($line =~ /^WARN (.*)$/) {
                     my $warning = $1;
-                    if ($master_socket) {
-                        # Forward to master in attached mode
-                        print $master_socket "WARN $warning\n";
-                    } else {
-                        # Standalone mode - print directly
-                        print STDERR "WARN: $warning\n";
-                    }
+                    # Always print to stderr (job master's stderr is inherited from parent)
+                    print STDERR "WARN: $warning\n";
+                    # Also forward to attached clients if any
+                    print $master_socket "WARN $warning\n" if $master_socket;
 
                 } elsif ($line =~ /^TASK_RETURN (\d+)(.*)$/) {
                     my $task_id = $1;

@@ -300,6 +300,12 @@ sub execute_command_sequential {
         die $err_msg;
     }
 
+    # Successfully built - clear from dirty files
+    if (exists $Smak::dirty_files{$target}) {
+        delete $Smak::dirty_files{$target};
+        warn "DEBUG[" . __LINE__ . "]: Cleared '$target' from dirty files after successful build\n" if $ENV{SMAK_DEBUG};
+    }
+
     chdir($old_dir) if $old_dir;
     warn "DEBUG[" . __LINE__ . "]: execute_command_sequential complete\n" if $ENV{SMAK_DEBUG};
 }
@@ -1761,6 +1767,12 @@ sub needs_rebuild {
     # If target doesn't exist, it needs to be built
     return 1 unless -e $target;
 
+    # Check if target or any dependency is manually marked dirty
+    if (exists $Smak::dirty_files{$target}) {
+        warn "DEBUG: Target '$target' is marked dirty, needs rebuild\n" if $ENV{SMAK_DEBUG};
+        return 1;
+    }
+
     # Get target's modification time
     my $target_mtime = (stat($target))[9];
     return 1 unless defined $target_mtime;
@@ -1796,10 +1808,16 @@ sub needs_rebuild {
     # Flatten and filter empty strings
     @deps = grep { $_ ne '' } @deps;
 
-    # Check if any dependency is newer than target
+    # Check if any dependency is newer than target or marked dirty
     for my $dep (@deps) {
         # Skip .PHONY and other special targets
         next if $dep =~ /^\.PHONY$/;
+
+        # Check if dependency is marked dirty
+        if (exists $Smak::dirty_files{$dep}) {
+            warn "DEBUG: Dependency '$dep' of '$target' is marked dirty, needs rebuild\n" if $ENV{SMAK_DEBUG};
+            return 1;
+        }
 
         # If dependency doesn't exist, target needs rebuild
         return 1 unless -e $dep;

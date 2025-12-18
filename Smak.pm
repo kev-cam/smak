@@ -2752,11 +2752,6 @@ HELP
 sub cmd_build {
     my ($words, $socket, $opts, $state) = @_;
 
-    if (!$socket) {
-        print "Job server not running. Use 'start' to enable parallel builds.\n";
-        return;
-    }
-
     my @targets = @$words;
     if (@targets == 0) {
         # Build default target
@@ -2770,40 +2765,58 @@ sub cmd_build {
         }
     }
 
-    my $exit_req = ${$state->{exit_requested}};
-    for my $target (@targets) {
-        print $socket "SUBMIT_JOB\n";
-        print $socket "$target\n";
-        print $socket ".\n";
-        print $socket "cd . && make $target\n";
+    if ($socket) {
+        # Job server mode - submit jobs and wait for results
+        my $exit_req = ${$state->{exit_requested}};
+        for my $target (@targets) {
+            print $socket "SUBMIT_JOB\n";
+            print $socket "$target\n";
+            print $socket ".\n";
+            print $socket "cd . && make $target\n";
 
-        # Wait for completion
-        my $select = IO::Select->new($socket);
-        my $job_done = 0;
-        while (!$exit_req && !$job_done) {
-            if ($select->can_read(0.1)) {
-                my $response = <$socket>;
-                last unless defined $response;
-                chomp $response;
-                if ($response =~ /^OUTPUT (.*)$/) {
-                    print "$1\n";
-                } elsif ($response =~ /^ERROR (.*)$/) {
-                    print "ERROR: $1\n";
-                } elsif ($response =~ /^WARN (.*)$/) {
-                    print "WARN: $1\n";
-                } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
-                    my ($completed_target, $exit_code) = ($1, $2);
-                    if ($exit_code == 0) {
-                        print "✓ Build succeeded: $completed_target\n";
-                    } else {
-                        print "✗ Build failed: $completed_target (exit code $exit_code)\n";
+            # Wait for completion
+            my $select = IO::Select->new($socket);
+            my $job_done = 0;
+            while (!$exit_req && !$job_done) {
+                if ($select->can_read(0.1)) {
+                    my $response = <$socket>;
+                    last unless defined $response;
+                    chomp $response;
+                    if ($response =~ /^OUTPUT (.*)$/) {
+                        print "$1\n";
+                    } elsif ($response =~ /^ERROR (.*)$/) {
+                        print "ERROR: $1\n";
+                    } elsif ($response =~ /^WARN (.*)$/) {
+                        print "WARN: $1\n";
+                    } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+                        my ($completed_target, $exit_code) = ($1, $2);
+                        if ($exit_code == 0) {
+                            print "✓ Build succeeded: $completed_target\n";
+                        } else {
+                            print "✗ Build failed: $completed_target (exit code $exit_code)\n";
+                        }
+                        $job_done = 1;
                     }
-                    $job_done = 1;
                 }
             }
-        }
 
-        last if $exit_req;
+            last if $exit_req;
+        }
+    } else {
+        # No job server - build sequentially
+        print "(Building in sequential mode - use 'start' for parallel builds)\n";
+        for my $target (@targets) {
+            eval {
+                build_target($target);
+            };
+            if ($@) {
+                print "✗ Build failed: $target\n";
+                print STDERR $@;
+                last;
+            } else {
+                print "✓ Build succeeded: $target\n";
+            }
+        }
     }
 }
 

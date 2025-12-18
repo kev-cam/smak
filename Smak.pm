@@ -2879,8 +2879,24 @@ sub cmd_watch {
     }
 
     print $socket "WATCH_START\n";
-    ${$state->{watch_enabled}} = 1;
-    print "Watch mode enabled (FUSE file change notifications active)\n";
+
+    # Wait for response from job server
+    my $response = <$socket>;
+    if ($response) {
+        chomp $response;
+        if ($response eq 'WATCH_STARTED') {
+            ${$state->{watch_enabled}} = 1;
+            print "Watch mode enabled (FUSE file change notifications active)\n";
+        } elsif ($response =~ /^WATCH_UNAVAILABLE/) {
+            print "Watch mode unavailable: $response\n";
+            print "FUSE filesystem monitoring is not available.\n";
+            print "File changes will not be detected automatically.\n";
+        } else {
+            print "Unexpected response: $response\n";
+        }
+    } else {
+        print "No response from job server\n";
+    }
 }
 
 sub cmd_unwatch {
@@ -3994,46 +4010,51 @@ sub run_job_master {
         # Check if we're in a FUSE filesystem
         my $cwd = abs_path('.');
 
-        # Read /proc/mounts to find FUSE filesystems
-        open(my $mounts, '<', '/proc/mounts') or return undef;
-        my $fuse_pid;
+        # Use df to get the mountpoint for current directory
+        my $df_output = `df . 2>/dev/null | tail -1`;
+        my $mountpoint;
+        if ($df_output =~ /\s+(\/\S+)$/) {
+            $mountpoint = $1;
+            vprint "Mount point for current directory: $mountpoint\n";
+        } else {
+            return ();
+        }
+
+        # Read /proc/mounts to verify it's a FUSE filesystem
+        open(my $mounts, '<', '/proc/mounts') or return ();
+        my $is_fuse = 0;
+        my $fstype;
         while (my $line = <$mounts>) {
-            # Look for fuse.sshfs or similar
-            if ($line =~ /^(\S+)\s+(\S+)\s+fuse\.(\S+)/) {
-                my ($dev, $mountpoint, $fstype) = ($1, $2, $3);
-                # Check if our CWD is under this mount
-                if ($cwd =~ /^\Q$mountpoint\E/) {
-                    vprint "Detected FUSE filesystem: $fstype at $mountpoint\n";
-                    # Try to find the FUSE process - look for sshfs process
-                    my $ps_output = `ps aux | grep -E '(sshfs|smak-fuse)' | grep -v grep`;
-                    for my $ps_line (split /\n/, $ps_output) {
-                        if ($ps_line =~ /^\S+\s+(\d+).*$mountpoint/) {
-                            $fuse_pid = $1;
-                            last;
-                        }
-                    }
-                    last if $fuse_pid;
-                }
+            # Look for fuse.sshfs or similar at our mountpoint
+            if ($line =~ /^(\S+)\s+\Q$mountpoint\E\s+fuse\.(\S+)/) {
+                $is_fuse = 1;
+                $fstype = $2;
+                vprint "Detected FUSE filesystem: $fstype at $mountpoint\n";
+                last;
             }
         }
         close($mounts);
 
-        return undef unless $fuse_pid;
+        return () unless $is_fuse;
 
-        # Find the listening port using lsof
-        my $lsof_output = `lsof -Pan -p $fuse_pid -i TCP -s TCP:LISTEN 2>/dev/null`;
+        # Find the FUSE monitor port using lsof -i
+        # Look for sshfs processes with LISTEN state
+        my $lsof_output = `lsof -i 2>/dev/null | grep sshfs | grep LISTEN`;
         for my $line (split /\n/, $lsof_output) {
-            if ($line =~ /:(\d+)\s+\(LISTEN\)/) {
-                my $port = $1;
-                vprint "Found FUSE monitor on port $port (PID $fuse_pid)\n";
-                return $port;
+            # Parse lsof output: sshfs PID user ... TCP *:PORT (LISTEN)
+            if ($line =~ /sshfs\s+(\d+)\s+.*TCP\s+\*:(\d+)\s+\(LISTEN\)/) {
+                my ($pid, $port) = ($1, $2);
+                vprint "Found FUSE monitor on port $port (PID $pid)\n";
+                return ($mountpoint, $port);
             }
         }
 
-        return undef;
+        return ();
     }
 
-    if (my $fuse_port = detect_fuse_monitor()) {
+    my $fuse_mountpoint;
+    if (my ($mountpoint, $fuse_port) = detect_fuse_monitor()) {
+        $fuse_mountpoint = $mountpoint;
         # Connect to FUSE monitor
         $fuse_socket = IO::Socket::INET->new(
             PeerHost => '127.0.0.1',
@@ -5228,6 +5249,39 @@ sub run_job_master {
                         }
                     }
 
+                    # For CMake builds: also search .d dependency files
+                    # .d files contain explicit target: dependency mappings
+                    for my $modified_file (@all_modified_files) {
+                        # Look for .d files that might reference this source file
+                        # CMake typically creates .d files like: path/to/foo.C.o.d
+                        my $basename = $modified_file;
+                        $basename =~ s{^.*/}{};
+
+                        # Search for .d files mentioning this file
+                        my @d_files = `find . -name '*.d' -type f 2>/dev/null`;
+                        chomp @d_files;
+
+                        for my $d_file (@d_files) {
+                            # Quick grep to see if this .d file mentions our modified file
+                            my $grep_result = `grep -l '\Q$modified_file\E' '$d_file' 2>/dev/null`;
+                            next unless $grep_result;
+
+                            # Parse the .d file to extract target
+                            open(my $fh, '<', $d_file) or next;
+                            my $content = do { local $/; <$fh> };
+                            close($fh);
+
+                            # .d file format: target: dep1 dep2 \
+                            #                  dep3 dep4
+                            if ($content =~ /^([^:]+):/) {
+                                my $target = $1;
+                                $target =~ s/^\s+|\s+$//g;
+                                $stale_targets{$target} = 1;
+                                print STDERR "Found stale target via .d file: $target (depends on $modified_file)\n" if $ENV{SMAK_DEBUG};
+                            }
+                        }
+                    }
+
                     # Send stale targets
                     for my $target (sort keys %stale_targets) {
                         print $master_socket "STALE:$target\n";
@@ -5431,17 +5485,27 @@ sub run_job_master {
 
                     if ($op eq 'INO') {
                         # Path resolution response: INO:inode:path
-                        my ($inode, $path) = ($arg1, $arg2);
-                        $inode_cache{$inode} = $path;
+                        # Path from FUSE is relative to mount root, convert to full path
+                        my ($inode, $fuse_path) = ($arg1, $arg2);
+
+                        # Convert mount-relative path to full path
+                        my $full_path = $fuse_path;
+                        if ($fuse_mountpoint && $fuse_path =~ m{^/}) {
+                            # Remove leading slash and prepend mountpoint
+                            $fuse_path =~ s{^/}{};
+                            $full_path = "$fuse_mountpoint/$fuse_path";
+                        }
+
+                        $inode_cache{$inode} = $full_path;
                         delete $pending_path_requests{$inode};
 
-                        # Track modification
-                        $file_modifications{$path} ||= {workers => [], last_op => time()};
-                        print STDERR "FUSE: $path (inode $inode)\n" if $ENV{SMAK_DEBUG};
+                        # Track modification with full path
+                        $file_modifications{$full_path} ||= {workers => [], last_op => time()};
+                        print STDERR "FUSE: $full_path (inode $inode, mount-relative: $fuse_path)\n" if $ENV{SMAK_DEBUG};
 
                         # Send watch notification if client is watching AND file is build-relevant
-                        if ($watch_client && is_build_relevant($path)) {
-                            print $watch_client "WATCH:$path\n";
+                        if ($watch_client && is_build_relevant($full_path)) {
+                            print $watch_client "WATCH:$full_path\n";
                         }
 
                     } else {

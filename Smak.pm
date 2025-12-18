@@ -4010,38 +4010,41 @@ sub run_job_master {
         # Check if we're in a FUSE filesystem
         my $cwd = abs_path('.');
 
-        # Read /proc/mounts to find FUSE filesystems
+        # Use df to get the mountpoint for current directory
+        my $df_output = `df . 2>/dev/null | tail -1`;
+        my $mountpoint;
+        if ($df_output =~ /\s+(\/\S+)$/) {
+            $mountpoint = $1;
+            vprint "Mount point for current directory: $mountpoint\n";
+        } else {
+            return undef;
+        }
+
+        # Read /proc/mounts to verify it's a FUSE filesystem
         open(my $mounts, '<', '/proc/mounts') or return undef;
-        my $fuse_pid;
+        my $is_fuse = 0;
+        my $fstype;
         while (my $line = <$mounts>) {
-            # Look for fuse.sshfs or similar
-            if ($line =~ /^(\S+)\s+(\S+)\s+fuse\.(\S+)/) {
-                my ($dev, $mountpoint, $fstype) = ($1, $2, $3);
-                # Check if our CWD is under this mount
-                if ($cwd =~ /^\Q$mountpoint\E/) {
-                    vprint "Detected FUSE filesystem: $fstype at $mountpoint\n";
-                    # Try to find the FUSE process - look for sshfs process
-                    my $ps_output = `ps aux | grep -E '(sshfs|smak-fuse)' | grep -v grep`;
-                    for my $ps_line (split /\n/, $ps_output) {
-                        if ($ps_line =~ /^\S+\s+(\d+).*\Q$mountpoint\E/) {
-                            $fuse_pid = $1;
-                            last;
-                        }
-                    }
-                    last if $fuse_pid;
-                }
+            # Look for fuse.sshfs or similar at our mountpoint
+            if ($line =~ /^(\S+)\s+\Q$mountpoint\E\s+fuse\.(\S+)/) {
+                $is_fuse = 1;
+                $fstype = $2;
+                vprint "Detected FUSE filesystem: $fstype at $mountpoint\n";
+                last;
             }
         }
         close($mounts);
 
-        return undef unless $fuse_pid;
+        return undef unless $is_fuse;
 
-        # Find the listening port using lsof
-        my $lsof_output = `lsof -Pan -p $fuse_pid -i TCP -s TCP:LISTEN 2>/dev/null`;
+        # Find the FUSE monitor port using lsof -i
+        # Look for sshfs processes with LISTEN state
+        my $lsof_output = `lsof -i 2>/dev/null | grep sshfs | grep LISTEN`;
         for my $line (split /\n/, $lsof_output) {
-            if ($line =~ /:(\d+)\s+\(LISTEN\)/) {
-                my $port = $1;
-                vprint "Found FUSE monitor on port $port (PID $fuse_pid)\n";
+            # Parse lsof output: sshfs PID user ... TCP *:PORT (LISTEN)
+            if ($line =~ /sshfs\s+(\d+)\s+.*TCP\s+\*:(\d+)\s+\(LISTEN\)/) {
+                my ($pid, $port) = ($1, $2);
+                vprint "Found FUSE monitor on port $port (PID $pid)\n";
                 return $port;
             }
         }

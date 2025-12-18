@@ -4909,6 +4909,11 @@ sub run_job_master {
                 }
                 $worker->blocking(1);
             }
+
+	    # Only log intermittent state if there's activity (queued or running jobs)
+	    if (@job_queue > 0 || keys %running_jobs > 0) {
+		check_queue_state("intermittent check");
+	    }
         }
 
         for my $socket (@ready) {

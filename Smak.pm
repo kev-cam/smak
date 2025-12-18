@@ -1808,6 +1808,11 @@ sub needs_rebuild {
     # Flatten and filter empty strings
     @deps = grep { $_ ne '' } @deps;
 
+    # Apply vpath resolution to dependencies (same as build_target does)
+    use Cwd 'getcwd';
+    my $cwd = getcwd();
+    @deps = map { resolve_vpath($_, $cwd) } @deps;
+
     # Check if any dependency is newer than target or marked dirty
     for my $dep (@deps) {
         # Skip .PHONY and other special targets
@@ -3021,36 +3026,82 @@ sub cmd_needs {
 
     if (@$words == 0) {
         print "Usage: needs <file>\n";
-        return;
-    }
-
-    if (!$socket) {
-        print "Job server not running. Use 'start' to enable.\n";
+        print "  Shows which targets depend on the specified file\n";
         return;
     }
 
     my $file = $words->[0];
-    print $socket "NEEDS:$file\n";
-    $socket->flush() if $socket->can('flush');
 
-    my $count = 0;
-    my $got_end = 0;
-    while (my $response = <$socket>) {
-        chomp $response;
-        if ($response eq 'NEEDS_END') {
-            $got_end = 1;
-            last;
-        }
-        if ($response =~ /^NEEDS:(.+)$/) {
-            print "  $1\n";
-            $count++;
-        }
-    }
+    if ($socket) {
+        # Job server running - use socket protocol
+        print $socket "NEEDS:$file\n";
+        $socket->flush() if $socket->can('flush');
 
-    if (!$got_end) {
-        print "Error: Job server connection lost\n";
-    } elsif ($count == 0) {
-        print "No targets depend on '$file'\n";
+        my $count = 0;
+        my $got_end = 0;
+        while (my $response = <$socket>) {
+            chomp $response;
+            if ($response eq 'NEEDS_END') {
+                $got_end = 1;
+                last;
+            }
+            if ($response =~ /^NEEDS:(.+)$/) {
+                print "  $1\n";
+                $count++;
+            }
+        }
+        print "\n$count target(s) depend on '$file'\n" if $got_end;
+    } else {
+        # No job server - search dependencies directly
+        use Cwd 'getcwd';
+        my $cwd = getcwd();
+
+        my @reverse_deps;
+
+        # Search through all dependency types
+        for my $dep_hash (\%fixed_deps, \%pattern_deps, \%pseudo_deps) {
+            for my $key (keys %$dep_hash) {
+                # Key format: "Makefile\ttarget"
+                next unless $key =~ /^[^\t]+\t(.+)$/;
+                my $target = $1;
+
+                my @deps = @{$dep_hash->{$key} || []};
+
+                # Expand variables in dependencies
+                @deps = map {
+                    my $dep = $_;
+                    while ($dep =~ /\$MV\{([^}]+)\}/) {
+                        my $var = $1;
+                        my $val = $MV{$var} // '';
+                        $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+                    }
+                    if ($dep =~ /\s/) {
+                        split /\s+/, $dep;
+                    } else {
+                        $dep;
+                    }
+                } @deps;
+                @deps = grep { $_ ne '' } @deps;
+
+                # Apply vpath resolution
+                @deps = map { resolve_vpath($_, $cwd) } @deps;
+
+                # Check if file is in dependencies
+                if (grep { $_ eq $file } @deps) {
+                    push @reverse_deps, $target;
+                }
+            }
+        }
+
+        if (@reverse_deps) {
+            print "Targets that depend on '$file':\n";
+            for my $target (sort @reverse_deps) {
+                print "  $target\n";
+            }
+            print "\n" . (scalar @reverse_deps) . " target(s) depend on '$file'\n";
+        } else {
+            print "No targets depend on '$file'\n";
+        }
     }
 }
 

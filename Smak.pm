@@ -300,6 +300,12 @@ sub execute_command_sequential {
         die $err_msg;
     }
 
+    # Successfully built - clear from dirty files
+    if (exists $Smak::dirty_files{$target}) {
+        delete $Smak::dirty_files{$target};
+        warn "DEBUG[" . __LINE__ . "]: Cleared '$target' from dirty files after successful build\n" if $ENV{SMAK_DEBUG};
+    }
+
     chdir($old_dir) if $old_dir;
     warn "DEBUG[" . __LINE__ . "]: execute_command_sequential complete\n" if $ENV{SMAK_DEBUG};
 }
@@ -1761,6 +1767,12 @@ sub needs_rebuild {
     # If target doesn't exist, it needs to be built
     return 1 unless -e $target;
 
+    # Check if target or any dependency is manually marked dirty
+    if (exists $Smak::dirty_files{$target}) {
+        warn "DEBUG: Target '$target' is marked dirty, needs rebuild\n" if $ENV{SMAK_DEBUG};
+        return 1;
+    }
+
     # Get target's modification time
     my $target_mtime = (stat($target))[9];
     return 1 unless defined $target_mtime;
@@ -1796,10 +1808,21 @@ sub needs_rebuild {
     # Flatten and filter empty strings
     @deps = grep { $_ ne '' } @deps;
 
-    # Check if any dependency is newer than target
+    # Apply vpath resolution to dependencies (same as build_target does)
+    use Cwd 'getcwd';
+    my $cwd = getcwd();
+    @deps = map { resolve_vpath($_, $cwd) } @deps;
+
+    # Check if any dependency is newer than target or marked dirty
     for my $dep (@deps) {
         # Skip .PHONY and other special targets
         next if $dep =~ /^\.PHONY$/;
+
+        # Check if dependency is marked dirty
+        if (exists $Smak::dirty_files{$dep}) {
+            warn "DEBUG: Dependency '$dep' of '$target' is marked dirty, needs rebuild\n" if $ENV{SMAK_DEBUG};
+            return 1;
+        }
 
         # If dependency doesn't exist, target needs rebuild
         return 1 unless -e $dep;
@@ -2570,6 +2593,27 @@ sub unified_cli {
 
         $term->addhistory($line) if $line =~ /\S/;
 
+        # Handle shell command escape (!)
+        if ($line =~ /^!(.+)$/) {
+            my $shell_cmd = $1;
+            $shell_cmd =~ s/^\s+//;  # Trim leading whitespace
+
+            # Execute in sub-shell using pipe
+            if (my $pid = open(my $cmd_fh, '-|', $shell_cmd . ' 2>&1')) {
+                while (my $output = <$cmd_fh>) {
+                    print $output;
+                }
+                close($cmd_fh);
+                my $exit_code = $? >> 8;
+                if ($exit_code != 0) {
+                    print STDERR "Command exited with code $exit_code\n";
+                }
+            } else {
+                print STDERR "Failed to execute command: $!\n";
+            }
+            next;
+        }
+
         my @words = split(/\s+/, $line);
         my $cmd = shift @words;
 
@@ -2707,6 +2751,7 @@ Available commands:
   detach              Detach from CLI, leave job server running
   help, h, ?          Show this help
   quit, exit, q       Exit CLI (shuts down server if owned, else disconnects)
+  ! <command>         Execute shell command in sub-shell
 
 Keyboard shortcuts:
   Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)
@@ -2730,11 +2775,6 @@ HELP
 sub cmd_build {
     my ($words, $socket, $opts, $state) = @_;
 
-    if (!$socket) {
-        print "Job server not running. Use 'start' to enable parallel builds.\n";
-        return;
-    }
-
     my @targets = @$words;
     if (@targets == 0) {
         # Build default target
@@ -2748,40 +2788,58 @@ sub cmd_build {
         }
     }
 
-    my $exit_req = ${$state->{exit_requested}};
-    for my $target (@targets) {
-        print $socket "SUBMIT_JOB\n";
-        print $socket "$target\n";
-        print $socket ".\n";
-        print $socket "cd . && make $target\n";
+    if ($socket) {
+        # Job server mode - submit jobs and wait for results
+        my $exit_req = ${$state->{exit_requested}};
+        for my $target (@targets) {
+            print $socket "SUBMIT_JOB\n";
+            print $socket "$target\n";
+            print $socket ".\n";
+            print $socket "cd . && make $target\n";
 
-        # Wait for completion
-        my $select = IO::Select->new($socket);
-        my $job_done = 0;
-        while (!$exit_req && !$job_done) {
-            if ($select->can_read(0.1)) {
-                my $response = <$socket>;
-                last unless defined $response;
-                chomp $response;
-                if ($response =~ /^OUTPUT (.*)$/) {
-                    print "$1\n";
-                } elsif ($response =~ /^ERROR (.*)$/) {
-                    print "ERROR: $1\n";
-                } elsif ($response =~ /^WARN (.*)$/) {
-                    print "WARN: $1\n";
-                } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
-                    my ($completed_target, $exit_code) = ($1, $2);
-                    if ($exit_code == 0) {
-                        print "✓ Build succeeded: $completed_target\n";
-                    } else {
-                        print "✗ Build failed: $completed_target (exit code $exit_code)\n";
+            # Wait for completion
+            my $select = IO::Select->new($socket);
+            my $job_done = 0;
+            while (!$exit_req && !$job_done) {
+                if ($select->can_read(0.1)) {
+                    my $response = <$socket>;
+                    last unless defined $response;
+                    chomp $response;
+                    if ($response =~ /^OUTPUT (.*)$/) {
+                        print "$1\n";
+                    } elsif ($response =~ /^ERROR (.*)$/) {
+                        print "ERROR: $1\n";
+                    } elsif ($response =~ /^WARN (.*)$/) {
+                        print "WARN: $1\n";
+                    } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+                        my ($completed_target, $exit_code) = ($1, $2);
+                        if ($exit_code == 0) {
+                            print "✓ Build succeeded: $completed_target\n";
+                        } else {
+                            print "✗ Build failed: $completed_target (exit code $exit_code)\n";
+                        }
+                        $job_done = 1;
                     }
-                    $job_done = 1;
                 }
             }
-        }
 
-        last if $exit_req;
+            last if $exit_req;
+        }
+    } else {
+        # No job server - build sequentially
+        print "(Building in sequential mode - use 'start' for parallel builds)\n";
+        for my $target (@targets) {
+            eval {
+                build_target($target);
+            };
+            if ($@) {
+                print "✗ Build failed: $target\n";
+                print STDERR $@;
+                last;
+            } else {
+                print "✓ Build succeeded: $target\n";
+            }
+        }
     }
 }
 
@@ -2906,27 +2964,38 @@ sub cmd_files {
 sub cmd_stale {
     my ($socket) = @_;
 
-    if (!$socket) {
-        print "Job server not running. Use 'start' to enable.\n";
-        return;
-    }
-
-    print $socket "LIST_STALE\n";
-    my $count = 0;
-    while (my $response = <$socket>) {
-        chomp $response;
-        last if $response eq 'STALE_END';
-        if ($response =~ /^STALE:(.+)$/) {
-            print "  $1\n";
-            $count++;
+    if ($socket) {
+        # Job server running - use full FUSE-based stale detection
+        print $socket "LIST_STALE\n";
+        my $count = 0;
+        while (my $response = <$socket>) {
+            chomp $response;
+            last if $response eq 'STALE_END';
+            if ($response =~ /^STALE:(.+)$/) {
+                print "  $1\n";
+                $count++;
+            }
         }
-    }
 
-    if ($count == 0) {
-        print "No stale targets (nothing needs rebuilding)\n";
+        if ($count == 0) {
+            print "No stale targets (nothing needs rebuilding)\n";
+        } else {
+            my $label = $count == 1 ? "target" : "targets";
+            print "\n$count $label need rebuilding\n";
+        }
     } else {
-        my $label = $count == 1 ? "target" : "targets";
-        print "\n$count $label need rebuilding\n";
+        # No job server - show files marked as dirty
+        if (keys %Smak::dirty_files) {
+            print "Files marked dirty:\n";
+            for my $file (sort keys %Smak::dirty_files) {
+                print "  $file\n";
+            }
+            print "\n" . (scalar keys %Smak::dirty_files) . " file(s) marked dirty\n";
+            print "(Use 'start' to enable full stale target detection via FUSE)\n";
+        } else {
+            print "No files marked dirty\n";
+            print "(Use 'start' to enable full stale target detection via FUSE)\n";
+        }
     }
 }
 
@@ -2939,13 +3008,16 @@ sub cmd_dirty {
         return;
     }
 
-    if (!$socket) {
-        print "Job server not running. Use 'start' to enable.\n";
-        return;
+    my $file = $words->[0];
+
+    if ($socket) {
+        # Job server running - send command via socket
+        print $socket "MARK_DIRTY:$file\n";
+    } else {
+        # No job server - modify global %dirty_files directly
+        $Smak::dirty_files{$file} = 1;
     }
 
-    my $file = $words->[0];
-    print $socket "MARK_DIRTY:$file\n";
     print "Marked '$file' as dirty (out-of-date)\n";
 }
 
@@ -2954,36 +3026,82 @@ sub cmd_needs {
 
     if (@$words == 0) {
         print "Usage: needs <file>\n";
-        return;
-    }
-
-    if (!$socket) {
-        print "Job server not running. Use 'start' to enable.\n";
+        print "  Shows which targets depend on the specified file\n";
         return;
     }
 
     my $file = $words->[0];
-    print $socket "NEEDS:$file\n";
-    $socket->flush() if $socket->can('flush');
 
-    my $count = 0;
-    my $got_end = 0;
-    while (my $response = <$socket>) {
-        chomp $response;
-        if ($response eq 'NEEDS_END') {
-            $got_end = 1;
-            last;
-        }
-        if ($response =~ /^NEEDS:(.+)$/) {
-            print "  $1\n";
-            $count++;
-        }
-    }
+    if ($socket) {
+        # Job server running - use socket protocol
+        print $socket "NEEDS:$file\n";
+        $socket->flush() if $socket->can('flush');
 
-    if (!$got_end) {
-        print "Error: Job server connection lost\n";
-    } elsif ($count == 0) {
-        print "No targets depend on '$file'\n";
+        my $count = 0;
+        my $got_end = 0;
+        while (my $response = <$socket>) {
+            chomp $response;
+            if ($response eq 'NEEDS_END') {
+                $got_end = 1;
+                last;
+            }
+            if ($response =~ /^NEEDS:(.+)$/) {
+                print "  $1\n";
+                $count++;
+            }
+        }
+        print "\n$count target(s) depend on '$file'\n" if $got_end;
+    } else {
+        # No job server - search dependencies directly
+        use Cwd 'getcwd';
+        my $cwd = getcwd();
+
+        my @reverse_deps;
+
+        # Search through all dependency types
+        for my $dep_hash (\%fixed_deps, \%pattern_deps, \%pseudo_deps) {
+            for my $key (keys %$dep_hash) {
+                # Key format: "Makefile\ttarget"
+                next unless $key =~ /^[^\t]+\t(.+)$/;
+                my $target = $1;
+
+                my @deps = @{$dep_hash->{$key} || []};
+
+                # Expand variables in dependencies
+                @deps = map {
+                    my $dep = $_;
+                    while ($dep =~ /\$MV\{([^}]+)\}/) {
+                        my $var = $1;
+                        my $val = $MV{$var} // '';
+                        $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+                    }
+                    if ($dep =~ /\s/) {
+                        split /\s+/, $dep;
+                    } else {
+                        $dep;
+                    }
+                } @deps;
+                @deps = grep { $_ ne '' } @deps;
+
+                # Apply vpath resolution
+                @deps = map { resolve_vpath($_, $cwd) } @deps;
+
+                # Check if file is in dependencies
+                if (grep { $_ eq $file } @deps) {
+                    push @reverse_deps, $target;
+                }
+            }
+        }
+
+        if (@reverse_deps) {
+            print "Targets that depend on '$file':\n";
+            for my $target (sort @reverse_deps) {
+                print "  $target\n";
+            }
+            print "\n" . (scalar @reverse_deps) . " target(s) depend on '$file'\n";
+        } else {
+            print "No targets depend on '$file'\n";
+        }
     }
 }
 
@@ -3029,17 +3147,19 @@ sub cmd_deps {
         return;
     }
 
-    if (!$socket) {
-        print "Job server not running.\n";
-        return;
-    }
-
     my $target = $words->[0];
-    print $socket "SHOW_DEPS $target\n";
-    while (my $response = <$socket>) {
-        chomp $response;
-        last if $response eq 'DEPS_END';
-        print "$response\n";
+
+    if ($socket) {
+        # Job server running - use socket protocol
+        print $socket "SHOW_DEPS $target\n";
+        while (my $response = <$socket>) {
+            chomp $response;
+            last if $response eq 'DEPS_END';
+            print "$response\n";
+        }
+    } else {
+        # No job server - call show_dependencies directly
+        show_dependencies($target);
     }
 }
 
@@ -3762,7 +3882,7 @@ sub run_job_master {
     my %inode_cache;  # inode => path
     my %pending_path_requests;  # inode => 1 (waiting for resolution)
     my %file_modifications;  # path => {workers => [pids], last_op => time}
-    my %dirty_files;  # Manually marked dirty files: path => 1
+    our %dirty_files;  # Manually marked dirty files: path => 1 (global for cmd_dirty)
     my $watch_client;  # Client socket to send watch notifications to
 
     our %worker_env;

@@ -4023,7 +4023,7 @@ sub run_job_master {
                     # Try to find the FUSE process - look for sshfs process
                     my $ps_output = `ps aux | grep -E '(sshfs|smak-fuse)' | grep -v grep`;
                     for my $ps_line (split /\n/, $ps_output) {
-                        if ($ps_line =~ /^\S+\s+(\d+).*$mountpoint/) {
+                        if ($ps_line =~ /^\S+\s+(\d+).*\Q$mountpoint\E/) {
                             $fuse_pid = $1;
                             last;
                         }

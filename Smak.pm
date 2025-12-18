@@ -4909,8 +4909,6 @@ sub run_job_master {
                 }
                 $worker->blocking(1);
             }
-
-	    check_queue_state("intermittent check");
         }
 
         for my $socket (@ready) {

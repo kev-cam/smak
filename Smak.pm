@@ -3054,9 +3054,11 @@ sub cmd_needs {
     } else {
         # No job server - search dependencies directly
         use Cwd 'getcwd';
+        use File::Basename;
         my $cwd = getcwd();
 
         my @reverse_deps;
+        my $file_basename = basename($file);
 
         # Search through all dependency types
         for my $dep_hash (\%fixed_deps, \%pattern_deps, \%pseudo_deps) {
@@ -3087,8 +3089,6 @@ sub cmd_needs {
                 @deps = map { resolve_vpath($_, $cwd) } @deps;
 
                 # Check if file is in dependencies (match exact, basename, or suffix)
-                use File::Basename;
-                my $file_basename = basename($file);
                 for my $dep (@deps) {
                     # Try exact match, basename match, or suffix match
                     if ($dep eq $file ||
@@ -3096,6 +3096,29 @@ sub cmd_needs {
                         $dep =~ /\Q$file\E$/) {
                         push @reverse_deps, $target;
                         last;
+                    }
+                }
+            }
+        }
+
+        # Also check targets by pattern (e.g., foo.C -> foo.C.o or foo.o)
+        if ($file =~ /^(.+)\.(c|cc|cpp|C|cxx|c\+\+)$/) {
+            my $base = $1;
+            my $ext = $2;
+
+            # Search all targets for those matching the source file pattern
+            for my $dep_hash (\%fixed_deps, \%fixed_rule, \%pattern_deps, \%pattern_rule) {
+                for my $key (keys %$dep_hash) {
+                    next unless $key =~ /^[^\t]+\t(.+)$/;
+                    my $target = $1;
+
+                    # Check if target looks like it's built from this source
+                    # Match patterns: foo.C.o, foo.o, */foo.C.o, */foo.o
+                    if ($target =~ /\Q$file\E\.o$/ ||                        # foo.C.o
+                        $target =~ /\Q$base\E\.o$/ ||                         # foo.o
+                        basename($target) eq "$file.o" ||                     # basename/foo.C.o
+                        basename($target) eq "$base.o") {                     # basename/foo.o
+                        push @reverse_deps, $target unless grep { $_ eq $target } @reverse_deps;
                     }
                 }
             }

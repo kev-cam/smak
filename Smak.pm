@@ -3086,9 +3086,17 @@ sub cmd_needs {
                 # Apply vpath resolution
                 @deps = map { resolve_vpath($_, $cwd) } @deps;
 
-                # Check if file is in dependencies
-                if (grep { $_ eq $file } @deps) {
-                    push @reverse_deps, $target;
+                # Check if file is in dependencies (match exact, basename, or suffix)
+                use File::Basename;
+                my $file_basename = basename($file);
+                for my $dep (@deps) {
+                    # Try exact match, basename match, or suffix match
+                    if ($dep eq $file ||
+                        basename($dep) eq $file_basename ||
+                        $dep =~ /\Q$file\E$/) {
+                        push @reverse_deps, $target;
+                        last;
+                    }
                 }
             }
         }

@@ -2879,8 +2879,24 @@ sub cmd_watch {
     }
 
     print $socket "WATCH_START\n";
-    ${$state->{watch_enabled}} = 1;
-    print "Watch mode enabled (FUSE file change notifications active)\n";
+
+    # Wait for response from job server
+    my $response = <$socket>;
+    if ($response) {
+        chomp $response;
+        if ($response eq 'WATCH_STARTED') {
+            ${$state->{watch_enabled}} = 1;
+            print "Watch mode enabled (FUSE file change notifications active)\n";
+        } elsif ($response =~ /^WATCH_UNAVAILABLE/) {
+            print "Watch mode unavailable: $response\n";
+            print "FUSE filesystem monitoring is not available.\n";
+            print "File changes will not be detected automatically.\n";
+        } else {
+            print "Unexpected response: $response\n";
+        }
+    } else {
+        print "No response from job server\n";
+    }
 }
 
 sub cmd_unwatch {

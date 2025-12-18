@@ -3194,19 +3194,28 @@ sub cmd_start {
     my $num_jobs = @$words > 0 ? $words->[0] : ($opts->{jobs} || 1);
     print "Starting job server with $num_jobs workers...\n";
 
+    # Set global $jobs variable before calling start_job_server
+    # (start_job_server doesn't take parameters, it uses the global)
+    my $old_jobs = $jobs;
+    $jobs = $num_jobs;
+
     # Start the job server with error handling
     eval {
         require Smak;  # Make sure we have access to start_job_server
-        Smak::start_job_server($num_jobs);
+        Smak::start_job_server();
     };
 
     if ($@) {
+        # Restore old jobs value on error
+        $jobs = $old_jobs;
         print "Failed to start job server: $@\n";
         return;
     }
 
     # Check if job server actually started
     if (!$Smak::job_server_socket) {
+        # Restore old jobs value on failure
+        $jobs = $old_jobs;
         print "Failed to start job server (no socket created)\n";
         return;
     }

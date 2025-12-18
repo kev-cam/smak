@@ -2961,13 +2961,16 @@ sub cmd_dirty {
         return;
     }
 
-    if (!$socket) {
-        print "Job server not running. Use 'start' to enable.\n";
-        return;
+    my $file = $words->[0];
+
+    if ($socket) {
+        # Job server running - send command via socket
+        print $socket "MARK_DIRTY:$file\n";
+    } else {
+        # No job server - modify global %dirty_files directly
+        $Smak::dirty_files{$file} = 1;
     }
 
-    my $file = $words->[0];
-    print $socket "MARK_DIRTY:$file\n";
     print "Marked '$file' as dirty (out-of-date)\n";
 }
 
@@ -3781,7 +3784,7 @@ sub run_job_master {
     my %inode_cache;  # inode => path
     my %pending_path_requests;  # inode => 1 (waiting for resolution)
     my %file_modifications;  # path => {workers => [pids], last_op => time}
-    my %dirty_files;  # Manually marked dirty files: path => 1
+    our %dirty_files;  # Manually marked dirty files: path => 1 (global for cmd_dirty)
     my $watch_client;  # Client socket to send watch notifications to
 
     our %worker_env;

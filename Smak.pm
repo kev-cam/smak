@@ -4017,11 +4017,11 @@ sub run_job_master {
             $mountpoint = $1;
             vprint "Mount point for current directory: $mountpoint\n";
         } else {
-            return undef;
+            return ();
         }
 
         # Read /proc/mounts to verify it's a FUSE filesystem
-        open(my $mounts, '<', '/proc/mounts') or return undef;
+        open(my $mounts, '<', '/proc/mounts') or return ();
         my $is_fuse = 0;
         my $fstype;
         while (my $line = <$mounts>) {
@@ -4035,7 +4035,7 @@ sub run_job_master {
         }
         close($mounts);
 
-        return undef unless $is_fuse;
+        return () unless $is_fuse;
 
         # Find the FUSE monitor port using lsof -i
         # Look for sshfs processes with LISTEN state
@@ -4045,14 +4045,16 @@ sub run_job_master {
             if ($line =~ /sshfs\s+(\d+)\s+.*TCP\s+\*:(\d+)\s+\(LISTEN\)/) {
                 my ($pid, $port) = ($1, $2);
                 vprint "Found FUSE monitor on port $port (PID $pid)\n";
-                return $port;
+                return ($mountpoint, $port);
             }
         }
 
-        return undef;
+        return ();
     }
 
-    if (my $fuse_port = detect_fuse_monitor()) {
+    my $fuse_mountpoint;
+    if (my ($mountpoint, $fuse_port) = detect_fuse_monitor()) {
+        $fuse_mountpoint = $mountpoint;
         # Connect to FUSE monitor
         $fuse_socket = IO::Socket::INET->new(
             PeerHost => '127.0.0.1',
@@ -5450,17 +5452,27 @@ sub run_job_master {
 
                     if ($op eq 'INO') {
                         # Path resolution response: INO:inode:path
-                        my ($inode, $path) = ($arg1, $arg2);
-                        $inode_cache{$inode} = $path;
+                        # Path from FUSE is relative to mount root, convert to full path
+                        my ($inode, $fuse_path) = ($arg1, $arg2);
+
+                        # Convert mount-relative path to full path
+                        my $full_path = $fuse_path;
+                        if ($fuse_mountpoint && $fuse_path =~ m{^/}) {
+                            # Remove leading slash and prepend mountpoint
+                            $fuse_path =~ s{^/}{};
+                            $full_path = "$fuse_mountpoint/$fuse_path";
+                        }
+
+                        $inode_cache{$inode} = $full_path;
                         delete $pending_path_requests{$inode};
 
-                        # Track modification
-                        $file_modifications{$path} ||= {workers => [], last_op => time()};
-                        print STDERR "FUSE: $path (inode $inode)\n" if $ENV{SMAK_DEBUG};
+                        # Track modification with full path
+                        $file_modifications{$full_path} ||= {workers => [], last_op => time()};
+                        print STDERR "FUSE: $full_path (inode $inode, mount-relative: $fuse_path)\n" if $ENV{SMAK_DEBUG};
 
                         # Send watch notification if client is watching AND file is build-relevant
-                        if ($watch_client && is_build_relevant($path)) {
-                            print $watch_client "WATCH:$path\n";
+                        if ($watch_client && is_build_relevant($full_path)) {
+                            print $watch_client "WATCH:$full_path\n";
                         }
 
                     } else {

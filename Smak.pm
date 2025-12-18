@@ -5249,6 +5249,39 @@ sub run_job_master {
                         }
                     }
 
+                    # For CMake builds: also search .d dependency files
+                    # .d files contain explicit target: dependency mappings
+                    for my $modified_file (@all_modified_files) {
+                        # Look for .d files that might reference this source file
+                        # CMake typically creates .d files like: path/to/foo.C.o.d
+                        my $basename = $modified_file;
+                        $basename =~ s{^.*/}{};
+
+                        # Search for .d files mentioning this file
+                        my @d_files = `find . -name '*.d' -type f 2>/dev/null`;
+                        chomp @d_files;
+
+                        for my $d_file (@d_files) {
+                            # Quick grep to see if this .d file mentions our modified file
+                            my $grep_result = `grep -l '\Q$modified_file\E' '$d_file' 2>/dev/null`;
+                            next unless $grep_result;
+
+                            # Parse the .d file to extract target
+                            open(my $fh, '<', $d_file) or next;
+                            my $content = do { local $/; <$fh> };
+                            close($fh);
+
+                            # .d file format: target: dep1 dep2 \
+                            #                  dep3 dep4
+                            if ($content =~ /^([^:]+):/) {
+                                my $target = $1;
+                                $target =~ s/^\s+|\s+$//g;
+                                $stale_targets{$target} = 1;
+                                print STDERR "Found stale target via .d file: $target (depends on $modified_file)\n" if $ENV{SMAK_DEBUG};
+                            }
+                        }
+                    }
+
                     # Send stale targets
                     for my $target (sort keys %stale_targets) {
                         print $master_socket "STALE:$target\n";

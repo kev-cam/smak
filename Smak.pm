@@ -3078,17 +3078,19 @@ sub cmd_deps {
         return;
     }
 
-    if (!$socket) {
-        print "Job server not running.\n";
-        return;
-    }
-
     my $target = $words->[0];
-    print $socket "SHOW_DEPS $target\n";
-    while (my $response = <$socket>) {
-        chomp $response;
-        last if $response eq 'DEPS_END';
-        print "$response\n";
+
+    if ($socket) {
+        # Job server running - use socket protocol
+        print $socket "SHOW_DEPS $target\n";
+        while (my $response = <$socket>) {
+            chomp $response;
+            last if $response eq 'DEPS_END';
+            print "$response\n";
+        }
+    } else {
+        # No job server - call show_dependencies directly
+        show_dependencies($target);
     }
 }
 

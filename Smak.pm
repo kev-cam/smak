@@ -2928,27 +2928,38 @@ sub cmd_files {
 sub cmd_stale {
     my ($socket) = @_;
 
-    if (!$socket) {
-        print "Job server not running. Use 'start' to enable.\n";
-        return;
-    }
-
-    print $socket "LIST_STALE\n";
-    my $count = 0;
-    while (my $response = <$socket>) {
-        chomp $response;
-        last if $response eq 'STALE_END';
-        if ($response =~ /^STALE:(.+)$/) {
-            print "  $1\n";
-            $count++;
+    if ($socket) {
+        # Job server running - use full FUSE-based stale detection
+        print $socket "LIST_STALE\n";
+        my $count = 0;
+        while (my $response = <$socket>) {
+            chomp $response;
+            last if $response eq 'STALE_END';
+            if ($response =~ /^STALE:(.+)$/) {
+                print "  $1\n";
+                $count++;
+            }
         }
-    }
 
-    if ($count == 0) {
-        print "No stale targets (nothing needs rebuilding)\n";
+        if ($count == 0) {
+            print "No stale targets (nothing needs rebuilding)\n";
+        } else {
+            my $label = $count == 1 ? "target" : "targets";
+            print "\n$count $label need rebuilding\n";
+        }
     } else {
-        my $label = $count == 1 ? "target" : "targets";
-        print "\n$count $label need rebuilding\n";
+        # No job server - show files marked as dirty
+        if (keys %Smak::dirty_files) {
+            print "Files marked dirty:\n";
+            for my $file (sort keys %Smak::dirty_files) {
+                print "  $file\n";
+            }
+            print "\n" . (scalar keys %Smak::dirty_files) . " file(s) marked dirty\n";
+            print "(Use 'start' to enable full stale target detection via FUSE)\n";
+        } else {
+            print "No files marked dirty\n";
+            print "(Use 'start' to enable full stale target detection via FUSE)\n";
+        }
     }
 }
 

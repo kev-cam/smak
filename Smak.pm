@@ -4473,9 +4473,12 @@ sub run_job_master {
             $ready_workers++ if $worker_status{$w}{ready};
         }
 
-	vprint "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
-	vprint "$ready_workers/" . scalar(@workers) . " ready, ";
-	vprint scalar(keys %running_jobs) . " running\n";
+	if (scalar(@workers) != $ready_workers || scalar(@job_queue)
+	                                       || scalar(keys %running_jobs)) {
+	    vprint "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
+	    vprint "$ready_workers/" . scalar(@workers) . " ready, ";
+	    vprint scalar(keys %running_jobs) . " running\n";
+	}
 	
 	if (@job_queue > 0 && @job_queue <= 5) {
 	    for my $job (@job_queue) {

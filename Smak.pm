@@ -2785,6 +2785,12 @@ sub dispatch_command {
     } elsif ($cmd eq 'dirty') {
         cmd_dirty($words, $socket);
 
+    } elsif ($cmd eq 'touch') {
+        cmd_touch($words, $socket);
+
+    } elsif ($cmd eq 'rm') {
+        cmd_rm($words, $socket);
+
     } elsif ($cmd eq 'ignore') {
         cmd_ignore($words, $socket);
 
@@ -2830,6 +2836,8 @@ Available commands:
   files, f            List tracked file modifications (FUSE)
   stale               Show targets that need rebuilding (FUSE)
   dirty <file>        Mark a file as out-of-date (dirty)
+  touch <file>        Update file timestamp and mark dirty
+  rm <file>           Remove file (saves to .{file}.prev) and mark dirty
   ignore <file>       Ignore a file for dependency checking
   ignore -none        Clear all ignored files
   ignore              List currently ignored files
@@ -3151,6 +3159,78 @@ sub cmd_dirty {
     }
 
     print "Marked '$file' as dirty (out-of-date)\n";
+}
+
+sub cmd_touch {
+    my ($words, $socket) = @_;
+
+    if (@$words == 0) {
+        print "Usage: touch <file> [<file2> ...]\n";
+        print "  Updates file timestamps and marks as dirty for rebuild\n";
+        return;
+    }
+
+    for my $file (@$words) {
+        # Touch the file (create if doesn't exist, update timestamp if it does)
+        if (-e $file) {
+            # Update timestamp
+            my $now = time();
+            utime($now, $now, $file) or warn "Failed to touch '$file': $!\n";
+            print "Updated timestamp: $file\n";
+        } else {
+            # Create empty file
+            if (open(my $fh, '>', $file)) {
+                close($fh);
+                print "Created: $file\n";
+            } else {
+                warn "Failed to create '$file': $!\n";
+                next;
+            }
+        }
+
+        # Mark as dirty so targets that depend on it will rebuild
+        if ($socket) {
+            print $socket "MARK_DIRTY:$file\n";
+        } else {
+            $Smak::dirty_files{$file} = 1;
+        }
+    }
+}
+
+sub cmd_rm {
+    my ($words, $socket) = @_;
+
+    if (@$words == 0) {
+        print "Usage: rm <file> [<file2> ...]\n";
+        print "  Removes files (moves to .{file}.prev for comparison) and marks dirty\n";
+        return;
+    }
+
+    for my $file (@$words) {
+        unless (-e $file) {
+            print "File not found: $file\n";
+            next;
+        }
+
+        # Generate backup filename: .{basename}.prev in same directory
+        my $backup = $file;
+        $backup =~ s{([^/]+)$}{.$1.prev};
+
+        # Move file to backup
+        if (rename($file, $backup)) {
+            print "Removed: $file (saved as $backup)\n";
+        } else {
+            warn "Failed to remove '$file': $!\n";
+            next;
+        }
+
+        # Mark as dirty so targets that depend on it will rebuild
+        if ($socket) {
+            print $socket "MARK_DIRTY:$file\n";
+        } else {
+            $Smak::dirty_files{$file} = 1;
+        }
+    }
 }
 
 sub cmd_ignore {

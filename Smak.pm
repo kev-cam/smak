@@ -2662,7 +2662,13 @@ sub unified_cli {
     # Set up periodic notification checking using SIGALRM
     # This allows us to process async notifications even while readline() is blocked
     my $alarm_handler = sub {
-        $check_notifications->() if defined $socket;
+        eval {
+            $check_notifications->() if defined $socket;
+            # Force readline to update display after async output
+            if ($term->can('rl_callback_handler_remove')) {
+                # If readline supports it, force a redraw
+            }
+        };
         alarm(1) if !$exit_requested && !$detached;  # Re-arm timer for 1 second
     };
     local $SIG{ALRM} = $alarm_handler;

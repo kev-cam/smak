@@ -5024,9 +5024,10 @@ sub run_job_master {
     my $last_consistency_check = time();
     my $jobs_received = 0;  # Track if we've received any job submissions
     while (1) {
-        # Check if all work is complete (only after we've received jobs)
-        if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0) {
-            vprint "All jobs complete. Job-master exiting.\n";
+        # Check if all work is complete AND master has disconnected
+        # (In interactive mode, stay running even when idle)
+        if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0 && !defined($master_socket)) {
+            vprint "All jobs complete and master disconnected. Job-master exiting.\n";
             last;
         }
 

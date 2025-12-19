@@ -67,8 +67,12 @@ sub find_jobservers {
         if (open(my $cmd_fh, '<', $cmdline_file)) {
             $cmdline = <$cmd_fh>;
             close($cmd_fh);
-            $cmdline =~ s/\0/ /g;
-            $cmdline =~ s/\s+$//;
+            if (defined $cmdline) {
+                $cmdline =~ s/\0/ /g;
+                $cmdline =~ s/\s+$//;
+            } else {
+                $cmdline = '';
+            }
         }
 
         # Get working directory
@@ -92,6 +96,88 @@ sub find_jobservers {
     }
 
     return @jobservers;
+}
+
+# Kill specific job servers by index
+sub kill_jobservers {
+    my @indices = @_;
+    my $killed = 0;
+    my $failed = 0;
+
+    for my $idx (@indices) {
+        my $js = $jobservers[$idx];
+        unless ($js) {
+            print "Invalid index: $idx\n";
+            $failed++;
+            next;
+        }
+
+        my $pid = $js->{pid};
+        my $master_port = $js->{master_port};
+
+        print "Killing job server [$idx] PID $pid";
+        print " ($js->{cwd})" if $js->{cwd};
+        print "... ";
+
+        # Try to connect and send SHUTDOWN command
+        my $socket = IO::Socket::INET->new(
+            PeerHost => '127.0.0.1',
+            PeerPort => $master_port,
+            Proto    => 'tcp',
+            Timeout  => 2,
+        );
+
+        if ($socket) {
+            $socket->autoflush(1);
+            print $socket "SHUTDOWN\n";
+
+            # Wait briefly for acknowledgment
+            my $select = IO::Select->new($socket);
+            if ($select->can_read(1)) {
+                my $ack = <$socket>;
+            }
+            close($socket);
+
+            # Wait for process to exit (up to 2 seconds)
+            my $wait_time = 0;
+            while (-d "/proc/$pid" && $wait_time < 20) {
+                select(undef, undef, undef, 0.1);
+                $wait_time++;
+            }
+
+            if (-d "/proc/$pid") {
+                print "timed out, sending SIGTERM\n";
+                kill 'TERM', $pid;
+                sleep 1;
+                if (-d "/proc/$pid") {
+                    print "Warning: Process $pid still running\n";
+                    $failed++;
+                } else {
+                    $killed++;
+                }
+            } else {
+                print "done\n";
+                $killed++;
+            }
+        } else {
+            # Couldn't connect, try SIGTERM directly
+            print "couldn't connect, sending SIGTERM... ";
+            kill 'TERM', $pid;
+            sleep 1;
+            if (-d "/proc/$pid") {
+                print "failed\n";
+                $failed++;
+            } else {
+                print "done\n";
+                $killed++;
+            }
+        }
+    }
+
+    print "\nKilled $killed job server(s)" if $killed > 0;
+    print ", $failed failed" if $failed > 0;
+    print "\n";
+    return ($killed, $failed);
 }
 
 # Find running job-master instances
@@ -193,25 +279,72 @@ if ($target_pid) {
         die "No job-master found with PID $target_pid\n";
     }
 } elsif (@jobservers > 1) {
-    print "Multiple smak instances found:\n";
-    for (my $i = 0; $i < @jobservers; $i++) {
-        my $js = $jobservers[$i];
-        print "  [$i] PID $js->{pid}";
-        print " - $js->{cwd}" if $js->{cwd};
-        print "\n";
-        print "      Workers: $js->{workers}";
-        if ($js->{master_port}) {
-            print ", Master port: $js->{master_port}";
+    # Interactive selection with help and kill commands
+    while (!$selected_js) {
+        print "Multiple smak instances found:\n";
+        for (my $i = 0; $i < @jobservers; $i++) {
+            my $js = $jobservers[$i];
+            print "  [$i] PID $js->{pid}";
+            print " - $js->{cwd}" if $js->{cwd};
+            print "\n";
+            print "      Workers: $js->{workers}";
+            if ($js->{master_port}) {
+                print ", Master port: $js->{master_port}";
+            }
+            print "\n";
         }
-        print "\n";
-    }
-    print "Select instance (0-" . ($#jobservers) . "): ";
-    my $choice = <STDIN>;
-    chomp $choice;
-    if ($choice =~ /^\d+$/ && $choice <= $#jobservers) {
-        $selected_js = $jobservers[$choice];
-    } else {
-        die "Invalid selection\n";
+        print "Select instance (0-" . ($#jobservers) . ", 'h' for help): ";
+        my $choice = <STDIN>;
+        chomp $choice;
+        $choice =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+        if ($choice eq 'h' || $choice eq 'help' || $choice eq '?') {
+            # Show help
+            print "\nCommands:\n";
+            print "  <number>    - Attach to instance number\n";
+            print "  k *         - Kill all instances\n";
+            print "  k <ids>     - Kill specific instances (e.g., 'k 0 2 4')\n";
+            print "  h, help, ?  - Show this help\n";
+            print "  q, quit     - Exit without attaching\n\n";
+        } elsif ($choice eq 'q' || $choice eq 'quit') {
+            print "Exiting.\n";
+            exit 0;
+        } elsif ($choice =~ /^k\s+(.+)$/) {
+            # Kill command
+            my $args = $1;
+            if ($args eq '*') {
+                # Kill all
+                my @all_indices = (0 .. $#jobservers);
+                my ($killed, $failed) = kill_jobservers(@all_indices);
+                exit($failed > 0 ? 1 : 0);
+            } else {
+                # Kill specific instances
+                my @indices = split(/\s+/, $args);
+                # Validate indices
+                my @valid_indices;
+                for my $idx (@indices) {
+                    if ($idx =~ /^\d+$/ && $idx <= $#jobservers) {
+                        push @valid_indices, $idx;
+                    } else {
+                        print "Invalid index: $idx (must be 0-" . $#jobservers . ")\n";
+                    }
+                }
+                if (@valid_indices) {
+                    my ($killed, $failed) = kill_jobservers(@valid_indices);
+                    # Refresh the list
+                    @jobservers = find_jobservers();
+                    unless (@jobservers) {
+                        print "No more job servers running.\n";
+                        exit 0;
+                    }
+                }
+            }
+        } elsif ($choice =~ /^\d+$/ && $choice <= $#jobservers) {
+            # Valid numeric selection
+            $selected_js = $jobservers[$choice];
+        } else {
+            print "Invalid selection. Type 'h' for help.\n\n";
+        }
     }
 } else {
     $selected_js = $jobservers[0];

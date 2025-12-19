@@ -2576,18 +2576,43 @@ sub unified_cli {
     print "Parallel jobs: $jobs\n" if $jobs > 1;
     print "\n";
 
-    # Helper: check for watch notifications
+    # Helper: check for asynchronous notifications and job output
     my $check_notifications = sub {
-        return unless $watch_enabled && defined $socket;
+        return unless defined $socket;
         my $select = IO::Select->new($socket);
         while ($select->can_read(0)) {
             my $notif = <$socket>;
-            last unless defined $notif;
+            unless (defined $notif) {
+                # Socket closed
+                return;
+            }
             chomp $notif;
             if ($notif =~ /^WATCH:(.+)$/) {
                 print "\r\033[K[File changed: $1]\n";
                 $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+            } elsif ($notif =~ /^OUTPUT (.*)$/) {
+                # Asynchronous job output
+                print "\r\033[K$1\n";
+                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+            } elsif ($notif =~ /^ERROR (.*)$/) {
+                print "\r\033[KERROR: $1\n";
+                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+            } elsif ($notif =~ /^WARN (.*)$/) {
+                print "\r\033[KWARN: $1\n";
+                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+            } elsif ($notif =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+                # Asynchronous job completion notification
+                my ($target, $exit_code) = ($1, $2);
+                if ($exit_code == 0) {
+                    print "\r\033[K[✓ Completed: $target]\n";
+                } else {
+                    print "\r\033[K[✗ Failed: $target (exit $exit_code)]\n";
+                }
+                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
             } elsif ($notif =~ /^WATCH_STARTED|^WATCH_/) {
+                last;  # End of watch notification batch
+            } elsif ($notif =~ /^STALE:|^STALE_END|^FILES_END|^TASKS_END|^PROGRESS_END/) {
+                # End markers for various queries - don't display
                 last;
             }
         }

@@ -96,6 +96,9 @@ our %phony_targets;
 # Track modifications for saving
 our @modifications;
 
+# Cache of targets that need rebuilding (populated during initial pass/dry-run)
+our %stale_targets_cache;
+
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
 our $prompt = "smak> ";  # Prompt string for interactive mode
@@ -300,10 +303,14 @@ sub execute_command_sequential {
         die $err_msg;
     }
 
-    # Successfully built - clear from dirty files
+    # Successfully built - clear from dirty files and stale cache
     if (exists $Smak::dirty_files{$target}) {
         delete $Smak::dirty_files{$target};
         warn "DEBUG[" . __LINE__ . "]: Cleared '$target' from dirty files after successful build\n" if $ENV{SMAK_DEBUG};
+    }
+    if (exists $Smak::stale_targets_cache{$target}) {
+        delete $Smak::stale_targets_cache{$target};
+        warn "DEBUG[" . __LINE__ . "]: Cleared '$target' from stale cache after successful build\n" if $ENV{SMAK_DEBUG};
     }
 
     chdir($old_dir) if $old_dir;
@@ -2036,9 +2043,13 @@ sub build_target {
         warn "DEBUG[" . __LINE__ . "]:   Checking if target exists and is up-to-date...\n" if $ENV{SMAK_DEBUG};
         if (-e $target && !needs_rebuild($target)) {
             warn "DEBUG:   Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
+            # Remove from stale cache if it was there
+            delete $stale_targets_cache{$target};
             return;
         }
         warn "DEBUG[" . __LINE__ . "]:   Target needs rebuilding\n" if $ENV{SMAK_DEBUG};
+        # Track this target as stale (needs rebuilding)
+        $stale_targets_cache{$target} = time();
     }
 
     # Recursively build dependencies
@@ -3000,18 +3011,31 @@ sub cmd_stale {
             print "\n$count $label need rebuilding\n";
         }
     } else {
-        # No job server - show files marked as dirty
+        # No job server - show targets from stale cache and dirty files
+        my $found_stale = 0;
+
+        if (keys %Smak::stale_targets_cache) {
+            print "Stale targets (need rebuilding):\n";
+            for my $target (sort keys %Smak::stale_targets_cache) {
+                print "  $target\n";
+            }
+            print "\n" . (scalar keys %Smak::stale_targets_cache) . " stale target(s)\n";
+            $found_stale = 1;
+        }
+
         if (keys %Smak::dirty_files) {
-            print "Files marked dirty:\n";
+            print "\nFiles marked dirty:\n";
             for my $file (sort keys %Smak::dirty_files) {
                 print "  $file\n";
             }
             print "\n" . (scalar keys %Smak::dirty_files) . " file(s) marked dirty\n";
-            print "(Use 'start' to enable full stale target detection via FUSE)\n";
-        } else {
-            print "No files marked dirty\n";
-            print "(Use 'start' to enable full stale target detection via FUSE)\n";
+            $found_stale = 1;
         }
+
+        if (!$found_stale) {
+            print "No stale targets (nothing needs rebuilding)\n";
+        }
+        print "\n(Use 'start' to enable file change monitoring via FUSE)\n";
     }
 }
 
@@ -4911,6 +4935,11 @@ sub run_job_master {
 
                         # Handle successful completion
                         if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
+                            # Clear from stale cache after successful build
+                            if (exists $stale_targets_cache{$job->{target}}) {
+                                delete $stale_targets_cache{$job->{target}};
+                                warn "DEBUG[" . __LINE__ . "]: Cleared '$job->{target}' from stale cache after successful build\n" if $ENV{SMAK_DEBUG};
+                            }
 
                             # Check composite targets
                             for my $comp_target (keys %pending_composite) {
@@ -5186,6 +5215,11 @@ sub run_job_master {
                     # List targets that need rebuilding based on tracked modifications and dirty files
                     eval {
                         my %stale_targets;
+
+                        # First, include targets from the stale cache (populated during initial pass/dry-run)
+                        for my $target (keys %stale_targets_cache) {
+                            $stale_targets{$target} = 1;
+                        }
 
                         # Get current working directory to create relative paths
                         my $cwd = abs_path('.');
@@ -5725,6 +5759,11 @@ sub run_job_master {
 
                     # Handle successful completion
                     if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
+                        # Clear from stale cache after successful build
+                        if (exists $stale_targets_cache{$job->{target}}) {
+                            delete $stale_targets_cache{$job->{target}};
+                            warn "DEBUG[" . __LINE__ . "]: Cleared '$job->{target}' from stale cache after successful build\n" if $ENV{SMAK_DEBUG};
+                        }
 
                         # Check if any pending composite targets can now complete
                         for my $comp_target (keys %pending_composite) {

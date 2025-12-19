@@ -2589,6 +2589,7 @@ sub unified_cli {
     my $check_notifications = sub {
         return unless defined $socket;
         my $select = IO::Select->new($socket);
+        my $had_output = 0;
         while ($select->can_read(0)) {
             my $notif = <$socket>;
             unless (defined $notif) {
@@ -2600,17 +2601,17 @@ sub unified_cli {
             chomp $notif;
             if ($notif =~ /^WATCH:(.+)$/) {
                 print "\r\033[K[File changed: $1]\n";
-                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+                $had_output = 1;
             } elsif ($notif =~ /^OUTPUT (.*)$/) {
                 # Asynchronous job output
                 print "\r\033[K$1\n";
-                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+                $had_output = 1;
             } elsif ($notif =~ /^ERROR (.*)$/) {
                 print "\r\033[KERROR: $1\n";
-                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+                $had_output = 1;
             } elsif ($notif =~ /^WARN (.*)$/) {
                 print "\r\033[KWARN: $1\n";
-                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+                $had_output = 1;
             } elsif ($notif =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                 # Asynchronous job completion notification
                 my ($target, $exit_code) = ($1, $2);
@@ -2619,13 +2620,19 @@ sub unified_cli {
                 } else {
                     print "\r\033[K[✗ Failed: $target (exit $exit_code)]\n";
                 }
-                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+                $had_output = 1;
             } elsif ($notif =~ /^WATCH_STARTED|^WATCH_/) {
                 last;  # End of watch notification batch
             } elsif ($notif =~ /^STALE:|^STALE_END|^FILES_END|^TASKS_END|^PROGRESS_END/) {
                 # End markers for various queries - don't display
                 last;
             }
+        }
+
+        # If we displayed async output, redisplay the prompt
+        if ($had_output && $term->can('rl_on_new_line') && $term->can('rl_redisplay')) {
+            $term->rl_on_new_line();
+            $term->rl_redisplay();
         }
     };
 

@@ -30,6 +30,8 @@ if ($pid_arg) {
     }
 }
 
+our @jobservers;
+
 # Find smak-jobserver processes using port files
 sub find_jobservers {
     my @jobservers;
@@ -181,7 +183,7 @@ sub kill_jobservers {
 }
 
 # Find running job-master instances
-my @jobservers = find_jobservers();
+@jobservers = find_jobservers();
 
 unless (@jobservers) {
     print STDERR "No running smak job-master instances found.\n";

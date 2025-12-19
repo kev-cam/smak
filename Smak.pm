@@ -2659,25 +2659,14 @@ sub unified_cli {
         }
     };
 
-    # Set up periodic notification checking using SIGALRM
-    # This allows us to process async notifications even while readline() is blocked
-    my $alarm_handler = sub {
-        eval {
-            $check_notifications->() if defined $socket;
-            # Force readline to update display after async output
-            if ($term->can('rl_callback_handler_remove')) {
-                # If readline supports it, force a redraw
-            }
-        };
-        alarm(1) if !$exit_requested && !$detached;  # Re-arm timer for 1 second
-    };
-    local $SIG{ALRM} = $alarm_handler;
-    alarm(1);  # Start periodic checks
-
-    # Main command loop
+    # Main command loop using select() for event multiplexing
+    # This allows processing async notifications while waiting for user input
     my $line;
-    while (!$exit_requested && !$detached && defined($line = $term->readline($prompt))) {
-        $check_notifications->();
+    my $need_prompt = 1;
+
+    while (!$exit_requested && !$detached) {
+        # Always check for async notifications first
+        $check_notifications->() if defined $socket;
 
         # Check if socket is still valid after async notifications
         if ($socket && !$socket->connected()) {
@@ -2685,6 +2674,40 @@ sub unified_cli {
             print "Use 'start' to reconnect or 'quit' to exit.\n";
             $socket = undef;
         }
+
+        # Print prompt if needed
+        if ($need_prompt) {
+            print $prompt;
+            STDOUT->flush();
+            $need_prompt = 0;
+        }
+
+        # Use select to multiplex STDIN and socket with timeout
+        my $select = IO::Select->new();
+        $select->add(\*STDIN);
+        $select->add($socket) if defined $socket;
+
+        my @ready = $select->can_read(0.5);  # 500ms timeout for periodic checks
+
+        # Check if STDIN has data available
+        my $stdin_ready = 0;
+        for my $fh (@ready) {
+            $stdin_ready = 1 if fileno($fh) == fileno(STDIN);
+        }
+
+        unless ($stdin_ready) {
+            # Timeout or socket data - loop to check notifications again
+            next;
+        }
+
+        # STDIN is ready - read a line (won't block)
+        $line = $term->readline('');  # Empty prompt since we already printed it
+        unless (defined $line) {
+            # EOF or error
+            last;
+        }
+
+        $need_prompt = 1;  # Will need prompt after processing command
 
         chomp $line;
         $line =~ s/^\s+|\s+$//g;
@@ -2729,9 +2752,6 @@ sub unified_cli {
         # Check for async notifications that arrived during command execution
         $check_notifications->();
     }
-
-    # Cancel periodic alarm
-    alarm(0);
 
     # Cleanup on exit
     if ($exit_requested) {

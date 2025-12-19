@@ -99,6 +99,9 @@ our @modifications;
 # Cache of targets that need rebuilding (populated during initial pass/dry-run)
 our %stale_targets_cache;
 
+# Files to ignore for dependency checking
+our %ignored_files;
+
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
 our $prompt = "smak> ";  # Prompt string for interactive mode
@@ -1825,6 +1828,12 @@ sub needs_rebuild {
         # Skip .PHONY and other special targets
         next if $dep =~ /^\.PHONY$/;
 
+        # Skip ignored files
+        if (exists $Smak::ignored_files{$dep}) {
+            warn "DEBUG: Dependency '$dep' is ignored, skipping timestamp check\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+
         # Check if dependency is marked dirty
         if (exists $Smak::dirty_files{$dep}) {
             warn "DEBUG: Dependency '$dep' of '$target' is marked dirty, needs rebuild\n" if $ENV{SMAK_DEBUG};
@@ -2743,6 +2752,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'dirty') {
         cmd_dirty($words, $socket);
 
+    } elsif ($cmd eq 'ignore') {
+        cmd_ignore($words, $socket);
+
     } elsif ($cmd eq 'needs') {
         cmd_needs($words, $socket);
 
@@ -2785,6 +2797,9 @@ Available commands:
   files, f            List tracked file modifications (FUSE)
   stale               Show targets that need rebuilding (FUSE)
   dirty <file>        Mark a file as out-of-date (dirty)
+  ignore <file>       Ignore a file for dependency checking
+  ignore -none        Clear all ignored files
+  ignore              List currently ignored files
   needs <file>        Show which targets depend on a file
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
@@ -3103,6 +3118,39 @@ sub cmd_dirty {
     }
 
     print "Marked '$file' as dirty (out-of-date)\n";
+}
+
+sub cmd_ignore {
+    my ($words, $socket) = @_;
+
+    # Special handling for -none to clear all ignored files
+    if (@$words == 1 && $words->[0] eq '-none') {
+        %Smak::ignored_files = ();
+        print "Cleared all ignored files\n";
+        return;
+    }
+
+    # List ignored files if no arguments
+    if (@$words == 0) {
+        if (keys %Smak::ignored_files) {
+            print "Ignored files:\n";
+            for my $file (sort keys %Smak::ignored_files) {
+                print "  $file\n";
+            }
+            print "\n" . (scalar keys %Smak::ignored_files) . " file(s) ignored\n";
+        } else {
+            print "No files are currently ignored\n";
+        }
+        print "\nUsage: ignore <file>    - Ignore a file for dependency checking\n";
+        print "       ignore -none     - Clear all ignored files\n";
+        return;
+    }
+
+    # Mark file as ignored
+    my $file = $words->[0];
+    $Smak::ignored_files{$file} = 1;
+    print "Ignoring '$file' for dependency checking\n";
+    print "Targets depending on this file will not be rebuilt based on its timestamp\n";
 }
 
 sub cmd_needs {
@@ -5117,7 +5165,7 @@ sub run_job_master {
                 # Master sent us something
                 my $line = <$socket>;
                 unless (defined $line) {
-                    print STDERR "Master disconnected. Waiting for reconnection...\n";
+                    # Master disconnected - clean up silently
                     $select->remove($master_socket);
                     close($master_socket);
                     # Clear watch client if this was the watching client

@@ -2710,6 +2710,9 @@ sub unified_cli {
             detached => \$detached,
             term => $term,
         });
+
+        # Check for async notifications that arrived during command execution
+        $check_notifications->();
     }
 
     # Cleanup on exit

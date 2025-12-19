@@ -2659,10 +2659,14 @@ sub unified_cli {
         }
     };
 
-    # Main command loop
+    # Main command loop using select() for event multiplexing
+    # This allows processing async notifications while waiting for user input
     my $line;
-    while (!$exit_requested && !$detached && defined($line = $term->readline($prompt))) {
-        $check_notifications->();
+    my $need_prompt = 1;
+
+    while (!$exit_requested && !$detached) {
+        # Always check for async notifications first
+        $check_notifications->() if defined $socket;
 
         # Check if socket is still valid after async notifications
         if ($socket && !$socket->connected()) {
@@ -2670,6 +2674,40 @@ sub unified_cli {
             print "Use 'start' to reconnect or 'quit' to exit.\n";
             $socket = undef;
         }
+
+        # Print prompt if needed
+        if ($need_prompt) {
+            print $prompt;
+            STDOUT->flush();
+            $need_prompt = 0;
+        }
+
+        # Use select to multiplex STDIN and socket with timeout
+        my $select = IO::Select->new();
+        $select->add(\*STDIN);
+        $select->add($socket) if defined $socket;
+
+        my @ready = $select->can_read(0.5);  # 500ms timeout for periodic checks
+
+        # Check if STDIN has data available
+        my $stdin_ready = 0;
+        for my $fh (@ready) {
+            $stdin_ready = 1 if fileno($fh) == fileno(STDIN);
+        }
+
+        unless ($stdin_ready) {
+            # Timeout or socket data - loop to check notifications again
+            next;
+        }
+
+        # STDIN is ready - read a line (won't block)
+        $line = $term->readline('');  # Empty prompt since we already printed it
+        unless (defined $line) {
+            # EOF or error
+            last;
+        }
+
+        $need_prompt = 1;  # Will need prompt after processing command
 
         chomp $line;
         $line =~ s/^\s+|\s+$//g;

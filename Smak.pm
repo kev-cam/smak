@@ -2586,10 +2586,13 @@ sub unified_cli {
     print "\n";
 
     # Helper: check for asynchronous notifications and job output
+    my %recent_file_notifications;  # Track recent file notifications to avoid spam
     my $check_notifications = sub {
         return unless defined $socket;
         my $select = IO::Select->new($socket);
         my $had_output = 0;
+        my $now = time();
+
         while ($select->can_read(0)) {
             my $notif = <$socket>;
             unless (defined $notif) {
@@ -2600,8 +2603,14 @@ sub unified_cli {
             }
             chomp $notif;
             if ($notif =~ /^WATCH:(.+)$/) {
-                print "\r\033[K[File changed: $1]\n";
-                $had_output = 1;
+                my $file = $1;
+                # Deduplicate: only show each file change once per second
+                if (!exists $recent_file_notifications{$file} ||
+                    $now - $recent_file_notifications{$file} >= 1) {
+                    print "\r\033[K[File changed: $file]\n";
+                    $recent_file_notifications{$file} = $now;
+                    $had_output = 1;
+                }
             } elsif ($notif =~ /^OUTPUT (.*)$/) {
                 # Asynchronous job output
                 print "\r\033[K$1\n";
@@ -2629,10 +2638,24 @@ sub unified_cli {
             }
         }
 
-        # If we displayed async output, redisplay the prompt
-        if ($had_output && $term->can('rl_on_new_line') && $term->can('rl_redisplay')) {
-            $term->rl_on_new_line();
-            $term->rl_redisplay();
+        # Clean up old notification timestamps (older than 5 seconds)
+        for my $file (keys %recent_file_notifications) {
+            if ($now - $recent_file_notifications{$file} > 5) {
+                delete $recent_file_notifications{$file};
+            }
+        }
+
+        # If we displayed async output, print prompt manually
+        if ($had_output) {
+            # Try readline methods first
+            if ($term->can('rl_on_new_line') && $term->can('rl_redisplay')) {
+                $term->rl_on_new_line();
+                $term->rl_redisplay();
+            } else {
+                # Fallback: just print the prompt
+                print $prompt;
+                STDOUT->flush();
+            }
         }
     };
 

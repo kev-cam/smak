@@ -5184,16 +5184,17 @@ sub run_job_master {
 
                 } elsif ($line =~ /^LIST_STALE$/) {
                     # List targets that need rebuilding based on tracked modifications and dirty files
-                    my %stale_targets;
+                    eval {
+                        my %stale_targets;
 
-                    # Get current working directory to create relative paths
-                    my $cwd = abs_path('.');
+                        # Get current working directory to create relative paths
+                        my $cwd = abs_path('.');
 
-                    # Combine FUSE-tracked modifications and manually marked dirty files
-                    my @all_modified_files = (keys %file_modifications, keys %dirty_files);
+                        # Combine FUSE-tracked modifications and manually marked dirty files
+                        my @all_modified_files = (keys %file_modifications, keys %dirty_files);
 
-                    # For each modified file, find targets that depend on it
-                    for my $modified_file (@all_modified_files) {
+                        # For each modified file, find targets that depend on it
+                        for my $modified_file (@all_modified_files) {
                         # Try multiple path variations for matching
                         my @path_variations;
 
@@ -5297,6 +5298,13 @@ sub run_job_master {
                     for my $target (sort keys %stale_targets) {
                         print $master_socket "STALE:$target\n";
                     }
+                    };  # Close eval block
+
+                    if ($@) {
+                        print STDERR "Error in LIST_STALE: $@\n" if $ENV{SMAK_DEBUG};
+                    }
+
+                    # Always send end marker, even if there was an error
                     print $master_socket "STALE_END\n";
 
                 } elsif ($line =~ /^NEEDS:(.+)$/) {

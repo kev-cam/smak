@@ -5407,12 +5407,15 @@ sub run_job_master {
                         }
 
                         # Check all dependency hashes for this file
-                        for my $target (keys %fixed_deps) {
-                            my $deps_str = $fixed_deps{$target};
-                            next unless defined $deps_str;
+                        for my $key (keys %fixed_deps) {
+                            my $deps_ref = $fixed_deps{$key};
+                            next unless defined $deps_ref && ref($deps_ref) eq 'ARRAY';
 
-                            # Split dependencies and check each one
-                            my @deps = split(/\s+/, $deps_str);
+                            # Extract target name from key (format: "makefile\ttarget")
+                            my ($mf, $target) = split(/\t/, $key, 2);
+
+                            # Check each dependency
+                            my @deps = @$deps_ref;
                             for my $dep (@deps) {
                                 for my $path_var (@path_variations) {
                                     if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
@@ -5424,16 +5427,20 @@ sub run_job_master {
                         }
 
                         # Also check pattern deps
-                        for my $pattern (keys %pattern_deps) {
-                            my $deps_str = $pattern_deps{$pattern};
-                            next unless defined $deps_str;
+                        for my $pattern_key (keys %pattern_deps) {
+                            my $deps_ref = $pattern_deps{$pattern_key};
+                            next unless defined $deps_ref && ref($deps_ref) eq 'ARRAY';
 
-                            my @deps = split(/\s+/, $deps_str);
+                            # Extract pattern from key (format: "makefile\tpattern")
+                            my ($mf, $pattern) = split(/\t/, $pattern_key, 2);
+
+                            my @deps = @$deps_ref;
                             for my $dep (@deps) {
                                 for my $path_var (@path_variations) {
                                     if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
                                         # Find targets matching this pattern
-                                        for my $target (keys %fixed_deps) {
+                                        for my $target_key (keys %fixed_deps) {
+                                            my ($target_mf, $target) = split(/\t/, $target_key, 2);
                                             if ($target =~ /$pattern/) {
                                                 $stale_targets{$target} = 1;
                                             }

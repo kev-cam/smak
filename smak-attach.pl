@@ -12,7 +12,11 @@ use Smak qw(:all);
 my $target_pid;
 my $target_port;
 my $pid_arg;
-GetOptions('pid=s' => \$pid_arg) or die "Usage: $0 [-pid <process-id>[:<port>]]\n";
+my $kill_all = 0;
+GetOptions(
+    'pid=s' => \$pid_arg,
+    'kill-all' => \$kill_all,
+) or die "Usage: $0 [-pid <process-id>[:<port>]] [--kill-all]\n";
 
 # Parse PID and optional port from -pid argument
 if ($pid_arg) {
@@ -98,6 +102,81 @@ unless (@jobservers) {
     print STDERR "Check that smak is running with -j option:\n";
     print STDERR "  smak -cli -j 4\n";
     exit 1;
+}
+
+# Handle --kill-all option
+if ($kill_all) {
+    print "Found " . scalar(@jobservers) . " job server(s)\n";
+    my $killed = 0;
+    my $failed = 0;
+
+    for my $js (@jobservers) {
+        my $pid = $js->{pid};
+        my $master_port = $js->{master_port};
+
+        print "Killing job server PID $pid";
+        print " ($js->{cwd})" if $js->{cwd};
+        print "... ";
+
+        # Try to connect and send SHUTDOWN command
+        my $socket = IO::Socket::INET->new(
+            PeerHost => '127.0.0.1',
+            PeerPort => $master_port,
+            Proto    => 'tcp',
+            Timeout  => 2,
+        );
+
+        if ($socket) {
+            $socket->autoflush(1);
+            print $socket "SHUTDOWN\n";
+
+            # Wait briefly for acknowledgment
+            my $select = IO::Select->new($socket);
+            if ($select->can_read(1)) {
+                my $ack = <$socket>;
+            }
+            close($socket);
+
+            # Wait for process to exit (up to 2 seconds)
+            my $wait_time = 0;
+            while (-d "/proc/$pid" && $wait_time < 20) {
+                select(undef, undef, undef, 0.1);
+                $wait_time++;
+            }
+
+            if (-d "/proc/$pid") {
+                print "timed out, sending SIGTERM\n";
+                kill 'TERM', $pid;
+                sleep 1;
+                if (-d "/proc/$pid") {
+                    print "Warning: Process $pid still running\n";
+                    $failed++;
+                } else {
+                    $killed++;
+                }
+            } else {
+                print "done\n";
+                $killed++;
+            }
+        } else {
+            # Couldn't connect, try SIGTERM directly
+            print "couldn't connect, sending SIGTERM... ";
+            kill 'TERM', $pid;
+            sleep 1;
+            if (-d "/proc/$pid") {
+                print "failed\n";
+                $failed++;
+            } else {
+                print "done\n";
+                $killed++;
+            }
+        }
+    }
+
+    print "\nKilled $killed job server(s)";
+    print ", $failed failed" if $failed > 0;
+    print "\n";
+    exit($failed > 0 ? 1 : 0);
 }
 
 my $selected_js;

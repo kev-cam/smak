@@ -4462,6 +4462,44 @@ sub run_job_master {
 
         # Now queue this target if it has a command
         if ($rule && $rule =~ /\S/) {
+            # Check if target is .PHONY
+            my $is_phony = 0;
+            my $phony_key = "$makefile\t.PHONY";
+            if (exists $pseudo_deps{$phony_key}) {
+                my @phony_targets = @{$pseudo_deps{$phony_key} || []};
+                $is_phony = 1 if grep { $_ eq $target } @phony_targets;
+            }
+            # Auto-detect common phony targets
+            if (!$is_phony && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+                $is_phony = 1;
+            }
+
+            # Check if target needs rebuilding (unless it's phony)
+            my $needs_build = $is_phony;
+            unless ($is_phony) {
+                my $target_path = $target =~ m{^/} ? $target : "$dir/$target";
+                if (-e $target_path) {
+                    # Target exists - check if it needs rebuilding
+                    $needs_build = needs_rebuild($target);
+                    if ($needs_build) {
+                        $stale_targets_cache{$target} = time();
+                        warn "Target '$target' needs rebuilding\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        # Target is up-to-date
+                        $completed_targets{$target} = 1;
+                        $in_progress{$target} = "done";
+                        warn "Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
+                        delete $stale_targets_cache{$target} if exists $stale_targets_cache{$target};
+                        return;
+                    }
+                } else {
+                    # Target doesn't exist - needs building
+                    $needs_build = 1;
+                    $stale_targets_cache{$target} = time();
+                    warn "Target '$target' doesn't exist, needs building\n" if $ENV{SMAK_DEBUG};
+                }
+            }
+
             # Expand $* with stem if we matched a pattern rule
             if ($stem) {
                 $rule =~ s/\$\*/$stem/g;

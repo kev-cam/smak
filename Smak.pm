@@ -2623,6 +2623,13 @@ sub unified_cli {
     while (!$exit_requested && !$detached && defined($line = $term->readline($prompt))) {
         $check_notifications->();
 
+        # Check if socket is still valid after async notifications
+        if ($socket && !$socket->connected()) {
+            print "\nConnection to job server lost.\n";
+            print "Use 'start' to reconnect or 'quit' to exit.\n";
+            $socket = undef;
+        }
+
         chomp $line;
         $line =~ s/^\s+|\s+$//g;
         next if $line eq '';
@@ -2914,7 +2921,15 @@ sub cmd_watch {
         return;
     }
 
+    # Check if socket is still connected
+    if (!$socket->connected()) {
+        print "Connection to job server lost. Use 'start' to reconnect.\n";
+        ${$state->{socket}} = undef;
+        return;
+    }
+
     print $socket "WATCH_START\n";
+    $socket->flush();
 
     # Wait for response from job server
     my $response = <$socket>;
@@ -2931,7 +2946,9 @@ sub cmd_watch {
             print "Unexpected response: $response\n";
         }
     } else {
-        print "No response from job server\n";
+        print "No response from job server (connection lost)\n";
+        print "Use 'start' to reconnect or 'quit' to exit.\n";
+        ${$state->{socket}} = undef;
     }
 }
 

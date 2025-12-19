@@ -96,6 +96,12 @@ our %phony_targets;
 # Track modifications for saving
 our @modifications;
 
+# Cache of targets that need rebuilding (populated during initial pass/dry-run)
+our %stale_targets_cache;
+
+# Files to ignore for dependency checking
+our %ignored_files;
+
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
 our $prompt = "smak> ";  # Prompt string for interactive mode
@@ -300,10 +306,14 @@ sub execute_command_sequential {
         die $err_msg;
     }
 
-    # Successfully built - clear from dirty files
+    # Successfully built - clear from dirty files and stale cache
     if (exists $Smak::dirty_files{$target}) {
         delete $Smak::dirty_files{$target};
         warn "DEBUG[" . __LINE__ . "]: Cleared '$target' from dirty files after successful build\n" if $ENV{SMAK_DEBUG};
+    }
+    if (exists $Smak::stale_targets_cache{$target}) {
+        delete $Smak::stale_targets_cache{$target};
+        warn "DEBUG[" . __LINE__ . "]: Cleared '$target' from stale cache after successful build\n" if $ENV{SMAK_DEBUG};
     }
 
     chdir($old_dir) if $old_dir;
@@ -1818,6 +1828,12 @@ sub needs_rebuild {
         # Skip .PHONY and other special targets
         next if $dep =~ /^\.PHONY$/;
 
+        # Skip ignored files
+        if (exists $Smak::ignored_files{$dep}) {
+            warn "DEBUG: Dependency '$dep' is ignored, skipping timestamp check\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+
         # Check if dependency is marked dirty
         if (exists $Smak::dirty_files{$dep}) {
             warn "DEBUG: Dependency '$dep' of '$target' is marked dirty, needs rebuild\n" if $ENV{SMAK_DEBUG};
@@ -2036,9 +2052,13 @@ sub build_target {
         warn "DEBUG[" . __LINE__ . "]:   Checking if target exists and is up-to-date...\n" if $ENV{SMAK_DEBUG};
         if (-e $target && !needs_rebuild($target)) {
             warn "DEBUG:   Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
+            # Remove from stale cache if it was there
+            delete $stale_targets_cache{$target};
             return;
         }
         warn "DEBUG[" . __LINE__ . "]:   Target needs rebuilding\n" if $ENV{SMAK_DEBUG};
+        # Track this target as stale (needs rebuilding)
+        $stale_targets_cache{$target} = time();
     }
 
     # Recursively build dependencies
@@ -2565,19 +2585,76 @@ sub unified_cli {
     print "Parallel jobs: $jobs\n" if $jobs > 1;
     print "\n";
 
-    # Helper: check for watch notifications
+    # Helper: check for asynchronous notifications and job output
+    my %recent_file_notifications;  # Track recent file notifications to avoid spam
     my $check_notifications = sub {
-        return unless $watch_enabled && defined $socket;
+        return unless defined $socket;
         my $select = IO::Select->new($socket);
+        my $had_output = 0;
+        my $now = time();
+
         while ($select->can_read(0)) {
             my $notif = <$socket>;
-            last unless defined $notif;
+            unless (defined $notif) {
+                # Socket closed - clean up
+                warn "DEBUG: Socket closed in check_notifications\n" if $ENV{SMAK_DEBUG};
+                $socket = undef;
+                return;
+            }
             chomp $notif;
             if ($notif =~ /^WATCH:(.+)$/) {
-                print "\r\033[K[File changed: $1]\n";
-                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+                my $file = $1;
+                # Deduplicate: only show each file change once per second
+                if (!exists $recent_file_notifications{$file} ||
+                    $now - $recent_file_notifications{$file} >= 1) {
+                    print "\r\033[K[File changed: $file]\n";
+                    $recent_file_notifications{$file} = $now;
+                    $had_output = 1;
+                }
+            } elsif ($notif =~ /^OUTPUT (.*)$/) {
+                # Asynchronous job output
+                print "\r\033[K$1\n";
+                $had_output = 1;
+            } elsif ($notif =~ /^ERROR (.*)$/) {
+                print "\r\033[KERROR: $1\n";
+                $had_output = 1;
+            } elsif ($notif =~ /^WARN (.*)$/) {
+                print "\r\033[KWARN: $1\n";
+                $had_output = 1;
+            } elsif ($notif =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+                # Asynchronous job completion notification
+                my ($target, $exit_code) = ($1, $2);
+                if ($exit_code == 0) {
+                    print "\r\033[K[✓ Completed: $target]\n";
+                } else {
+                    print "\r\033[K[✗ Failed: $target (exit $exit_code)]\n";
+                }
+                $had_output = 1;
             } elsif ($notif =~ /^WATCH_STARTED|^WATCH_/) {
+                last;  # End of watch notification batch
+            } elsif ($notif =~ /^STALE:|^STALE_END|^FILES_END|^TASKS_END|^PROGRESS_END/) {
+                # End markers for various queries - don't display
                 last;
+            }
+        }
+
+        # Clean up old notification timestamps (older than 5 seconds)
+        for my $file (keys %recent_file_notifications) {
+            if ($now - $recent_file_notifications{$file} > 5) {
+                delete $recent_file_notifications{$file};
+            }
+        }
+
+        # If we displayed async output, print prompt manually
+        if ($had_output) {
+            # Try readline methods first
+            if ($term->can('rl_on_new_line') && $term->can('rl_redisplay')) {
+                $term->rl_on_new_line();
+                $term->rl_redisplay();
+            } else {
+                # Fallback: just print the prompt
+                print $prompt;
+                STDOUT->flush();
             }
         }
     };
@@ -2586,6 +2663,13 @@ sub unified_cli {
     my $line;
     while (!$exit_requested && !$detached && defined($line = $term->readline($prompt))) {
         $check_notifications->();
+
+        # Check if socket is still valid after async notifications
+        if ($socket && !$socket->connected()) {
+            print "\nConnection to job server lost.\n";
+            print "Use 'start' to reconnect or 'quit' to exit.\n";
+            $socket = undef;
+        }
 
         chomp $line;
         $line =~ s/^\s+|\s+$//g;
@@ -2698,6 +2782,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'dirty') {
         cmd_dirty($words, $socket);
 
+    } elsif ($cmd eq 'ignore') {
+        cmd_ignore($words, $socket);
+
     } elsif ($cmd eq 'needs') {
         cmd_needs($words, $socket);
 
@@ -2740,6 +2827,9 @@ Available commands:
   files, f            List tracked file modifications (FUSE)
   stale               Show targets that need rebuilding (FUSE)
   dirty <file>        Mark a file as out-of-date (dirty)
+  ignore <file>       Ignore a file for dependency checking
+  ignore -none        Clear all ignored files
+  ignore              List currently ignored files
   needs <file>        Show which targets depend on a file
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
@@ -2878,7 +2968,15 @@ sub cmd_watch {
         return;
     }
 
+    # Check if socket is still connected
+    if (!$socket->connected()) {
+        print "Connection to job server lost. Use 'start' to reconnect.\n";
+        ${$state->{socket}} = undef;
+        return;
+    }
+
     print $socket "WATCH_START\n";
+    $socket->flush();
 
     # Wait for response from job server
     my $response = <$socket>;
@@ -2895,7 +2993,9 @@ sub cmd_watch {
             print "Unexpected response: $response\n";
         }
     } else {
-        print "No response from job server\n";
+        print "No response from job server (connection lost)\n";
+        print "Use 'start' to reconnect or 'quit' to exit.\n";
+        ${$state->{socket}} = undef;
     }
 }
 
@@ -3000,18 +3100,31 @@ sub cmd_stale {
             print "\n$count $label need rebuilding\n";
         }
     } else {
-        # No job server - show files marked as dirty
+        # No job server - show targets from stale cache and dirty files
+        my $found_stale = 0;
+
+        if (keys %Smak::stale_targets_cache) {
+            print "Stale targets (need rebuilding):\n";
+            for my $target (sort keys %Smak::stale_targets_cache) {
+                print "  $target\n";
+            }
+            print "\n" . (scalar keys %Smak::stale_targets_cache) . " stale target(s)\n";
+            $found_stale = 1;
+        }
+
         if (keys %Smak::dirty_files) {
-            print "Files marked dirty:\n";
+            print "\nFiles marked dirty:\n";
             for my $file (sort keys %Smak::dirty_files) {
                 print "  $file\n";
             }
             print "\n" . (scalar keys %Smak::dirty_files) . " file(s) marked dirty\n";
-            print "(Use 'start' to enable full stale target detection via FUSE)\n";
-        } else {
-            print "No files marked dirty\n";
-            print "(Use 'start' to enable full stale target detection via FUSE)\n";
+            $found_stale = 1;
         }
+
+        if (!$found_stale) {
+            print "No stale targets (nothing needs rebuilding)\n";
+        }
+        print "\n(Use 'start' to enable file change monitoring via FUSE)\n";
     }
 }
 
@@ -3035,6 +3148,39 @@ sub cmd_dirty {
     }
 
     print "Marked '$file' as dirty (out-of-date)\n";
+}
+
+sub cmd_ignore {
+    my ($words, $socket) = @_;
+
+    # Special handling for -none to clear all ignored files
+    if (@$words == 1 && $words->[0] eq '-none') {
+        %Smak::ignored_files = ();
+        print "Cleared all ignored files\n";
+        return;
+    }
+
+    # List ignored files if no arguments
+    if (@$words == 0) {
+        if (keys %Smak::ignored_files) {
+            print "Ignored files:\n";
+            for my $file (sort keys %Smak::ignored_files) {
+                print "  $file\n";
+            }
+            print "\n" . (scalar keys %Smak::ignored_files) . " file(s) ignored\n";
+        } else {
+            print "No files are currently ignored\n";
+        }
+        print "\nUsage: ignore <file>    - Ignore a file for dependency checking\n";
+        print "       ignore -none     - Clear all ignored files\n";
+        return;
+    }
+
+    # Mark file as ignored
+    my $file = $words->[0];
+    $Smak::ignored_files{$file} = 1;
+    print "Ignoring '$file' for dependency checking\n";
+    print "Targets depending on this file will not be rebuilt based on its timestamp\n";
 }
 
 sub cmd_needs {
@@ -4055,6 +4201,7 @@ sub run_job_master {
     my $fuse_mountpoint;
     if (my ($mountpoint, $fuse_port) = detect_fuse_monitor()) {
         $fuse_mountpoint = $mountpoint;
+        print STDERR "Detected FUSE filesystem at $mountpoint, port $fuse_port\n" if $ENV{SMAK_DEBUG};
         # Connect to FUSE monitor
         $fuse_socket = IO::Socket::INET->new(
             PeerHost => '127.0.0.1',
@@ -4066,10 +4213,10 @@ sub run_job_master {
             $fuse_socket->autoflush(1);
             vprint "Connected to FUSE monitor\n";
         } else {
-            print STDERR "Failed to connect to FUSE monitor: $!\n";
+            print STDERR "Warning: Could not connect to FUSE monitor on port $fuse_port: $!\n";
         }
     } else {
-        vprint "No FUSE filesystem monitor detected\n";
+        print STDERR "No FUSE monitor detected\n" if $ENV{SMAK_DEBUG};
     }
 
     # Wait for initial master connection
@@ -4438,6 +4585,44 @@ sub run_job_master {
 
         # Now queue this target if it has a command
         if ($rule && $rule =~ /\S/) {
+            # Check if target is .PHONY
+            my $is_phony = 0;
+            my $phony_key = "$makefile\t.PHONY";
+            if (exists $pseudo_deps{$phony_key}) {
+                my @phony_targets = @{$pseudo_deps{$phony_key} || []};
+                $is_phony = 1 if grep { $_ eq $target } @phony_targets;
+            }
+            # Auto-detect common phony targets
+            if (!$is_phony && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+                $is_phony = 1;
+            }
+
+            # Check if target needs rebuilding (unless it's phony)
+            my $needs_build = $is_phony;
+            unless ($is_phony) {
+                my $target_path = $target =~ m{^/} ? $target : "$dir/$target";
+                if (-e $target_path) {
+                    # Target exists - check if it needs rebuilding
+                    $needs_build = needs_rebuild($target);
+                    if ($needs_build) {
+                        $stale_targets_cache{$target} = time();
+                        warn "Target '$target' needs rebuilding\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        # Target is up-to-date
+                        $completed_targets{$target} = 1;
+                        $in_progress{$target} = "done";
+                        warn "Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
+                        delete $stale_targets_cache{$target} if exists $stale_targets_cache{$target};
+                        return;
+                    }
+                } else {
+                    # Target doesn't exist - needs building
+                    $needs_build = 1;
+                    $stale_targets_cache{$target} = time();
+                    warn "Target '$target' doesn't exist, needs building\n" if $ENV{SMAK_DEBUG};
+                }
+            }
+
             # Expand $* with stem if we matched a pattern rule
             if ($stem) {
                 $rule =~ s/\$\*/$stem/g;
@@ -4842,9 +5027,10 @@ sub run_job_master {
     my $last_consistency_check = time();
     my $jobs_received = 0;  # Track if we've received any job submissions
     while (1) {
-        # Check if all work is complete (only after we've received jobs)
-        if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0) {
-            vprint "All jobs complete. Job-master exiting.\n";
+        # Check if all work is complete AND master has disconnected
+        # (In interactive mode, stay running even when idle)
+        if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0 && !defined($master_socket)) {
+            vprint "All jobs complete and master disconnected. Job-master exiting.\n";
             last;
         }
 
@@ -4914,6 +5100,11 @@ sub run_job_master {
 
                         # Handle successful completion
                         if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
+                            # Clear from stale cache after successful build
+                            if (exists $stale_targets_cache{$job->{target}}) {
+                                delete $stale_targets_cache{$job->{target}};
+                                warn "DEBUG[" . __LINE__ . "]: Cleared '$job->{target}' from stale cache after successful build\n" if $ENV{SMAK_DEBUG};
+                            }
 
                             # Check composite targets
                             for my $comp_target (keys %pending_composite) {
@@ -5006,7 +5197,7 @@ sub run_job_master {
                 # Master sent us something
                 my $line = <$socket>;
                 unless (defined $line) {
-                    print STDERR "Master disconnected. Waiting for reconnection...\n";
+                    # Master disconnected - clean up silently
                     $select->remove($master_socket);
                     close($master_socket);
                     # Clear watch client if this was the watching client
@@ -5184,16 +5375,22 @@ sub run_job_master {
 
                 } elsif ($line =~ /^LIST_STALE$/) {
                     # List targets that need rebuilding based on tracked modifications and dirty files
-                    my %stale_targets;
+                    eval {
+                        my %stale_targets;
 
-                    # Get current working directory to create relative paths
-                    my $cwd = abs_path('.');
+                        # First, include targets from the stale cache (populated during initial pass/dry-run)
+                        for my $target (keys %stale_targets_cache) {
+                            $stale_targets{$target} = 1;
+                        }
 
-                    # Combine FUSE-tracked modifications and manually marked dirty files
-                    my @all_modified_files = (keys %file_modifications, keys %dirty_files);
+                        # Get current working directory to create relative paths
+                        my $cwd = abs_path('.');
 
-                    # For each modified file, find targets that depend on it
-                    for my $modified_file (@all_modified_files) {
+                        # Combine FUSE-tracked modifications and manually marked dirty files
+                        my @all_modified_files = (keys %file_modifications, keys %dirty_files);
+
+                        # For each modified file, find targets that depend on it
+                        for my $modified_file (@all_modified_files) {
                         # Try multiple path variations for matching
                         my @path_variations;
 
@@ -5211,12 +5408,15 @@ sub run_job_master {
                         }
 
                         # Check all dependency hashes for this file
-                        for my $target (keys %fixed_deps) {
-                            my $deps_str = $fixed_deps{$target};
-                            next unless defined $deps_str;
+                        for my $key (keys %fixed_deps) {
+                            my $deps_ref = $fixed_deps{$key};
+                            next unless defined $deps_ref && ref($deps_ref) eq 'ARRAY';
 
-                            # Split dependencies and check each one
-                            my @deps = split(/\s+/, $deps_str);
+                            # Extract target name from key (format: "makefile\ttarget")
+                            my ($mf, $target) = split(/\t/, $key, 2);
+
+                            # Check each dependency
+                            my @deps = @$deps_ref;
                             for my $dep (@deps) {
                                 for my $path_var (@path_variations) {
                                     if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
@@ -5228,16 +5428,20 @@ sub run_job_master {
                         }
 
                         # Also check pattern deps
-                        for my $pattern (keys %pattern_deps) {
-                            my $deps_str = $pattern_deps{$pattern};
-                            next unless defined $deps_str;
+                        for my $pattern_key (keys %pattern_deps) {
+                            my $deps_ref = $pattern_deps{$pattern_key};
+                            next unless defined $deps_ref && ref($deps_ref) eq 'ARRAY';
 
-                            my @deps = split(/\s+/, $deps_str);
+                            # Extract pattern from key (format: "makefile\tpattern")
+                            my ($mf, $pattern) = split(/\t/, $pattern_key, 2);
+
+                            my @deps = @$deps_ref;
                             for my $dep (@deps) {
                                 for my $path_var (@path_variations) {
                                     if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
                                         # Find targets matching this pattern
-                                        for my $target (keys %fixed_deps) {
+                                        for my $target_key (keys %fixed_deps) {
+                                            my ($target_mf, $target) = split(/\t/, $target_key, 2);
                                             if ($target =~ /$pattern/) {
                                                 $stale_targets{$target} = 1;
                                             }
@@ -5297,6 +5501,13 @@ sub run_job_master {
                     for my $target (sort keys %stale_targets) {
                         print $master_socket "STALE:$target\n";
                     }
+                    };  # Close eval block
+
+                    if ($@) {
+                        print STDERR "Error in LIST_STALE: $@\n" if $ENV{SMAK_DEBUG};
+                    }
+
+                    # Always send end marker, even if there was an error
                     print $master_socket "STALE_END\n";
 
                 } elsif ($line =~ /^NEEDS:(.+)$/) {
@@ -5717,6 +5928,11 @@ sub run_job_master {
 
                     # Handle successful completion
                     if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
+                        # Clear from stale cache after successful build
+                        if (exists $stale_targets_cache{$job->{target}}) {
+                            delete $stale_targets_cache{$job->{target}};
+                            warn "DEBUG[" . __LINE__ . "]: Cleared '$job->{target}' from stale cache after successful build\n" if $ENV{SMAK_DEBUG};
+                        }
 
                         # Check if any pending composite targets can now complete
                         for my $comp_target (keys %pending_composite) {

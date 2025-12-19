@@ -2583,7 +2583,9 @@ sub unified_cli {
         while ($select->can_read(0)) {
             my $notif = <$socket>;
             unless (defined $notif) {
-                # Socket closed
+                # Socket closed - clean up
+                warn "DEBUG: Socket closed in check_notifications\n" if $ENV{SMAK_DEBUG};
+                $socket = undef;
                 return;
             }
             chomp $notif;

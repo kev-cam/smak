@@ -2659,6 +2659,15 @@ sub unified_cli {
         }
     };
 
+    # Set up periodic notification checking using SIGALRM
+    # This allows us to process async notifications even while readline() is blocked
+    my $alarm_handler = sub {
+        $check_notifications->() if defined $socket;
+        alarm(1) if !$exit_requested && !$detached;  # Re-arm timer for 1 second
+    };
+    local $SIG{ALRM} = $alarm_handler;
+    alarm(1);  # Start periodic checks
+
     # Main command loop
     my $line;
     while (!$exit_requested && !$detached && defined($line = $term->readline($prompt))) {
@@ -2714,6 +2723,9 @@ sub unified_cli {
         # Check for async notifications that arrived during command execution
         $check_notifications->();
     }
+
+    # Cancel periodic alarm
+    alarm(0);
 
     # Cleanup on exit
     if ($exit_requested) {

@@ -4201,6 +4201,7 @@ sub run_job_master {
     my $fuse_mountpoint;
     if (my ($mountpoint, $fuse_port) = detect_fuse_monitor()) {
         $fuse_mountpoint = $mountpoint;
+        print STDERR "Detected FUSE filesystem at $mountpoint, port $fuse_port\n" if $ENV{SMAK_DEBUG};
         # Connect to FUSE monitor
         $fuse_socket = IO::Socket::INET->new(
             PeerHost => '127.0.0.1',
@@ -4212,10 +4213,10 @@ sub run_job_master {
             $fuse_socket->autoflush(1);
             vprint "Connected to FUSE monitor\n";
         } else {
-            print STDERR "Failed to connect to FUSE monitor: $!\n";
+            print STDERR "Warning: Could not connect to FUSE monitor on port $fuse_port: $!\n";
         }
     } else {
-        vprint "No FUSE filesystem monitor detected\n";
+        print STDERR "No FUSE monitor detected\n" if $ENV{SMAK_DEBUG};
     }
 
     # Wait for initial master connection

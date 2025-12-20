@@ -307,6 +307,169 @@ Examples:
 HELP
 }
 
+sub execute_script_file {
+    my ($script_file, $depth) = @_;
+    $depth ||= 0;
+
+    # Prevent infinite recursion
+    if ($depth >= 10) {
+        print "Error: Maximum source nesting depth (10) exceeded\n";
+        return;
+    }
+
+    unless (-f $script_file) {
+        print "Error: File '$script_file' not found\n";
+        return;
+    }
+
+    my $script_fh;
+    unless (open($script_fh, '<', $script_file)) {
+        print "Error: Cannot open '$script_file': $!\n";
+        return;
+    }
+
+    my $line_num = 0;
+    while (my $script_line = <$script_fh>) {
+        $line_num++;
+        chomp $script_line;
+
+        # Skip comments and blank lines
+        next if $script_line =~ /^\s*#/;
+        next if $script_line =~ /^\s*$/;
+
+        # Strip inline comments (but not in quoted strings)
+        $script_line =~ s/(?<!\\)#.*$//;  # Remove # and everything after (unless escaped)
+        $script_line =~ s/^\s+|\s+$//g;    # Trim whitespace
+
+        next if $script_line eq '';  # Skip if empty after trimming
+
+        # Display command being executed (if debug mode)
+        print "[$script_file:$line_num] $script_line\n" if $ENV{SMAK_DEBUG};
+
+        # Handle nested source commands
+        if ($script_line =~ /^source\s+(.+)$/) {
+            my $nested_file = $1;
+            $nested_file =~ s/^\s+|\s+$//g;
+            execute_script_file($nested_file, $depth + 1);
+            next;
+        }
+
+        # Handle shell command escape (!)
+        if ($script_line =~ /^!(.+)$/) {
+            my $shell_cmd = $1;
+            $shell_cmd =~ s/^\s+//;
+            if (my $pid = open(my $cmd_fh, '-|', $shell_cmd . ' 2>&1')) {
+                while (my $output = <$cmd_fh>) {
+                    print $output;
+                }
+                close($cmd_fh);
+                my $exit_code = $? >> 8;
+                if ($exit_code != 0) {
+                    print STDERR "[$script_file:$line_num] Command exited with code $exit_code\n";
+                }
+            } else {
+                print STDERR "[$script_file:$line_num] Failed to execute command: $!\n";
+            }
+            next;
+        }
+
+        # Handle Perl eval command
+        if ($script_line =~ /^eval\s+(.+)$/) {
+            my $expr = $1;
+            my $result = eval $expr;
+            if ($@) {
+                print "[$script_file:$line_num] Error: $@\n";
+            } else {
+                print "$result\n" if defined $result;
+            }
+            next;
+        }
+
+        # Parse and execute regular commands
+        my @words = split(/\s+/, $script_line);
+        my $cmd = shift @words;
+
+        # Execute command (this is a simplified version - add more as needed)
+        eval {
+            if ($cmd eq 'build' || $cmd eq 'b') {
+                if (defined $Smak::job_server_socket) {
+                    if (@words == 0) {
+                        my $default_target = get_default_target();
+                        if (defined $default_target) {
+                            print "Building default target: $default_target\n";
+                            print $Smak::job_server_socket "BUILD:$default_target\n";
+                            my $success = 0;
+                            while (my $response = <$Smak::job_server_socket>) {
+                                chomp $response;
+                                last if $response eq 'BUILD_END';
+                                if ($response eq 'BUILD_SUCCESS') {
+                                    $success = 1;
+                                } elsif ($response =~ /^BUILD_ERROR:(.+)$/) {
+                                    print "Build failed: $1\n";
+                                }
+                            }
+                            print "Build succeeded.\n" if $success;
+                        }
+                    } else {
+                        foreach my $target (@words) {
+                            print "Building target: $target\n";
+                            print $Smak::job_server_socket "BUILD:$target\n";
+                            my $success = 0;
+                            while (my $response = <$Smak::job_server_socket>) {
+                                chomp $response;
+                                last if $response eq 'BUILD_END';
+                                if ($response eq 'BUILD_SUCCESS') {
+                                    $success = 1;
+                                } elsif ($response =~ /^BUILD_ERROR:(.+)$/) {
+                                    print "Build failed: $1\n";
+                                }
+                            }
+                            print "Build succeeded.\n" if $success;
+                        }
+                    }
+                } else {
+                    print "Job server not running. Use 'start' to enable.\n";
+                }
+            } elsif ($cmd eq 'dirty') {
+                cmd_dirty(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'touch') {
+                cmd_touch(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'rm') {
+                cmd_rm(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'needs') {
+                cmd_needs(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'stale') {
+                if (defined $Smak::job_server_socket) {
+                    print $Smak::job_server_socket "LIST_STALE\n";
+                    my $count = 0;
+                    while (my $response = <$Smak::job_server_socket>) {
+                        chomp $response;
+                        last if $response eq 'STALE_END';
+                        if ($response =~ /^STALE:(.+)$/) {
+                            print "  $1\n";
+                            $count++;
+                        }
+                    }
+                    if ($count == 0) {
+                        print "No stale targets (nothing needs rebuilding)\n";
+                    } else {
+                        my $target_label = $count == 1 ? "target" : "targets";
+                        print "\n$count $target_label need rebuilding\n";
+                    }
+                } else {
+                    print "Job server not running. Use 'start' to enable.\n";
+                }
+            } else {
+                print "[$script_file:$line_num] Unknown command: $cmd\n";
+            }
+        };
+        if ($@) {
+            print "[$script_file:$line_num] Error executing command: $@\n";
+        }
+    }
+    close($script_fh);
+}
+
 sub run_cli {
     use Term::ReadLine;
 
@@ -425,6 +588,16 @@ sub run_cli {
             next;
         }
 
+        # Handle source command (read commands from file)
+        if ($line =~ /^source\s+(.+)$/) {
+            my $script_file = $1;
+            $script_file =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+            # Use a helper to execute the script (supports nesting)
+            execute_script_file($script_file);
+            next;
+        }
+
         my @words = split(/\s+/, $line);
         my $cmd = shift @words;
 
@@ -464,6 +637,7 @@ Available commands:
   quit, exit, q       Shut down job server and exit
   ! <command>         Execute shell command in sub-shell
   eval <expr>         Evaluate Perl expression
+  source <file>       Execute commands from file (nestable)
 
 Keyboard shortcuts:
   Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)

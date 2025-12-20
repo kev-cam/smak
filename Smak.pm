@@ -3508,7 +3508,7 @@ sub run_job_master {
                 my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
                 my @ssh_cmd = ('ssh', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
                 if ($remote_cd) {
-                    push @ssh_cmd, "cd '$remote_cd' && smak-worker 127.0.0.1:$remote_port";
+                    push @ssh_cmd, "smak-worker -cd $remote_cd 127.0.0.1:$remote_port";
                 } else {
                     push @ssh_cmd, "smak-worker 127.0.0.1:$remote_port";
                 }

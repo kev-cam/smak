@@ -8,6 +8,11 @@ link=$(readlink $exe)
 
 SCRIPT_DIR="$(dirname $exe)"
 
+case $SCRIPT_DIR in
+    .)   SCRIPT_DIR=$PWD ;;
+    ./*) SCRIPT_DIR=$PWD${SCRIPT_DIR/./} ;;
+esac
+
 # Find the directory where this script is located
 while [ ! -z "$link" ]  ; do
     exe=$link
@@ -40,6 +45,16 @@ export SMAK_LAUNCHER="$SCRIPT_DIR/$script"
 
 export PERLLIB="$SCRIPT_DIR"
 
+while [ 0 != $# ] ; do
+    case "$1" in
+	-cd)     shift
+		 cd $1
+	         if [ 0 != $? ] ; then exit 1 ; fi
+		 shift ;;
+	-attach) script=${script}$1 ; shift ;;
+	*)       break ;;
+    esac
+done
 # Translate GNU Make-style compact options to Perl-friendly long form
 # E.g., "-j4" -> "-j 4"
 declare -a perl_args

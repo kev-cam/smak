@@ -443,32 +443,57 @@ Examples:
 HELP
 
         } elsif ($cmd eq 'build' || $cmd eq 'b') {
-            if (@words == 0) {
-                # Build default target
-                my $default_target = get_default_target();
-                if (defined $default_target) {
-                    print "Building default target: $default_target\n";
-                    eval { build_target($default_target); };
-                    if ($@) {
-                        print "Build failed: $@\n";
+            if (defined $Smak::job_server_socket) {
+                if (@words == 0) {
+                    # Build default target
+                    my $default_target = get_default_target();
+                    if (defined $default_target) {
+                        print "Building default target: $default_target\n";
+                        # Send build request to job server (which has access to dirty_files)
+                        print $Smak::job_server_socket "BUILD:$default_target\n";
+                        # Wait for response
+                        my $success = 0;
+                        while (my $response = <$Smak::job_server_socket>) {
+                            chomp $response;
+                            last if $response eq 'BUILD_END';
+                            if ($response eq 'BUILD_SUCCESS') {
+                                $success = 1;
+                            } elsif ($response =~ /^BUILD_ERROR:(.+)$/) {
+                                print "Build failed: $1\n";
+                            }
+                        }
+                        if ($success) {
+                            print "Build succeeded.\n";
+                        }
                     } else {
-                        print "Build succeeded.\n";
+                        print "No default target found.\n";
                     }
                 } else {
-                    print "No default target found.\n";
-                }
-            } else {
-                # Build specified targets
-                foreach my $target (@words) {
-                    print "Building target: $target\n";
-                    eval { build_target($target); };
-                    if ($@) {
-                        print "Build failed: $@\n";
-                        last;
-                    } else {
-                        print "Build succeeded.\n";
+                    # Build specified targets
+                    foreach my $target (@words) {
+                        print "Building target: $target\n";
+                        # Send build request to job server (which has access to dirty_files)
+                        print $Smak::job_server_socket "BUILD:$target\n";
+                        # Wait for response
+                        my $success = 0;
+                        while (my $response = <$Smak::job_server_socket>) {
+                            chomp $response;
+                            last if $response eq 'BUILD_END';
+                            if ($response eq 'BUILD_SUCCESS') {
+                                $success = 1;
+                            } elsif ($response =~ /^BUILD_ERROR:(.+)$/) {
+                                print "Build failed: $1\n";
+                            }
+                        }
+                        if ($success) {
+                            print "Build succeeded.\n";
+                        } elsif (!$success) {
+                            last;  # Stop on first failure
+                        }
                     }
                 }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
             }
 
         } elsif ($cmd eq 'watch' || $cmd eq 'w') {

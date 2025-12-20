@@ -58,6 +58,7 @@ our @EXPORT_OK = qw(
     list_targets
     list_variables
     get_variable
+    get_fuse_remote_info
     show_dependencies
     wait_for_jobs
     vprint
@@ -107,6 +108,8 @@ our $silent_mode = 0;
 
 # Job server state
 our $jobs = 1;  # Number of parallel jobs
+our $ssh_host = '';  # SSH host for remote workers
+our $remote_cd = '';  # Remote directory for SSH workers
 our $job_server_socket;  # Socket to job-master
 our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
@@ -3148,6 +3151,33 @@ sub get_variable {
     return '';
 }
 
+# Get FUSE remote server information from df output
+# Returns (server, remote_path) or (undef, undef) if not FUSE
+sub get_fuse_remote_info {
+    my ($path) = @_;
+    $path //= '.';
+
+    # Run df to get filesystem info
+    my $df_output = `df '$path' 2>/dev/null`;
+    return (undef, undef) unless $df_output;
+
+    # Parse df output - look for sshfs format: user@host:/remote/path
+    # Example: dkc@workhorse:/home/dkc/src-00/iverilog
+    my @lines = split(/\n/, $df_output);
+    return (undef, undef) unless @lines >= 2;
+
+    my $fs_line = $lines[1];  # First line is header
+    my ($filesystem) = split(/\s+/, $fs_line);
+
+    # Check if it matches FUSE/sshfs format: [user@]host:path
+    if ($filesystem =~ /^(.+?):(.+)$/) {
+        my ($server, $remote_path) = ($1, $2);
+        return ($server, $remote_path);
+    }
+
+    return (undef, undef);
+}
+
 # Show dependencies for a target
 sub show_dependencies {
     my ($target) = @_;
@@ -3264,11 +3294,37 @@ sub run_job_master {
     our $makefile;  # Current makefile path
     our %rules;  # All rules (for is_build_relevant and stale checking)
     our %targets;  # All targets
+    our $ssh_host;  # SSH host for remote workers
+    our $remote_cd;  # Remote directory for SSH workers
 
     our @workers;
     our %worker_status;  # socket => {ready => 0/1, task_id => N}
     my $worker_script = "$bin_dir/smak-worker";
     die "Worker script not found: $worker_script\n" unless -x $worker_script;
+
+    # Determine bind address and connection address for workers
+    my $bind_addr = '127.0.0.1';
+    my $connect_addr = '127.0.0.1';
+
+    if ($ssh_host) {
+        # SSH mode: listen on all interfaces and get local IP
+        $bind_addr = '0.0.0.0';
+        # Get local IP address
+        my $sock = IO::Socket::INET->new(
+            PeerAddr => '8.8.8.8',
+            PeerPort => 53,
+            Proto    => 'udp',
+        );
+        if ($sock) {
+            $connect_addr = $sock->sockhost();
+            close($sock);
+        } else {
+            warn "Cannot determine local IP, using hostname\n";
+            use Sys::Hostname;
+            $connect_addr = hostname();
+        }
+        vprint "SSH mode: workers will connect to $connect_addr\n";
+    }
 
     # Create socket server for master connections
     my $master_server = IO::Socket::INET->new(
@@ -3284,7 +3340,7 @@ sub run_job_master {
 
     # Create socket server for workers
     my $worker_server = IO::Socket::INET->new(
-        LocalAddr => '127.0.0.1',
+        LocalAddr => $bind_addr,
         LocalPort => 0,  # Let OS assign port
         Proto     => 'tcp',
         Listen    => $num_workers,
@@ -3465,8 +3521,22 @@ sub run_job_master {
 
         if ($pid == 0) {
             # Child - exec worker
-            exec($worker_script, "127.0.0.1:$worker_port");
-            die "Failed to exec worker: $!\n";
+            if ($ssh_host) {
+                # SSH mode: launch worker on remote host
+                my $connect_string = "$connect_addr:$worker_port";
+                my @ssh_cmd = ('ssh', $ssh_host);
+                if ($remote_cd) {
+                    push @ssh_cmd, "cd '$remote_cd' && smak-worker $connect_string";
+                } else {
+                    push @ssh_cmd, "smak-worker $connect_string";
+                }
+                exec(@ssh_cmd);
+                die "Failed to exec SSH worker: $!\n";
+            } else {
+                # Local mode
+                exec($worker_script, "127.0.0.1:$worker_port");
+                die "Failed to exec worker: $!\n";
+            }
         }
         vprint "Spawned worker $i (PID $pid)\n";
     }
@@ -4426,8 +4496,22 @@ sub run_job_master {
                     for (my $i = 0; $i < $new_count; $i++) {
                         my $worker_pid = fork();
                         if ($worker_pid == 0) {
-                            exec($worker_script, "127.0.0.1:$worker_port");
-                            die "Failed to exec worker: $!\n";
+                            if ($ssh_host) {
+                                # SSH mode: launch worker on remote host
+                                my $connect_string = "$connect_addr:$worker_port";
+                                my @ssh_cmd = ('ssh', $ssh_host);
+                                if ($remote_cd) {
+                                    push @ssh_cmd, "cd '$remote_cd' && smak-worker $connect_string";
+                                } else {
+                                    push @ssh_cmd, "smak-worker $connect_string";
+                                }
+                                exec(@ssh_cmd);
+                                die "Failed to exec SSH worker: $!\n";
+                            } else {
+                                # Local mode
+                                exec($worker_script, "127.0.0.1:$worker_port");
+                                die "Failed to exec worker: $!\n";
+                            }
                         }
                     }
                     print $master_socket "Restarting $new_count workers...\n";

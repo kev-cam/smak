@@ -31,6 +31,8 @@ my $jobs = 1;  # Number of parallel jobs (default: 1 = sequential)
 my $cli = 0;  # CLI mode (interactive shell)
 my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
+my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
+my $remote_cd = '';  # Remote directory for SSH workers
 
 # Parse environment variable options first
 if (defined $ENV{USR_SMAK_OPT}) {
@@ -53,6 +55,8 @@ if (defined $ENV{USR_SMAK_OPT}) {
         'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
         'cli' => \$cli,
         'v|verbose' => \$verbose,
+        'ssh=s' => \$ssh_host,
+        'cd=s' => \$remote_cd,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -72,6 +76,8 @@ GetOptions(
     'j|jobs:i' => \$jobs,  # :i means optional integer (allows -j and -j4)
     'cli' => \$cli,
     'v|verbose' => \$verbose,
+    'ssh=s' => \$ssh_host,
+    'cd=s' => \$remote_cd,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -105,6 +111,19 @@ if ($help) {
 # Change directory if -C option is specified
 if ($directory) {
     chdir($directory) or die "smak: Cannot change to directory '$directory': $!\n";
+}
+
+# Handle -ssh=fuse option to auto-detect FUSE remote server
+if ($ssh_host eq 'fuse') {
+    my ($server, $remote_path) = Smak::get_fuse_remote_info('.');
+    if (defined $server) {
+        $ssh_host = $server;
+        # Use remote path as default if -cd not specified
+        $remote_cd = $remote_path unless $remote_cd;
+        print "Detected FUSE mount: $server:$remote_path\n" if $verbose;
+    } else {
+        die "smak: -ssh=fuse specified but current directory is not on a FUSE filesystem\n";
+    }
 }
 
 # Setup report directory if -Kreport is enabled
@@ -281,6 +300,10 @@ HELP
 
 sub run_cli {
     use Term::ReadLine;
+
+    # Set SSH options for remote workers
+    $Smak::ssh_host = $ssh_host if $ssh_host;
+    $Smak::remote_cd = $remote_cd if $remote_cd;
 
     print "Smak CLI mode - type 'help' for commands\n";
     print "Makefile: $makefile\n";
@@ -743,6 +766,10 @@ if ($verbose || $ENV{SMAK_DEBUG}) {
 } else {
     $ENV{SMAK_VERBOSE} = '0';
 }
+
+# Set SSH options for remote workers (before forking job-master)
+$Smak::ssh_host = $ssh_host if $ssh_host;
+$Smak::remote_cd = $remote_cd if $remote_cd;
 
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it

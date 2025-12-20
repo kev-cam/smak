@@ -17,7 +17,7 @@ sub new {
         history_file => $opts{history_file} || '.smak_history',
         socket => $opts{socket},  # For async notifications
         check_notifications => $opts{check_notifications},
-        cancel_requested => \$opts{cancel_requested},  # Ref to cancel flag
+        cancel_requested => $opts{cancel_requested},  # Already a ref from caller
         history => [],
         history_pos => -1,
         max_history => 1000,

@@ -2688,6 +2688,21 @@ sub unified_cli {
         my @words = split(/\s+/, $line);
         my $cmd = shift @words;
 
+        # Expand globs for file-oriented commands
+        if ($cmd =~ /^(rm|touch|dirty|ignore)$/) {
+            my @expanded;
+            for my $word (@words) {
+                my @matches = glob($word);
+                if (@matches) {
+                    push @expanded, @matches;
+                } else {
+                    # No matches - keep original (might be a literal filename)
+                    push @expanded, $word;
+                }
+            }
+            @words = @expanded;
+        }
+
         # Dispatch commands
         dispatch_command($cmd, \@words, \%opts, {
             socket => \$socket,

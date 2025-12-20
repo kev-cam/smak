@@ -183,9 +183,10 @@ sub readline {
             my $ord = ord($char);
 
             # Handle control characters
+            # Note: Ctrl-C (ord 3) is handled by SIGINT signal handler, not here
+            # Just skip the character if we receive it
             if ($ord == 3) {  # Ctrl-C
-                $detached = 1;
-                last;
+                next;  # Skip - signal handler deals with it
             }
             elsif ($ord == 4) {  # Ctrl-D (EOF)
                 if (length($buffer) == 0) {

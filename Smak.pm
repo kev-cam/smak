@@ -55,6 +55,9 @@ our @EXPORT_OK = qw(
     tee_print
     expand_vars
     add_rule
+    cmd_rm
+    cmd_touch
+    cmd_ignore
     modify_rule
     modify_deps
     delete_rule

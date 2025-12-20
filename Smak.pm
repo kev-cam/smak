@@ -2630,19 +2630,13 @@ sub unified_cli {
         prompt => $prompt,
         socket => $socket,
         check_notifications => $check_notifications,
+        cancel_requested => $cancel_requested,  # Pass reference so RawCLI can check it
     );
 
     # Main command loop using character-by-character input with tab completion
     my $line;
 
     while (!$exit_requested && !$detached) {
-        # Handle Ctrl-C cancel request
-        if ($cancel_requested) {
-            $cancel_requested = 0;
-            print "\n";
-            next;
-        }
-
         # Check if socket is still valid
         if ($socket && !$socket->connected()) {
             print "\nConnection to job server lost.\n";

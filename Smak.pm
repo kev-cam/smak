@@ -66,6 +66,11 @@ our @EXPORT_OK = qw(
     show_dependencies
     wait_for_jobs
     vprint
+    cmd_needs
+    cmd_touch
+    cmd_rm
+    cmd_ignore
+    cmd_dirty
 );
 
 our %EXPORT_TAGS = (

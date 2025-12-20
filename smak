@@ -48,7 +48,7 @@ export PERLLIB="$SCRIPT_DIR"
 while [ 0 != $# ] ; do
     case "$1" in
 	-cd)     shift
-		 cd $1 
+		 cd $1
 	         if [ 0 != $? ] ; then exit 1 ; fi
 		 shift ;;
 	-attach) script=${script}$1 ; shift ;;

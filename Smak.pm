@@ -2552,6 +2552,9 @@ sub unified_cli {
             };
         }
         print "\n^C - Cancelling ongoing builds...\n";
+        # Redraw prompt immediately
+        print $prompt;
+        STDOUT->flush();
     };
     local $SIG{INT} = $cancel_handler;
 
@@ -2630,7 +2633,6 @@ sub unified_cli {
         prompt => $prompt,
         socket => $socket,
         check_notifications => $check_notifications,
-        cancel_requested => \$cancel_requested,  # Pass reference so RawCLI can check it
     );
 
     # Main command loop using character-by-character input with tab completion

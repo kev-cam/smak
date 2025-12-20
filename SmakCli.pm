@@ -17,7 +17,6 @@ sub new {
         history_file => $opts{history_file} || '.smak_history',
         socket => $opts{socket},  # For async notifications
         check_notifications => $opts{check_notifications},
-        cancel_requested => $opts{cancel_requested},  # Already a ref from caller
         history => [],
         history_pos => -1,
         max_history => 1000,
@@ -146,15 +145,6 @@ sub readline {
 
     eval {
         while (1) {
-            # Check for cancel request (Ctrl-C from signal handler)
-            if ($self->{cancel_requested} && ${$self->{cancel_requested}}) {
-                ${$self->{cancel_requested}} = 0;  # Reset flag
-                $buffer = '';  # Clear current input
-                $pos = 0;
-                $self->redraw_line($buffer, $pos);
-                next;
-            }
-
             # Check for async notifications
             if ($self->{check_notifications}) {
                 my $had_notification = $self->{check_notifications}->($buffer, $pos);

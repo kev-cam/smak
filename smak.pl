@@ -413,6 +413,18 @@ sub run_cli {
             next;
         }
 
+        # Handle Perl eval command
+        if ($line =~ /^eval\s+(.+)$/) {
+            my $expr = $1;
+            my $result = eval $expr;
+            if ($@) {
+                print "Error: $@\n";
+            } else {
+                print "$result\n" if defined $result;
+            }
+            next;
+        }
+
         my @words = split(/\s+/, $line);
         my $cmd = shift @words;
 
@@ -451,6 +463,7 @@ Available commands:
   help, h, ?          Show this help
   quit, exit, q       Shut down job server and exit
   ! <command>         Execute shell command in sub-shell
+  eval <expr>         Evaluate Perl expression
 
 Keyboard shortcuts:
   Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)

@@ -3302,28 +3302,9 @@ sub run_job_master {
     my $worker_script = "$bin_dir/smak-worker";
     die "Worker script not found: $worker_script\n" unless -x $worker_script;
 
-    # Determine bind address and connection address for workers
-    my $bind_addr = '127.0.0.1';
-    my $connect_addr = '127.0.0.1';
-
+    # Workers always connect to localhost (either directly or via SSH tunnel)
     if ($ssh_host) {
-        # SSH mode: listen on all interfaces and get local IP
-        $bind_addr = '0.0.0.0';
-        # Get local IP address
-        my $sock = IO::Socket::INET->new(
-            PeerAddr => '8.8.8.8',
-            PeerPort => 53,
-            Proto    => 'udp',
-        );
-        if ($sock) {
-            $connect_addr = $sock->sockhost();
-            close($sock);
-        } else {
-            warn "Cannot determine local IP, using hostname\n";
-            use Sys::Hostname;
-            $connect_addr = hostname();
-        }
-        vprint "SSH mode: workers will connect to $connect_addr\n";
+        vprint "SSH mode: workers will connect via reverse port forwarding\n";
     }
 
     # Create socket server for master connections
@@ -3340,7 +3321,7 @@ sub run_job_master {
 
     # Create socket server for workers
     my $worker_server = IO::Socket::INET->new(
-        LocalAddr => $bind_addr,
+        LocalAddr => '127.0.0.1',
         LocalPort => 0,  # Let OS assign port
         Proto     => 'tcp',
         Listen    => $num_workers,
@@ -3522,13 +3503,14 @@ sub run_job_master {
         if ($pid == 0) {
             # Child - exec worker
             if ($ssh_host) {
-                # SSH mode: launch worker on remote host
-                my $connect_string = "$connect_addr:$worker_port";
-                my @ssh_cmd = ('ssh', $ssh_host);
+                # SSH mode: launch worker on remote host with reverse port forwarding
+                # Use -R to tunnel remote port back to local worker_port
+                my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
+                my @ssh_cmd = ('ssh', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
                 if ($remote_cd) {
-                    push @ssh_cmd, "cd '$remote_cd' && smak-worker $connect_string";
+                    push @ssh_cmd, "cd '$remote_cd' && smak-worker 127.0.0.1:$remote_port";
                 } else {
-                    push @ssh_cmd, "smak-worker $connect_string";
+                    push @ssh_cmd, "smak-worker 127.0.0.1:$remote_port";
                 }
                 exec(@ssh_cmd);
                 die "Failed to exec SSH worker: $!\n";
@@ -4497,13 +4479,14 @@ sub run_job_master {
                         my $worker_pid = fork();
                         if ($worker_pid == 0) {
                             if ($ssh_host) {
-                                # SSH mode: launch worker on remote host
-                                my $connect_string = "$connect_addr:$worker_port";
-                                my @ssh_cmd = ('ssh', $ssh_host);
+                                # SSH mode: launch worker on remote host with reverse port forwarding
+                                # Use -R to tunnel remote port back to local worker_port
+                                my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
+                                my @ssh_cmd = ('ssh', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
                                 if ($remote_cd) {
-                                    push @ssh_cmd, "cd '$remote_cd' && smak-worker $connect_string";
+                                    push @ssh_cmd, "cd '$remote_cd' && smak-worker 127.0.0.1:$remote_port";
                                 } else {
-                                    push @ssh_cmd, "smak-worker $connect_string";
+                                    push @ssh_cmd, "smak-worker 127.0.0.1:$remote_port";
                                 }
                                 exec(@ssh_cmd);
                                 die "Failed to exec SSH worker: $!\n";

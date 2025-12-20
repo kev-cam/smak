@@ -299,9 +299,10 @@ sub run_cli {
     # Start job server if parallel builds are configured
     my $jobserver_pid;
     if ($jobs > 1) {
-        print "Starting job server...\n";
+        print "Starting job server...";
         start_job_server();
         $jobserver_pid = $Smak::job_server_pid;
+	print " ($jobserver_pid)\n";
     }
 
     # Call unified CLI with standalone mode parameters

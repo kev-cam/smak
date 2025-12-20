@@ -1775,7 +1775,12 @@ sub get_first_target {
 # Check if a target needs rebuilding based on timestamp comparison
 # Returns 1 if target needs rebuilding, 0 if up-to-date
 sub needs_rebuild {
-    my ($target) = @_;
+    my ($target, $visited) = @_;
+    $visited ||= {};
+
+    # Prevent infinite recursion on circular dependencies
+    return 0 if $visited->{$target};
+    $visited->{$target} = 1;
 
     # If target doesn't exist, it needs to be built
     return 1 unless -e $target;
@@ -1845,6 +1850,13 @@ sub needs_rebuild {
 
         # If dependency doesn't exist, target needs rebuild
         return 1 unless -e $dep;
+
+        # Recursively check if dependency itself needs rebuilding
+        # This handles transitive dirty dependencies (e.g., A depends on B, B depends on dirty C)
+        if (needs_rebuild($dep, $visited)) {
+            warn "DEBUG: Dependency '$dep' of '$target' needs rebuild (recursive check), so '$target' needs rebuild too\n" if $ENV{SMAK_DEBUG};
+            return 1;
+        }
 
         # Compare modification times
         my $dep_mtime = (stat($dep))[9];
@@ -5564,6 +5576,21 @@ sub run_job_master {
                     my $file = $1;
                     $dirty_files{$file} = 1;
                     print STDERR "Marked file as dirty: $file\n" if $ENV{SMAK_DEBUG};
+
+                } elsif ($line =~ /^BUILD:(.+)$/) {
+                    # Build a target in the job server context (has access to dirty_files)
+                    my $target = $1;
+                    eval {
+                        build_target($target);
+                    };
+                    if ($@) {
+                        my $error = $@;
+                        chomp $error;
+                        print $master_socket "BUILD_ERROR:$error\n";
+                    } else {
+                        print $master_socket "BUILD_SUCCESS\n";
+                    }
+                    print $master_socket "BUILD_END\n";
 
                 } elsif ($line =~ /^LIST_STALE$/) {
                     # List targets that need rebuilding based on tracked modifications and dirty files

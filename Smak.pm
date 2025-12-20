@@ -2876,6 +2876,23 @@ sub dispatch_command {
     } elsif ($cmd eq 'restart') {
         cmd_restart($words, $socket, $opts);
 
+    } elsif ($cmd eq 'source') {
+        # Execute commands from script file (nestable)
+        if (@$words == 0) {
+            print "Usage: source <file>\n";
+            print "  Execute commands from a script file (supports nesting)\n";
+        } else {
+            my $script_file = $words->[0];
+            # Call the execute_script_file function from main package
+            # Note: This requires execute_script_file to be available
+            eval {
+                main::execute_script_file($script_file);
+            };
+            if ($@) {
+                print "Error executing script: $@\n";
+            }
+        }
+
     } else {
         print "Unknown command: $cmd (try 'help')\n";
     }
@@ -2911,6 +2928,8 @@ Available commands:
   help, h, ?          Show this help
   quit, exit, q       Exit CLI (shuts down server if owned, else disconnects)
   ! <command>         Execute shell command in sub-shell
+  eval <expr>         Evaluate Perl expression
+  source <file>       Execute commands from file (nestable)
 
 Keyboard shortcuts:
   Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)

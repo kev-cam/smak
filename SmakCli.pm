@@ -266,6 +266,69 @@ sub readline {
                     }
                 }
             }
+            elsif ($ord == 9) {  # Tab - completion
+                # Find the current word (from last space or start to cursor)
+                my $before_cursor = substr($buffer, 0, $pos);
+                my $word_start = 0;
+                if ($before_cursor =~ /.*\s(\S*)$/) {
+                    $word_start = length($before_cursor) - length($1);
+                }
+                my $word = substr($buffer, $word_start, $pos - $word_start);
+
+                # Get completions using glob
+                my @matches = glob("$word*");
+
+                if (@matches == 0) {
+                    # No matches - beep or do nothing
+                } elsif (@matches == 1) {
+                    # Single match - replace word
+                    my $completion = $matches[0];
+                    # Add trailing slash for directories
+                    $completion .= '/' if -d $completion;
+                    substr($buffer, $word_start, $pos - $word_start) = $completion;
+                    $pos = $word_start + length($completion);
+                    $self->redraw_line($buffer, $pos);
+                } else {
+                    # Multiple matches - find common prefix
+                    my $common = $matches[0];
+                    for my $match (@matches[1..$#matches]) {
+                        # Find common prefix between $common and $match
+                        my $len = length($common) < length($match) ? length($common) : length($match);
+                        for (my $i = 0; $i < $len; $i++) {
+                            if (substr($common, $i, 1) ne substr($match, $i, 1)) {
+                                $common = substr($common, 0, $i);
+                                last;
+                            }
+                        }
+                    }
+
+                    if (length($common) > length($word)) {
+                        # Replace with common prefix
+                        substr($buffer, $word_start, $pos - $word_start) = $common;
+                        $pos = $word_start + length($common);
+                        $self->redraw_line($buffer, $pos);
+                    } else {
+                        # Show all matches
+                        print "\n";
+                        my $cols = 80;  # Assume 80 column terminal
+                        my $max_len = 0;
+                        for my $m (@matches) {
+                            my $len = length($m);
+                            $max_len = $len if $len > $max_len;
+                        }
+                        my $col_width = $max_len + 2;
+                        my $num_cols = int($cols / $col_width);
+                        $num_cols = 1 if $num_cols < 1;
+
+                        for (my $i = 0; $i < @matches; $i++) {
+                            printf "%-${col_width}s", $matches[$i];
+                            print "\n" if (($i + 1) % $num_cols == 0);
+                        }
+                        print "\n" if (@matches % $num_cols != 0);
+                        $self->redraw_line($buffer, $pos);
+                    }
+                }
+            }
             elsif ($ord >= 32 && $ord < 127) {  # Printable character
                 substr($buffer, $pos, 0) = $char;
                 $pos++;

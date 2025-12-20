@@ -2523,8 +2523,9 @@ sub unified_cli {
     #   prompt         => CLI prompt string (optional)
     #   term           => Term::ReadLine object (optional)
 
-    use Term::ReadLine;
     use IO::Select;
+    use lib '.';
+    require SmakCli;
 
     my $mode = $opts{mode} || 'standalone';
     my $socket = $opts{socket};
@@ -2533,60 +2534,7 @@ sub unified_cli {
     my $jobs = $opts{jobs} || 1;
     my $makefile = $opts{makefile} || 'Makefile';
 
-    # Create or use existing terminal
-    my $term = $opts{term} || Term::ReadLine->new('smak> ');
     my $prompt = $opts{prompt} || 'smak> ';
-
-    # Set up tab completion for filenames and commands
-    my $attribs = $term->Attribs;
-    if ($attribs) {
-        $attribs->{completion_function} = sub {
-            my ($text, $line, $start) = @_;
-
-            # List of available commands
-            my @commands = qw(
-                build rebuild watch unwatch tasks status progress files stale
-                dirty touch rm ignore needs list vars deps vpath
-                add-rule mod-rule modify-rule mod-deps modify-deps del-rule delete-rule
-                source start kill restart detach help quit exit
-            );
-
-            # Determine what we're completing
-            my $before_cursor = substr($line, 0, $start);
-            my @words = split /\s+/, $before_cursor;
-
-            # If completing the first word, offer command completions
-            if ($start == 0 || $before_cursor =~ /^\s*$/) {
-                return grep { /^\Q$text\E/ } @commands;
-            }
-
-            # Otherwise, complete filenames (and targets for certain commands)
-            my $cmd = $words[0] || '';
-            my @matches;
-
-            # Get target completions for build/deps commands
-            if ($cmd =~ /^(build|rebuild|deps|list)$/) {
-                # Get list of targets from %fixed_deps
-                my @targets;
-                for my $key (keys %fixed_deps) {
-                    my ($mf, $target) = split(/\t/, $key, 2);
-                    push @targets, (defined $target ? $target : $key);
-                }
-                for my $key (keys %pattern_deps) {
-                    my ($mf, $target) = split(/\t/, $key, 2);
-                    push @targets, (defined $target ? $target : $key);
-                }
-                @targets = grep { /^\Q$text\E/ } @targets;
-                push @matches, @targets;
-            }
-
-            # Always add file completions
-            my @files = glob("$text*");
-            push @matches, @files;
-
-            return @matches;
-        };
-    }
 
     # Track state
     my $watch_enabled = 0;
@@ -2673,82 +2621,45 @@ sub unified_cli {
             }
         }
 
-        # If we displayed async output, print prompt manually
-        if ($had_output) {
-            # Try readline methods first
-            if ($term->can('rl_on_new_line') && $term->can('rl_redisplay')) {
-                $term->rl_on_new_line();
-                $term->rl_redisplay();
-            } else {
-                # Fallback: just print the prompt
-                print $prompt;
-                STDOUT->flush();
-            }
-        }
+        # Return whether we had output (RawCLI will redraw the line if needed)
+        return $had_output;
     };
 
-    # Main command loop using select() for event multiplexing
-    # This allows processing async notifications while waiting for user input
+    # Create RawCLI handler with tab completion and async notification support
+    my $cli = RawCLI->new(
+        prompt => $prompt,
+        socket => $socket,
+        check_notifications => $check_notifications,
+    );
+
+    # Main command loop using character-by-character input with tab completion
     my $line;
-    my $need_prompt = 1;
 
     while (!$exit_requested && !$detached) {
         # Handle Ctrl-C cancel request
         if ($cancel_requested) {
             $cancel_requested = 0;
-            $need_prompt = 1;
+            print "\n";
             next;
         }
 
-        # Always check for async notifications first
-        $check_notifications->() if defined $socket;
-
-        # Check if socket is still valid after async notifications
+        # Check if socket is still valid
         if ($socket && !$socket->connected()) {
             print "\nConnection to job server lost.\n";
             print "Use 'start' to reconnect or 'quit' to exit.\n";
             $socket = undef;
+            $cli->{socket} = undef;  # Update CLI's socket reference
         }
 
-        # Print prompt if needed
-        if ($need_prompt) {
-            print $prompt;
-            STDOUT->flush();
-            $need_prompt = 0;
-        }
-
-        # Use select to multiplex STDIN and socket with timeout
-        my $select = IO::Select->new();
-        $select->add(\*STDIN);
-        $select->add($socket) if defined $socket;
-
-        my @ready = $select->can_read(0.5);  # 500ms timeout for periodic checks
-
-        # Check if STDIN has data available
-        my $stdin_ready = 0;
-        for my $fh (@ready) {
-            $stdin_ready = 1 if fileno($fh) == fileno(STDIN);
-        }
-
-        unless ($stdin_ready) {
-            # Timeout or socket data - loop to check notifications again
-            next;
-        }
-
-        # STDIN is ready - read a line (won't block)
-        $line = $term->readline('');  # Empty prompt since we already printed it
+        # Read line with RawCLI (handles tab completion, history, async notifications)
+        $line = $cli->readline();
         unless (defined $line) {
-            # EOF or error
+            # EOF (Ctrl-D) or detached (Ctrl-C in RawCLI)
             last;
         }
 
-        $need_prompt = 1;  # Will need prompt after processing command
-
-        chomp $line;
         $line =~ s/^\s+|\s+$//g;
         next if $line eq '';
-
-        $term->addhistory($line) if $line =~ /\S/;
 
         # Handle shell command escape (!)
         if ($line =~ /^!(.+)$/) {
@@ -2781,7 +2692,6 @@ sub unified_cli {
             watch_enabled => \$watch_enabled,
             exit_requested => \$exit_requested,
             detached => \$detached,
-            term => $term,
         });
 
         # Check for async notifications that arrived during command execution

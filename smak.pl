@@ -414,6 +414,9 @@ Available commands:
   stale               Show targets that need rebuilding (FUSE)
   dirty <file>        Mark a file as out-of-date (dirty)
   needs <file>        Show which targets depend on a file
+  touch <file...>     Update file timestamps and mark dirty
+  rm <file...>        Remove files (saves to .{file}.prev) and mark dirty
+  ignore <file...>    Mark files to ignore in dependency checking
   files, f            List tracked file modifications (FUSE)
   list [pattern]      List all targets (optionally matching pattern)
   tasks, t            List pending and active tasks
@@ -575,6 +578,15 @@ HELP
             } else {
                 print "Job server not running. Use 'start' to enable.\n";
             }
+
+        } elsif ($cmd eq 'touch') {
+            cmd_touch(\@words, $Smak::job_server_socket);
+
+        } elsif ($cmd eq 'rm') {
+            cmd_rm(\@words, $Smak::job_server_socket);
+
+        } elsif ($cmd eq 'ignore') {
+            cmd_ignore(\@words, $Smak::job_server_socket);
 
         } elsif ($cmd eq 'rebuild' || $cmd eq 'rb') {
             if (@words == 0) {

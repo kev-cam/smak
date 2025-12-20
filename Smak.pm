@@ -2370,58 +2370,6 @@ sub dry_run_target {
     }
 }
 
-sub execute_script {
-    my ($filename) = @_;
-
-    open(my $script_fh, '<', $filename) or die "Cannot open script file '$filename': $!\n";
-
-    while (my $line = <$script_fh>) {
-        chomp $line;
-
-        # Skip empty lines and comments
-        next if $line =~ /^\s*$/ || $line =~ /^\s*#/;
-
-        # Process commands (simplified version of interactive_debug command processing)
-        if ($line =~ /^\s*add-rule\s+(.+?)\s*:\s*(.+?)\s*:\s*(.+)$/i) {
-            my ($target, $deps, $rule_text) = ($1, $2, $3);
-
-            # Handle escape sequences
-            $rule_text =~ s/\\n/\n/g;
-            $rule_text =~ s/\\t/\t/g;
-
-            # Ensure each line starts with a tab (Makefile requirement)
-            $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
-
-            add_rule($target, $deps, $rule_text);
-        }
-        elsif ($line =~ /^\s*mod-rule\s+(.+?)\s*:\s*(.+)$/i) {
-            my ($target, $rule_text) = ($1, $2);
-
-            # Handle escape sequences
-            $rule_text =~ s/\\n/\n/g;
-            $rule_text =~ s/\\t/\t/g;
-
-            # Ensure each line starts with a tab
-            $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
-
-            modify_rule($target, $rule_text);
-        }
-        elsif ($line =~ /^\s*mod-deps\s+(.+?)\s*:\s*(.+)$/i) {
-            my ($target, $deps) = ($1, $2);
-            modify_deps($target, $deps);
-        }
-        elsif ($line =~ /^\s*del-rule\s+(.+)$/i) {
-            my $target = $1;
-            delete_rule($target);
-        }
-        else {
-            warn "Unknown command in script: $line\n";
-        }
-    }
-
-    close($script_fh);
-}
-
 sub add_rule {
     my ($target, $deps, $rule_text) = @_;
 
@@ -2875,6 +2823,60 @@ sub dispatch_command {
     } elsif ($cmd eq 'restart') {
         cmd_restart($words, $socket, $opts);
 
+    } elsif ($cmd eq 'add-rule') {
+        # Add a new rule to the Makefile
+        if (@$words < 3) {
+            print "Usage: add-rule <target> <deps> <rule>\n";
+            print "  Add a new rule (rule text can use \\n and \\t)\n";
+        } else {
+            my ($target, $deps, $rule_text) = ($words->[0], $words->[1], join(' ', @$words[2..$#$words]));
+            # Handle escape sequences
+            $rule_text =~ s/\\n/\n/g;
+            $rule_text =~ s/\\t/\t/g;
+            # Ensure each line starts with a tab (Makefile requirement)
+            $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
+            add_rule($target, $deps, $rule_text);
+            print "Added rule for '$target'\n";
+        }
+
+    } elsif ($cmd eq 'mod-rule' || $cmd eq 'modify-rule') {
+        # Modify an existing rule
+        if (@$words < 2) {
+            print "Usage: mod-rule <target> <rule>\n";
+            print "  Modify the rule for a target (rule text can use \\n and \\t)\n";
+        } else {
+            my ($target, $rule_text) = ($words->[0], join(' ', @$words[1..$#$words]));
+            # Handle escape sequences
+            $rule_text =~ s/\\n/\n/g;
+            $rule_text =~ s/\\t/\t/g;
+            # Ensure each line starts with a tab
+            $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
+            modify_rule($target, $rule_text);
+            print "Modified rule for '$target'\n";
+        }
+
+    } elsif ($cmd eq 'mod-deps' || $cmd eq 'modify-deps') {
+        # Modify dependencies for a target
+        if (@$words < 2) {
+            print "Usage: mod-deps <target> <deps>\n";
+            print "  Modify the dependencies for a target\n";
+        } else {
+            my ($target, $deps) = ($words->[0], join(' ', @$words[1..$#$words]));
+            modify_deps($target, $deps);
+            print "Modified dependencies for '$target'\n";
+        }
+
+    } elsif ($cmd eq 'del-rule' || $cmd eq 'delete-rule') {
+        # Delete a rule
+        if (@$words < 1) {
+            print "Usage: del-rule <target>\n";
+            print "  Delete a rule for a target\n";
+        } else {
+            my $target = $words->[0];
+            delete_rule($target);
+            print "Deleted rule for '$target'\n";
+        }
+
     } elsif ($cmd eq 'source') {
         # Execute commands from script file (nestable)
         if (@$words == 0) {
@@ -2920,6 +2922,10 @@ Available commands:
   vars [pattern]      Show all variables (optionally matching pattern)
   deps <target>       Show dependencies for target
   vpath <file>        Test vpath resolution for a file
+  add-rule <t> <d> <r> Add a new rule (rule text can use \n and \t)
+  mod-rule <t> <r>    Modify the rule for a target
+  mod-deps <t> <d>    Modify the dependencies for a target
+  del-rule <t>        Delete a rule for a target
   start [N]           Start job server with N workers (if not running)
   kill                Kill all workers
   restart [N]         Restart workers (optionally specify count)

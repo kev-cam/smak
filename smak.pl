@@ -326,6 +326,404 @@ sub run_cli {
         $jobserver_pid = $Smak::job_server_pid;
 	print " ($jobserver_pid)\n";
     }
+    print "\n";
+
+    # Set up signal handlers for detach
+    my $detached = 0;
+    my $prompt = 'smak> ';
+    my $detach_handler = sub {
+        $detached = 1;
+    };
+    local $SIG{INT} = $detach_handler;  # Ctrl-C
+
+    # Load raw CLI input handler
+    use lib $FindBin::RealBin;
+    require 'SmakCli.pm';
+
+    # Track watch mode state
+    my $watch_enabled = 0;
+
+    # Helper to check for watch notifications from job server
+    # Returns 1 if a notification was displayed (requires redraw)
+    my $check_notifications = sub {
+        my ($buffer, $pos) = @_;  # Current input buffer and cursor position
+        return 0 unless $watch_enabled && defined $Smak::job_server_socket;
+
+        # Use IO::Select to check if data is available (non-blocking)
+        use IO::Select;
+        my $select = IO::Select->new($Smak::job_server_socket);
+
+        my $had_notification = 0;
+
+        # Check if data is available (0 second timeout = non-blocking)
+        while ($select->can_read(0)) {
+            my $notif = <$Smak::job_server_socket>;
+            last unless defined $notif;
+
+            chomp $notif;
+            # Print file change notifications
+            if ($notif =~ /^WATCH:(.+)$/) {
+                my $changed_file = $1;
+                # Clear current line and print notification
+                print "\r\033[K";  # CR + clear to end of line
+                print "[File changed: $changed_file]\n";
+                $had_notification = 1;
+            } elsif ($notif =~ /^WATCH_STARTED/) {
+                # Initial confirmation, ignore
+            } elsif ($notif =~ /^WATCH_/) {
+                # Other control messages
+                last;
+            }
+        }
+
+        return $had_notification;
+    };
+
+    # Create raw input handler
+    my $cli = RawCLI->new(
+        prompt => $prompt,
+        history_file => '.smak_history',
+        socket => $Smak::job_server_socket,
+        check_notifications => $check_notifications,
+    );
+
+    my $line;
+    while (defined($line = $cli->readline())) {
+        $line =~ s/^\s+|\s+$//g;  # Trim whitespace
+        next if $line eq '';  # Skip empty lines
+
+        my @words = split(/\s+/, $line);
+        my $cmd = shift @words;
+
+        if ($cmd eq 'quit' || $cmd eq 'exit' || $cmd eq 'q') {
+            print "Shutting down and exiting...\n";
+            return 1;  # Return 1 = stop job server
+
+        } elsif ($cmd eq 'detach') {
+            $detached = 1;
+            last;
+
+        } elsif ($cmd eq 'help' || $cmd eq 'h' || $cmd eq '?') {
+            print <<'HELP';
+Available commands:
+  build <target>      Build the specified target
+  rebuild <target>    Rebuild only if tracked files changed (FUSE)
+  start <N>           Start job server with N workers (if not running)
+  watch               Monitor file changes from FUSE filesystem
+  unwatch             Stop monitoring file changes
+  stale               Show targets that need rebuilding (FUSE)
+  dirty <file>        Mark a file as out-of-date (dirty)
+  needs <file>        Show which targets depend on a file
+  files, f            List tracked file modifications (FUSE)
+  list [pattern]      List all targets (optionally matching pattern)
+  tasks, t            List pending and active tasks
+  status              Show job server status (if parallel builds enabled)
+  server-cli          Switch to server CLI
+  vars [pattern]      Show all variables (optionally matching pattern)
+  deps <target>       Show dependencies for target
+  kill                Kill all workers
+  restart [N]         Restart workers (optionally specify count)
+  detach              Detach from CLI, leave job server running
+  help, h, ?          Show this help
+  quit, exit, q       Shut down job server and exit
+
+Keyboard shortcuts:
+  Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)
+
+Examples:
+  build all           Build the 'all' target
+  build clean         Build the 'clean' target
+  list task           List targets matching 'task'
+  deps foo.o          Show dependencies for foo.o
+  tasks               List active and queued tasks
+  restart 8           Restart workers with 8 workers
+HELP
+
+        } elsif ($cmd eq 'build' || $cmd eq 'b') {
+            if (@words == 0) {
+                # Build default target
+                my $default_target = get_default_target();
+                if (defined $default_target) {
+                    print "Building default target: $default_target\n";
+                    eval { build_target($default_target); };
+                    if ($@) {
+                        print "Build failed: $@\n";
+                    } else {
+                        print "Build succeeded.\n";
+                    }
+                } else {
+                    print "No default target found.\n";
+                }
+            } else {
+                # Build specified targets
+                foreach my $target (@words) {
+                    print "Building target: $target\n";
+                    eval { build_target($target); };
+                    if ($@) {
+                        print "Build failed: $@\n";
+                        last;
+                    } else {
+                        print "Build succeeded.\n";
+                    }
+                }
+            }
+
+        } elsif ($cmd eq 'watch' || $cmd eq 'w') {
+            if (defined $Smak::job_server_socket) {
+                # Enable watch mode - job-master will send file change notifications
+                print $Smak::job_server_socket "WATCH_START\n";
+                $watch_enabled = 1;
+                print "Watch mode enabled (FUSE file change notifications active)\n";
+            } else {
+                print "Job server not running. Use 'start' to enable job server.\n";
+            }
+
+        } elsif ($cmd eq 'unwatch') {
+            if (defined $Smak::job_server_socket) {
+                # Disable watch mode
+                print $Smak::job_server_socket "WATCH_STOP\n";
+                $watch_enabled = 0;
+                print "Watch mode disabled\n";
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'files' || $cmd eq 'f') {
+            if (defined $Smak::job_server_socket) {
+                # Request file list from job-master
+                print $Smak::job_server_socket "LIST_FILES\n";
+                # Wait for response
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'FILES_END';
+                    print "$response\n";
+                }
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'stale') {
+            if (defined $Smak::job_server_socket) {
+                # Request list of stale targets from job-master
+                print $Smak::job_server_socket "LIST_STALE\n";
+                # Wait for response
+                my $count = 0;
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'STALE_END';
+                    if ($response =~ /^STALE:(.+)$/) {
+                        print "  $1\n";
+                        $count++;
+                    }
+                }
+                if ($count == 0) {
+                    print "No stale targets (nothing needs rebuilding)\n";
+                } else {
+                    my $target_label = $count == 1 ? "target" : "targets";
+                    print "\n$count $target_label need rebuilding\n";
+                }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'dirty') {
+            if (@words == 0) {
+                print "Usage: dirty <file>\n";
+                print "  Marks a file as out-of-date (dirty)\n";
+            } elsif (defined $Smak::job_server_socket) {
+                my $file = $words[0];
+                # Send dirty notification to job-master
+                print $Smak::job_server_socket "MARK_DIRTY:$file\n";
+                print "Marked '$file' as dirty (out-of-date)\n";
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'needs') {
+            if (@words == 0) {
+                print "Usage: needs <file>\n";
+            } elsif (defined $Smak::job_server_socket) {
+                my $file = $words[0];
+                # Request targets that depend on this file
+                print $Smak::job_server_socket "NEEDS:$file\n";
+                $Smak::job_server_socket->flush();
+
+                # Wait for response with timeout protection
+                my $count = 0;
+                my $got_end = 0;
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    if ($response eq 'NEEDS_END') {
+                        $got_end = 1;
+                        last;
+                    }
+                    if ($response =~ /^NEEDS:(.+)$/) {
+                        print "  $1\n";
+                        $count++;
+                    }
+                }
+
+                # Check if we got a proper response
+                unless ($got_end) {
+                    print "Error: Job server connection lost\n";
+                } elsif ($count == 0) {
+                    print "No targets depend on '$file'\n";
+                } else {
+                    my $target_label = $count == 1 ? "target depends" : "targets depend";
+                    print "\n$count $target_label on '$file'\n";
+                }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'rebuild' || $cmd eq 'rb') {
+            if (@words == 0) {
+                print "Usage: rebuild <target>\n";
+            } else {
+                my $target = $words[0];
+                if (defined $Smak::job_server_socket) {
+                    # Send rebuild request - only rebuilds if files changed
+                    print "Checking if rebuild needed for: $target\n";
+                    eval { build_target($target); };
+                    if ($@) {
+                        print "Rebuild failed: $@\n";
+                    } else {
+                        print "Rebuild complete.\n";
+                    }
+                } else {
+                    print "Job server not running (rebuild requires FUSE monitoring). Use 'start' to enable.\n";
+                }
+            }
+
+        } elsif ($cmd eq 'list' || $cmd eq 'ls' || $cmd eq 'l') {
+            my $pattern = @words > 0 ? $words[0] : '';
+            my @targets = list_targets($pattern);
+
+            if (@targets == 0) {
+                print "No targets found.\n";
+            } else {
+                print "Targets:\n";
+                foreach my $target (sort @targets) {
+                    print "  $target\n";
+                }
+                print "\nTotal: " . scalar(@targets) . " targets\n";
+            }
+
+        } elsif ($cmd eq 'start') {
+            # Default to 1 worker if no count specified
+            my $worker_count = (@words > 0) ? $words[0] : 1;
+
+            if ($worker_count !~ /^\d+$/ || $worker_count < 1) {
+                print "Error: worker count must be a positive integer\n";
+            } elsif (defined $Smak::job_server_socket) {
+                print "Job server already running with $jobs workers\n";
+                print "Use 'restart $worker_count' to change worker count\n";
+            } else {
+                # Start job server
+                my $worker_label = $worker_count == 1 ? "worker" : "workers";
+                print "Starting job server with $worker_count $worker_label...\n";
+                $jobs = $worker_count;
+                set_jobs($jobs);
+                start_job_server();
+                if (defined $Smak::job_server_socket) {
+                    print "Job server started (PID $Smak::job_server_pid)\n";
+                    $jobserver_pid = $Smak::job_server_pid;
+                } else {
+                    print "Failed to start job server\n";
+                }
+            }
+
+
+        } elsif ($cmd eq 'status' || $cmd eq 'st') {
+            if (defined $Smak::job_server_socket) {
+                # Request status from job-master
+                my $worker_label = $jobs == 1 ? "worker" : "workers";
+                print "Job server running with $jobs $worker_label (PID $Smak::job_server_pid)\n";
+                # Could send STATUS request to job-master here
+                if ($Smak::job_server_master_port) {
+                    print "Use: smak-attach -pid $Smak::job_server_pid:$Smak::job_server_master_port\n";
+                } else {
+                    print "Use: smak-attach -pid $Smak::job_server_pid\n";
+                }
+            } else {
+                print "Job server not running. Use 'start' to enable.\n";
+            }
+
+        } elsif ($cmd eq 'vars' || $cmd eq 'v') {
+            my $pattern = @words > 0 ? $words[0] : '';
+            my @vars = list_variables($pattern);
+
+            if (@vars == 0) {
+                print "No variables found.\n";
+            } else {
+                print "Variables:\n";
+                foreach my $var (sort @vars) {
+                    my $value = get_variable($var);
+                    print "  $var = $value\n";
+                }
+                print "\nTotal: " . scalar(@vars) . " variables\n";
+            }
+
+        } elsif ($cmd eq 'deps' || $cmd eq 'd') {
+            if (@words == 0) {
+                print "Usage: deps <target>\n";
+            } else {
+                my $target = $words[0];
+                show_dependencies($target);
+            }
+
+        } elsif ($cmd eq 'tasks' || $cmd eq 't') {
+            if (defined $Smak::job_server_socket) {
+                # Request task list from job-master
+                print $Smak::job_server_socket "LIST_TASKS\n";
+                # Wait for response
+                while (my $response = <$Smak::job_server_socket>) {
+                    chomp $response;
+                    last if $response eq 'TASKS_END';
+                    print "$response\n";
+                }
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'server-cli') {
+	    server_cli($Smak::job_server_pid,$Smak::job_server_socket,$prompt,undef);
+        } elsif ($cmd eq 'kill') {
+            if (defined $Smak::job_server_socket) {
+                print "Killing all workers...\n";
+                print $Smak::job_server_socket "KILL_WORKERS\n";
+                # Wait for response
+                my $response = <$Smak::job_server_socket>;
+                chomp $response if $response;
+                print "$response\n" if $response;
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } elsif ($cmd eq 'restart') {
+            if (defined $Smak::job_server_socket) {
+                my $count = @words > 0 ? $words[0] : $jobs;
+                my $worker_label = $count == 1 ? "worker" : "workers";
+                print "Restarting workers ($count $worker_label)...\n";
+                print $Smak::job_server_socket "RESTART_WORKERS $count\n";
+                # Wait for response
+                my $response = <$Smak::job_server_socket>;
+                chomp $response if $response;
+                print "$response\n" if $response;
+            } else {
+                print "Job server not running.\n";
+            }
+
+        } else {
+            print "Unknown command: $cmd\n";
+            print "Type 'help' for available commands.\n";
+        }
+
+        # Check if detached by Ctrl-C
+        if ($detached) {
+            last;
+        }
+    }
 
     # Call unified CLI with standalone mode parameters
     my $result = Smak::unified_cli(

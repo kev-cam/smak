@@ -2537,6 +2537,57 @@ sub unified_cli {
     my $term = $opts{term} || Term::ReadLine->new('smak> ');
     my $prompt = $opts{prompt} || 'smak> ';
 
+    # Set up tab completion for filenames and commands
+    my $attribs = $term->Attribs;
+    if ($attribs) {
+        $attribs->{completion_function} = sub {
+            my ($text, $line, $start) = @_;
+
+            # List of available commands
+            my @commands = qw(
+                build rebuild watch unwatch tasks status progress files stale
+                dirty touch rm ignore needs list vars deps vpath
+                add-rule mod-rule modify-rule mod-deps modify-deps del-rule delete-rule
+                source start kill restart detach help quit exit
+            );
+
+            # Determine what we're completing
+            my $before_cursor = substr($line, 0, $start);
+            my @words = split /\s+/, $before_cursor;
+
+            # If completing the first word, offer command completions
+            if ($start == 0 || $before_cursor =~ /^\s*$/) {
+                return grep { /^\Q$text\E/ } @commands;
+            }
+
+            # Otherwise, complete filenames (and targets for certain commands)
+            my $cmd = $words[0] || '';
+            my @matches;
+
+            # Get target completions for build/deps commands
+            if ($cmd =~ /^(build|rebuild|deps|list)$/) {
+                # Get list of targets from %fixed_deps
+                my @targets;
+                for my $key (keys %fixed_deps) {
+                    my ($mf, $target) = split(/\t/, $key, 2);
+                    push @targets, (defined $target ? $target : $key);
+                }
+                for my $key (keys %pattern_deps) {
+                    my ($mf, $target) = split(/\t/, $key, 2);
+                    push @targets, (defined $target ? $target : $key);
+                }
+                @targets = grep { /^\Q$text\E/ } @targets;
+                push @matches, @targets;
+            }
+
+            # Always add file completions
+            my @files = glob("$text*");
+            push @matches, @files;
+
+            return @matches;
+        };
+    }
+
     # Track state
     my $watch_enabled = 0;
     my $exit_requested = 0;

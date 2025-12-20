@@ -2592,10 +2592,20 @@ sub unified_cli {
     my $watch_enabled = 0;
     my $exit_requested = 0;
     my $detached = 0;
+    my $cancel_requested = 0;
 
-    # Signal handlers
-    my $detach_handler = sub { $detached = 1; };
-    local $SIG{INT} = $detach_handler;
+    # Signal handlers - Ctrl-C cancels ongoing builds
+    my $cancel_handler = sub {
+        $cancel_requested = 1;
+        # Send KILL_WORKERS to cancel any ongoing builds
+        if (defined $socket) {
+            eval {
+                print $socket "KILL_WORKERS\n";
+            };
+        }
+        print "\n^C - Cancelling ongoing builds...\n";
+    };
+    local $SIG{INT} = $cancel_handler;
 
     print "Smak unified CLI - type 'help' for commands\n";
     print "Mode: $mode\n";
@@ -2683,6 +2693,13 @@ sub unified_cli {
     my $need_prompt = 1;
 
     while (!$exit_requested && !$detached) {
+        # Handle Ctrl-C cancel request
+        if ($cancel_requested) {
+            $cancel_requested = 0;
+            $need_prompt = 1;
+            next;
+        }
+
         # Always check for async notifications first
         $check_notifications->() if defined $socket;
 
@@ -2773,17 +2790,14 @@ sub unified_cli {
 
     # Cleanup on exit
     if ($exit_requested) {
-        if ($own_server && $socket) {
-            # We own the server - shut it down
+        # Always shut down the server when quitting (even when attached)
+        if ($socket) {
             print "Shutting down job server...\n";
             print $socket "SHUTDOWN\n";
             my $ack = <$socket>;
-        } elsif (!$own_server) {
-            # We're attached to someone else's server - just disconnect
-            print "Disconnecting from job server (leaving it running)...\n";
         }
     } elsif ($detached) {
-        # Detach was requested (Ctrl-C or explicit detach command)
+        # Detach was requested (explicit detach command only, not Ctrl-C)
         if ($own_server) {
             print "Detaching from CLI (job server still running)...\n";
         } else {
@@ -2988,11 +3002,13 @@ Available commands:
   source <file>       Execute commands from file (nestable)
 
 Keyboard shortcuts:
-  Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)
+  Ctrl-C              Cancel ongoing builds and return to prompt
+  Ctrl-D              EOF - exits CLI (same as 'quit')
 
 Behavior notes:
-  - When you own the server (smak -cli): 'quit' stops server, 'detach' leaves it
-  - When attached (smak-attach): both 'quit' and 'detach' just disconnect
+  - 'quit' always shuts down the job server (even when attached)
+  - 'detach' disconnects from CLI but leaves job server running
+  - Ctrl-C cancels running builds without exiting the CLI
 
 Examples:
   build all           Build the 'all' target

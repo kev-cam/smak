@@ -3500,15 +3500,17 @@ sub run_job_master {
         my $pid = fork();
         die "Cannot fork worker: $!\n" unless defined $pid;
 
-        if ($pid == 0) {
+        if ($pid == 0) {	    
             # Child - exec worker
             if ($ssh_host) {
+		my $local_path = getcwd();
+		$local_path =~ s=^$fuse_mountpoint/==;
                 # SSH mode: launch worker on remote host with reverse port forwarding
                 # Use -R to tunnel remote port back to local worker_port
                 my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
-                my @ssh_cmd = ('ssh', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
+                my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
                 if ($remote_cd) {
-                    push @ssh_cmd, "smak-worker -cd $remote_cd 127.0.0.1:$remote_port";
+                    push @ssh_cmd, "smak-worker -cd $remote_cd/$local_path 127.0.0.1:$remote_port";
                 } else {
                     push @ssh_cmd, "smak-worker 127.0.0.1:$remote_port";
                 }

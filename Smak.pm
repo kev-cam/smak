@@ -69,6 +69,11 @@ our @EXPORT_OK = qw(
     show_dependencies
     wait_for_jobs
     vprint
+    cmd_needs
+    cmd_touch
+    cmd_rm
+    cmd_ignore
+    cmd_dirty
 );
 
 our %EXPORT_TAGS = (
@@ -5739,6 +5744,8 @@ sub run_job_master {
                         my $query_file = $1;
                         my %matching_targets;
 
+                        warn "DEBUG: NEEDS query for '$query_file'\n" if $ENV{SMAK_DEBUG};
+
                         # Get current working directory for relative path handling
                         my $cwd = abs_path('.') || '.';
 
@@ -5759,13 +5766,31 @@ sub run_job_master {
                         # Check all dependency hashes
                         if (%fixed_deps) {
                             for my $target (keys %fixed_deps) {
-                                my $deps_str = $fixed_deps{$target};
-                                next unless defined $deps_str;
+                                my $deps_ref = $fixed_deps{$target};
+                                next unless defined $deps_ref;
 
-                                # Split dependencies and check each one
-                                my @deps = split(/\s+/, $deps_str);
+                                # fixed_deps stores arrayrefs, not strings
+                                my @deps = ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ();
+                                @deps = map {
+                                    my $dep = $_;
+                                    # Expand $MV{VAR} references
+                                    while ($dep =~ /\$MV\{([^}]+)\}/) {
+                                        my $var = $1;
+                                        my $val = $MV{$var} // '';
+                                        $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+                                    }
+                                    # If expansion resulted in multiple space-separated values, split them
+                                    if ($dep =~ /\s/) {
+                                        split /\s+/, $dep;
+                                    } else {
+                                        $dep;
+                                    }
+                                } @deps;
+                                # Flatten and filter empty strings
+                                @deps = grep { $_ ne '' } @deps;
+
+                                # Check each dependency
                                 for my $dep (@deps) {
-                                    next unless defined $dep && $dep ne '';
                                     for my $path_var (@path_variations) {
                                         if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
                                             $matching_targets{$target} = 1;
@@ -5779,12 +5804,31 @@ sub run_job_master {
                         # Also check pattern deps
                         if (%pattern_deps) {
                             for my $pattern (keys %pattern_deps) {
-                                my $deps_str = $pattern_deps{$pattern};
-                                next unless defined $deps_str;
+                                my $deps_ref = $pattern_deps{$pattern};
+                                next unless defined $deps_ref;
 
-                                my @deps = split(/\s+/, $deps_str);
+                                # pattern_deps stores arrayrefs, not strings
+                                my @deps = ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ();
+                                @deps = map {
+                                    my $dep = $_;
+                                    # Expand $MV{VAR} references
+                                    while ($dep =~ /\$MV\{([^}]+)\}/) {
+                                        my $var = $1;
+                                        my $val = $MV{$var} // '';
+                                        $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+                                    }
+                                    # If expansion resulted in multiple space-separated values, split them
+                                    if ($dep =~ /\s/) {
+                                        split /\s+/, $dep;
+                                    } else {
+                                        $dep;
+                                    }
+                                } @deps;
+                                # Flatten and filter empty strings
+                                @deps = grep { $_ ne '' } @deps;
+
+                                # Check each dependency
                                 for my $dep (@deps) {
-                                    next unless defined $dep && $dep ne '';
                                     for my $path_var (@path_variations) {
                                         if ($dep eq $path_var || $dep =~ /\Q$path_var\E$/) {
                                             # Find targets matching this pattern
@@ -5800,8 +5844,11 @@ sub run_job_master {
                             }
                         }
 
-                        # Send matching targets
-                        for my $target (sort keys %matching_targets) {
+                        # Send matching targets (strip makefile prefix from keys)
+                        for my $key (sort keys %matching_targets) {
+                            # Extract just the target name from "makefile\ttarget" format
+                            my ($mf, $target) = split(/\t/, $key, 2);
+                            $target = $key unless defined $target;  # Fallback if no tab
                             print $master_socket "NEEDS:$target\n";
                         }
                     };

@@ -603,41 +603,7 @@ HELP
             }
 
         } elsif ($cmd eq 'needs') {
-            if (@words == 0) {
-                print "Usage: needs <file>\n";
-            } elsif (defined $Smak::job_server_socket) {
-                my $file = $words[0];
-                # Request targets that depend on this file
-                print $Smak::job_server_socket "NEEDS:$file\n";
-                $Smak::job_server_socket->flush();
-
-                # Wait for response with timeout protection
-                my $count = 0;
-                my $got_end = 0;
-                while (my $response = <$Smak::job_server_socket>) {
-                    chomp $response;
-                    if ($response eq 'NEEDS_END') {
-                        $got_end = 1;
-                        last;
-                    }
-                    if ($response =~ /^NEEDS:(.+)$/) {
-                        print "  $1\n";
-                        $count++;
-                    }
-                }
-
-                # Check if we got a proper response
-                unless ($got_end) {
-                    print "Error: Job server connection lost\n";
-                } elsif ($count == 0) {
-                    print "No targets depend on '$file'\n";
-                } else {
-                    my $target_label = $count == 1 ? "target depends" : "targets depend";
-                    print "\n$count $target_label on '$file'\n";
-                }
-            } else {
-                print "Job server not running. Use 'start' to enable.\n";
-            }
+            cmd_needs(\@words, $Smak::job_server_socket);
 
         } elsif ($cmd eq 'touch') {
             cmd_touch(\@words, $Smak::job_server_socket);

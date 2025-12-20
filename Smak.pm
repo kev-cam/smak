@@ -41,7 +41,6 @@ our @EXPORT_OK = qw(
     parse_makefile
     build_target
     dry_run_target
-    server_cli
     interactive_debug
     execute_script
     get_default_target
@@ -3611,22 +3610,6 @@ sub cmd_restart {
     print "$response\n" if $response;
 }
 
-sub server_cli
-{
-    my ($jobserver_pid,$socket,$prompt,$term,$selected_js) = @_;
-
-    # Call unified CLI in attached mode
-    return unified_cli(
-        mode => 'attached',
-        socket => $socket,
-        server_pid => $jobserver_pid,
-        own_server => 0,  # We're attaching to existing server
-        jobs => 1,  # Unknown, will use server's config
-        makefile => 'Makefile',  # Default
-        prompt => $prompt || 'smak> ',
-        term => $term,
-    );
-}
 
 sub interactive_debug {
     my ($OUT,$input) = @_ ;

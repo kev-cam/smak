@@ -2549,6 +2549,8 @@ sub unified_cli {
         if (defined $socket) {
             eval {
                 print $socket "KILL_WORKERS\n";
+                # Read the response to prevent socket issues
+                my $response = <$socket>;
             };
         }
         print "\n^C - Cancelling ongoing builds...\n";

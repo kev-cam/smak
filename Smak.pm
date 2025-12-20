@@ -2639,14 +2639,6 @@ sub unified_cli {
     my $line;
 
     while (!$exit_requested && !$detached) {
-        # Check if socket is still valid
-        if ($socket && !$socket->connected()) {
-            print "\nConnection to job server lost.\n";
-            print "Use 'start' to reconnect or 'quit' to exit.\n";
-            $socket = undef;
-            $cli->{socket} = undef;  # Update CLI's socket reference
-        }
-
         # Read line with RawCLI (handles tab completion, history, async notifications)
         $line = $cli->readline();
         unless (defined $line) {

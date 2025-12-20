@@ -404,7 +404,17 @@ my $prompt = 'smak-attach> ';
 
 my $term = Term::ReadLine->new($prompt);
 
-server_cli($jobserver_pid,$socket,$prompt,$term,$selected_js);
+# Enter unified CLI in attached mode
+Smak::unified_cli(
+    mode => 'attached',
+    socket => $socket,
+    server_pid => $jobserver_pid,
+    own_server => 0,  # We're attaching to existing server
+    jobs => 1,  # Unknown, will use server's config
+    makefile => 'Makefile',  # Default
+    prompt => $prompt,
+    term => $term,
+);
 
 close($socket);
 exit 0;

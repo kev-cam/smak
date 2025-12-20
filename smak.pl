@@ -392,6 +392,27 @@ sub run_cli {
         $line =~ s/^\s+|\s+$//g;  # Trim whitespace
         next if $line eq '';  # Skip empty lines
 
+        # Handle shell command escape (!)
+        if ($line =~ /^!(.+)$/) {
+            my $shell_cmd = $1;
+            $shell_cmd =~ s/^\s+//;  # Trim leading whitespace
+
+            # Execute in sub-shell using pipe
+            if (my $pid = open(my $cmd_fh, '-|', $shell_cmd . ' 2>&1')) {
+                while (my $output = <$cmd_fh>) {
+                    print $output;
+                }
+                close($cmd_fh);
+                my $exit_code = $? >> 8;
+                if ($exit_code != 0) {
+                    print STDERR "Command exited with code $exit_code\n";
+                }
+            } else {
+                print STDERR "Failed to execute command: $!\n";
+            }
+            next;
+        }
+
         my @words = split(/\s+/, $line);
         my $cmd = shift @words;
 
@@ -429,6 +450,7 @@ Available commands:
   detach              Detach from CLI, leave job server running
   help, h, ?          Show this help
   quit, exit, q       Shut down job server and exit
+  ! <command>         Execute shell command in sub-shell
 
 Keyboard shortcuts:
   Ctrl-C, Ctrl-D      Detach from CLI (same as 'detach' command)

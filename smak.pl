@@ -31,6 +31,8 @@ my $jobs = 0;  # Number of parallel jobs (default: 0 => sequential)
 my $cli = 0;  # CLI mode (interactive shell)
 my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
+my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
+my $remote_cd = '';  # Remote directory for SSH workers
 
 # Detect recursive invocation early to prevent USR_SMAK_OPT from enabling parallel builds
 my $is_recursive = 0;
@@ -62,6 +64,8 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'j|jobs:i' => \$jobs,
         'cli' => \$cli,
         'v|verbose' => \$verbose,
+        'ssh=s' => \$ssh_host,
+        'cd=s' => \$remote_cd,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -81,6 +85,8 @@ GetOptions(
     'j|jobs:i' => \$jobs,
     'cli' => \$cli,
     'v|verbose' => \$verbose,
+    'ssh=s' => \$ssh_host,
+    'cd=s' => \$remote_cd,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -116,11 +122,17 @@ if ($directory) {
     chdir($directory) or die "smak: Cannot change to directory '$directory': $!\n";
 }
 
-# Warn about recursive invocation and force sequential mode
-if ($is_recursive && $jobs != 0) {
-    my $level = $ENV{SMAK_RECURSION_LEVEL};
-    print STDERR "smak: Recursive invocation detected (level $level), forcing sequential mode to prevent deadlock\n";
-    $jobs = 0;
+# Handle -ssh=fuse option to auto-detect FUSE remote server
+if ($ssh_host eq 'fuse') {
+    my ($server, $remote_path) = Smak::get_fuse_remote_info('.');
+    if (defined $server) {
+        $ssh_host = $server;
+        # Use remote path as default if -cd not specified
+        $remote_cd = $remote_path unless $remote_cd;
+        print "Detected FUSE mount: $server:$remote_path\n" if $verbose;
+    } else {
+        die "smak: -ssh=fuse specified but current directory is not on a FUSE filesystem\n";
+    }
 }
 
 # Setup report directory if -Kreport is enabled
@@ -296,7 +308,17 @@ HELP
 }
 
 sub run_cli {
-    # Start job server if parallel builds are configured
+    use Term::ReadLine;
+
+    # Set SSH options for remote workers
+    $Smak::ssh_host = $ssh_host if $ssh_host;
+    $Smak::remote_cd = $remote_cd if $remote_cd;
+
+    print "Smak CLI mode - type 'help' for commands\n";
+    print "Makefile: $makefile\n";
+    print "Parallel jobs: $jobs\n";
+
+    # Start job server now if parallel builds are configured
     my $jobserver_pid;
     if ($jobs > 1) {
         print "Starting job server...";
@@ -342,6 +364,10 @@ if ($verbose || $ENV{SMAK_DEBUG}) {
 } else {
     $ENV{SMAK_VERBOSE} = '0';
 }
+
+# Set SSH options for remote workers (before forking job-master)
+$Smak::ssh_host = $ssh_host if $ssh_host;
+$Smak::remote_cd = $remote_cd if $remote_cd;
 
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it

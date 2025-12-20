@@ -348,9 +348,8 @@ if ($verbose || $ENV{SMAK_DEBUG}) {
 parse_makefile($makefile);
 
 # Start job server if parallel builds are requested
-# Skip in debug or dry-run mode
-# Now also start in CLI mode so dependency expansion works
-unless ($debug || $dry_run) {
+# Skip in debug, dry-run, or CLI mode (CLI mode starts its own server in run_cli)
+unless ($debug || $dry_run || $cli) {
     start_job_server();
 }
 

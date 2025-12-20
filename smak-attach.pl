@@ -102,12 +102,12 @@ sub find_jobservers {
 
 # Kill specific job servers by index
 sub kill_jobservers {
-    my @indices = @_;
+    my ($jobservers_ref, @indices) = @_;
     my $killed = 0;
     my $failed = 0;
 
     for my $idx (@indices) {
-        my $js = $jobservers[$idx];
+        my $js = $jobservers_ref->[$idx];
         unless ($js) {
             print "Invalid index: $idx\n";
             $failed++;
@@ -317,7 +317,7 @@ if ($target_pid) {
             if ($args eq '*') {
                 # Kill all
                 my @all_indices = (0 .. $#jobservers);
-                my ($killed, $failed) = kill_jobservers(@all_indices);
+                my ($killed, $failed) = kill_jobservers(\@jobservers, @all_indices);
                 exit($failed > 0 ? 1 : 0);
             } else {
                 # Kill specific instances
@@ -332,7 +332,7 @@ if ($target_pid) {
                     }
                 }
                 if (@valid_indices) {
-                    my ($killed, $failed) = kill_jobservers(@valid_indices);
+                    my ($killed, $failed) = kill_jobservers(\@jobservers, @valid_indices);
                     # Refresh the list
                     @jobservers = find_jobservers();
                     unless (@jobservers) {

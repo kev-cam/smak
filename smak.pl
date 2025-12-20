@@ -546,7 +546,7 @@ unless ($debug || $dry_run) {
 
 # Execute script file if specified
 if ($script_file) {
-    execute_script($script_file);
+    execute_script_file($script_file);
 }
 
 # If CLI mode, enter interactive loop

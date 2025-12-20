@@ -326,18 +326,24 @@ sub run_cli {
     };
     local $SIG{INT} = $detach_handler;  # Ctrl-C
 
-    my $term = Term::ReadLine->new($prompt);
+    # Load raw CLI input handler
+    use lib $FindBin::RealBin;
+    require 'raw_cli_input.pl';
 
     # Track watch mode state
     my $watch_enabled = 0;
 
     # Helper to check for watch notifications from job server
+    # Returns 1 if a notification was displayed (requires redraw)
     my $check_notifications = sub {
-        return unless $watch_enabled && defined $Smak::job_server_socket;
+        my ($buffer, $pos) = @_;  # Current input buffer and cursor position
+        return 0 unless $watch_enabled && defined $Smak::job_server_socket;
 
         # Use IO::Select to check if data is available (non-blocking)
         use IO::Select;
         my $select = IO::Select->new($Smak::job_server_socket);
+
+        my $had_notification = 0;
 
         # Check if data is available (0 second timeout = non-blocking)
         while ($select->can_read(0)) {
@@ -345,14 +351,13 @@ sub run_cli {
             last unless defined $notif;
 
             chomp $notif;
-            # Print file change notifications, clearing line and forcing redisplay
+            # Print file change notifications
             if ($notif =~ /^WATCH:(.+)$/) {
                 my $changed_file = $1;
-                # Clear current line, print notification, force prompt redisplay
+                # Clear current line and print notification
                 print "\r\033[K";  # CR + clear to end of line
                 print "[File changed: $changed_file]\n";
-                # Term::ReadLine will redisplay the prompt automatically
-                $term->rl_forced_update_display() if $term->can('rl_forced_update_display');
+                $had_notification = 1;
             } elsif ($notif =~ /^WATCH_STARTED/) {
                 # Initial confirmation, ignore
             } elsif ($notif =~ /^WATCH_/) {
@@ -360,19 +365,22 @@ sub run_cli {
                 last;
             }
         }
+
+        return $had_notification;
     };
 
+    # Create raw input handler
+    my $cli = RawCLI->new(
+        prompt => $prompt,
+        history_file => '.smak_history',
+        socket => $Smak::job_server_socket,
+        check_notifications => $check_notifications,
+    );
+
     my $line;
-    while (defined($line = $term->readline($prompt))) {
-        # Check for file change notifications before processing command
-        $check_notifications->();
-
-        chomp $line;
+    while (defined($line = $cli->readline())) {
         $line =~ s/^\s+|\s+$//g;  # Trim whitespace
-
         next if $line eq '';  # Skip empty lines
-
-        $term->addhistory($line) if $line =~ /\S/;
 
         my @words = split(/\s+/, $line);
         my $cmd = shift @words;
@@ -669,7 +677,7 @@ HELP
             }
 
         } elsif ($cmd eq 'server-cli') {
-	    server_cli($Smak::job_server_pid,$Smak::job_server_socket,$prompt,$term);
+	    server_cli($Smak::job_server_pid,$Smak::job_server_socket,$prompt,undef);
         } elsif ($cmd eq 'kill') {
             if (defined $Smak::job_server_socket) {
                 print "Killing all workers...\n";

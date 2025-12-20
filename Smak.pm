@@ -2542,21 +2542,9 @@ sub unified_cli {
     my $detached = 0;
     my $cancel_requested = 0;
 
-    # Signal handlers - Ctrl-C cancels ongoing builds
+    # Signal handlers - Ctrl-C just sets a flag
     my $cancel_handler = sub {
         $cancel_requested = 1;
-        # Send KILL_WORKERS to cancel any ongoing builds
-        if (defined $socket) {
-            eval {
-                print $socket "KILL_WORKERS\n";
-                # Read the response to prevent socket issues
-                my $response = <$socket>;
-            };
-        }
-        print "\n^C - Cancelling ongoing builds...\n";
-        # Redraw prompt immediately
-        print $prompt;
-        STDOUT->flush();
     };
     local $SIG{INT} = $cancel_handler;
 
@@ -2570,6 +2558,21 @@ sub unified_cli {
     my %recent_file_notifications;  # Track recent file notifications to avoid spam
     my $check_notifications = sub {
         return unless defined $socket;
+
+        # Handle cancel request from signal handler
+        if ($cancel_requested) {
+            $cancel_requested = 0;
+            eval {
+                print $socket "KILL_WORKERS\n";
+                # Read the response
+                my $response = <$socket>;
+            };
+            print "\n^C - Cancelling ongoing builds...\n";
+            print $prompt;
+            STDOUT->flush();
+            return 1;  # Had output, will trigger prompt redraw
+        }
+
         my $select = IO::Select->new($socket);
         my $had_output = 0;
         my $now = time();

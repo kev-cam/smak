@@ -2994,10 +2994,13 @@ sub cmd_build {
                     chomp $response;
                     if ($response =~ /^OUTPUT (.*)$/) {
                         print "$1\n";
+                        reprompt();
                     } elsif ($response =~ /^ERROR (.*)$/) {
                         print "ERROR: $1\n";
+                        reprompt();
                     } elsif ($response =~ /^WARN (.*)$/) {
                         print "WARN: $1\n";
+                        reprompt();
                     } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                         my ($completed_target, $exit_code) = ($1, $2);
                         if ($exit_code == 0) {
@@ -3006,7 +3009,7 @@ sub cmd_build {
                             print "✗ Build failed: $completed_target (exit code $exit_code)\n";
                         }
                         $job_done = 1;
-			repromt();
+			reprompt();
                     }
                 }
             }
@@ -3023,9 +3026,11 @@ sub cmd_build {
             if ($@) {
                 print "✗ Build failed: $target\n";
                 print STDERR $@;
+                reprompt();
                 last;
             } else {
                 print "✓ Build succeeded: $target\n";
+                reprompt();
             }
         }
     }

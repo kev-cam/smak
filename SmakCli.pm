@@ -2,7 +2,7 @@
 # Raw terminal input handler for smak CLI
 # Provides line editing with async notification support
 
-package RawCLI;
+package SmakCli;
 
 use strict;
 use warnings;
@@ -120,17 +120,32 @@ sub redraw_line {
 
 our $cancel_requested = 0;
 our $reprompt_requested = 0;
-our $jobs_running = 0;
+our $cli_owner = -1;
 our $current_buffer = '';
 our $current_pos = 0;
 our $current_prompt = '';
+
+our @EXPORT_OK = qw(
+    cli_owner
+    new
+);
+
+our %EXPORT_TAGS = (
+    all => \@EXPORT_OK,
+);
+
+sub winch_handler {
+    if ($cli_owner == $$) {
+	# Redraw on SIGWINCH
+    }
+};
 
 sub readline {
     my ($self) = @_;
 
     my $buffer = '';
     my $pos = 0;  # Cursor position in buffer
-
+    
     # Reset history position
     $self->{history_pos} = @{$self->{history}};
     my $temp_line = '';  # Temporary storage when browsing history
@@ -143,11 +158,8 @@ sub readline {
     STDOUT->flush();
 
     # Set up SIGWINCH handler for reprompt
-    my $winch_handler = sub {
-        # Redraw on SIGWINCH
-        $reprompt_requested = 1;
-    };
-    local $SIG{WINCH} = $winch_handler;
+    local $SIG{WINCH} = sub { winch_handler };
+    $cli_owner = $$;
 
     # Set up select for multiplexing stdin and socket
     my $select = IO::Select->new();
@@ -374,6 +386,8 @@ sub readline {
     # Always restore terminal mode
     $self->restore_mode();
 
+    $cli_owner = -1;
+    
     # Re-throw any errors after cleanup
     die $@ if $@;
 

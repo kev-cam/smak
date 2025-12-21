@@ -2633,12 +2633,12 @@ sub unified_cli {
             }
         }
 
-        # Return whether we had output (RawCLI will redraw the line if needed)
+        # Return whether we had output (SmakCli will redraw the line if needed)
         return $had_output;
     };
 
-    # Create RawCLI handler with tab completion and async notification support
-    my $cli = RawCLI->new(
+    # Create SmakCli handler with tab completion and async notification support
+    my $cli = SmakCli->new(
         prompt => $prompt,
         socket => $socket,
         check_notifications => $check_notifications,
@@ -2649,7 +2649,7 @@ sub unified_cli {
 
     $interactive = 1;
     while (!$exit_requested && !$detached) {
-        # Read line with RawCLI (handles tab completion, history, async notifications)
+        # Read line with SmakCli (handles tab completion, history, async notifications)
         $line = $cli->readline();
         unless (defined $line) {
             # EOF (Ctrl-D) or Ctrl-C
@@ -2747,8 +2747,9 @@ sub unified_cli {
 sub reprompt()
 {
     # Send SIGWINCH to wake up readline and trigger redraw
-    if (!$SmakCli::jobs_running) {
-        kill 'WINCH', $$;
+    my $pid = $SmakCli::cli_owner;
+    if ($pid >= 0) {
+        kill 'WINCH', $pid;
     }
 }
 
@@ -3764,11 +3765,14 @@ HELP
             $expr =~ s/^\s*print\s+//;
 
             # Fork a subprocess to evaluate the expression with a timeout
+	    my $ppid = $$;
             my $pid = fork();
             if (!defined $pid) {
                 print $OUT "Failed to fork: $!\n";
                 next;
             }
+
+	    $SmakCli::cli_owner = $ppid;
 
             if ($pid == 0) {
                 # Child process

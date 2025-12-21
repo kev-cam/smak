@@ -2735,6 +2735,7 @@ sub unified_cli {
 sub reprompt()
 {
     # poke the readline mechanism to redraw
+    $SmakCli::reprompt_requested = 1;
 }
 
 # Command dispatcher

@@ -119,6 +119,7 @@ sub redraw_line {
 }
 
 our $cancel_requested = 0;
+our $reprompt_requested = 0;
 
 sub readline {
     my ($self) = @_;
@@ -160,8 +161,14 @@ sub readline {
                 }
             }
 
+            # Check for reprompt request
+            if ($reprompt_requested) {
+                $reprompt_requested = 0;
+                $self->redraw_line($buffer, $pos);
+            }
+
             # Wait for input with timeout (for periodic notification checks)
-            my @ready = $select->can_read(0.1);
+            my @ready = $select->can_read(0.2);
 
             # Check if stdin has data
             my $stdin_ready = 0;

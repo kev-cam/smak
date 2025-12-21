@@ -570,14 +570,33 @@ if ($cli) {
     print "\n";
 
     # Enter unified CLI
-    my $result = Smak::unified_cli(
-        socket => $Smak::job_server_socket,
-        server_pid => $Smak::job_server_pid,
-        mode => 'standalone',
-        jobs => $jobs,
-        makefile => $makefile,
-        own_server => $own_server,
-    );
+    my $quiet=0;
+    while (1) {
+	my $result = Smak::unified_cli(
+	    socket => $Smak::job_server_socket,
+	    server_pid => $Smak::job_server_pid,
+	    mode => 'standalone',
+	    jobs => $jobs,
+	    makefile => $makefile,
+	    own_server => $own_server,
+	    quiet => $quiet++,
+	    );
+	
+	if (! defined $result) { # hard interrupt, reset IO and server
+	    close STDIN;
+	    open  STDIN,"</dev/tty";
+	    if ($own_server) {
+		stop_job_server();
+		if ($jobs > 1) {
+		    print "\rRestarting job server...";
+		    start_job_server();
+		    print " ($Smak::job_server_pid)\n" if $Smak::job_server_pid;
+		}
+	    }
+	    next;
+	}
+	last;
+    }
 
     # Stop job server if we own it
     if ($own_server) {

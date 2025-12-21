@@ -118,6 +118,8 @@ sub redraw_line {
     print "\r\033[", $cursor_pos + 1, "G";  # Move to column (1-based)
 }
 
+our $cancel_requested = 0;
+
 sub readline {
     my ($self) = @_;
 
@@ -142,14 +144,19 @@ sub readline {
 
     my $result = undef;
     my $detached = 0;
+    my $had_notification = 0;
 
-    eval {
+    # eval {
         while (1) {
             # Check for async notifications
             if ($self->{check_notifications}) {
                 my $had_notification = $self->{check_notifications}->($buffer, $pos);
                 if ($had_notification) {
                     $self->redraw_line($buffer, $pos);
+		    if (-2 == $had_notification ) {
+			$result = undef;
+			last;
+		    }
                 }
             }
 
@@ -176,7 +183,8 @@ sub readline {
             # Note: Ctrl-C (ord 3) is handled by SIGINT signal handler, not here
             # Just skip the character if we receive it
             if ($ord == 3) {  # Ctrl-C
-                next;  # Skip - signal handler deals with it
+		$cancel_requested = 1;
+                next;  # Handled in interim check
             }
             elsif ($ord == 4) {  # Ctrl-D (EOF)
                 if (length($buffer) == 0) {
@@ -338,7 +346,7 @@ sub readline {
 
             STDOUT->flush();
         }
-    };
+    # };
 
     # Always restore terminal mode
     $self->restore_mode();

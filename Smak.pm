@@ -3000,7 +3000,7 @@ sub cmd_build {
                             print "✗ Build failed: $completed_target (exit code $exit_code)\n";
                         }
                         $job_done = 1;
-			repromt();
+			reprompt();
                     }
                 }
             }

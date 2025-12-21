@@ -2836,6 +2836,16 @@ sub dispatch_command {
     } elsif ($cmd eq 'restart') {
         cmd_restart($words, $socket, $opts);
 
+    } elsif ($cmd eq 'eval') {
+        # Evaluate Perl expression
+        my $expr = join(' ', @$words);
+        my $result = eval $expr;
+        if ($@) {
+            print "Error: $@\n";
+        } else {
+            print "$result\n" if defined $result;
+        }
+
     } elsif ($cmd eq 'add-rule') {
         # Add a new rule to the Makefile
         if (@$words < 3) {

@@ -2592,17 +2592,21 @@ sub unified_cli {
                     $now - $recent_file_notifications{$file} >= 1) {
                     print "\r\033[K[File changed: $file]\n";
                     $recent_file_notifications{$file} = $now;
+                    reprompt();
                     $had_output = 1;
                 }
             } elsif ($notif =~ /^OUTPUT (.*)$/) {
                 # Asynchronous job output
                 print "\r\033[K$1\n";
+                reprompt();
                 $had_output = 1;
             } elsif ($notif =~ /^ERROR (.*)$/) {
                 print "\r\033[KERROR: $1\n";
+                reprompt();
                 $had_output = 1;
             } elsif ($notif =~ /^WARN (.*)$/) {
                 print "\r\033[KWARN: $1\n";
+                reprompt();
                 $had_output = 1;
             } elsif ($notif =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                 # Asynchronous job completion notification
@@ -2612,6 +2616,7 @@ sub unified_cli {
                 } else {
                     print "\r\033[K[✗ Failed: $target (exit $exit_code)]\n";
                 }
+                reprompt();
                 $had_output = 1;
             } elsif ($notif =~ /^WATCH_STARTED|^WATCH_/) {
                 last;  # End of watch notification batch

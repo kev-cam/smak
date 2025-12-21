@@ -142,6 +142,13 @@ sub readline {
     print $self->{prompt};
     STDOUT->flush();
 
+    # Set up SIGWINCH handler for reprompt
+    my $winch_handler = sub {
+        # Redraw on SIGWINCH
+        $reprompt_requested = 1;
+    };
+    local $SIG{WINCH} = $winch_handler;
+
     # Set up select for multiplexing stdin and socket
     my $select = IO::Select->new();
     $select->add(\*STDIN);

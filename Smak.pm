@@ -2746,10 +2746,16 @@ sub unified_cli {
 
 sub reprompt()
 {
-    # poke the readline mechanism to redraw
-    # Only set flag if no jobs are running
+    # Directly redraw prompt if no jobs are running
     if (!$SmakCli::jobs_running) {
-        $SmakCli::reprompt_requested = 1;
+        # Redraw the current line using saved globals
+        print "\r\033[K";  # CR + clear to end of line
+        print $SmakCli::current_prompt, $SmakCli::current_buffer;
+
+        # Move cursor to correct position
+        my $cursor_pos = length($SmakCli::current_prompt) + $SmakCli::current_pos;
+        print "\r\033[", $cursor_pos + 1, "G";  # Move to column (1-based)
+        STDOUT->flush();
     }
 }
 

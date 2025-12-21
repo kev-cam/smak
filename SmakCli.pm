@@ -121,6 +121,9 @@ sub redraw_line {
 our $cancel_requested = 0;
 our $reprompt_requested = 0;
 our $jobs_running = 0;
+our $current_buffer = '';
+our $current_pos = 0;
+our $current_prompt = '';
 
 sub readline {
     my ($self) = @_;
@@ -150,6 +153,11 @@ sub readline {
 
     # eval {
         while (1) {
+            # Update globals for reprompt()
+            $current_buffer = $buffer;
+            $current_pos = $pos;
+            $current_prompt = $self->{prompt};
+
             # Check for async notifications
             if ($self->{check_notifications}) {
                 my $had_notification = $self->{check_notifications}->($buffer, $pos);

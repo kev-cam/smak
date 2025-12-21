@@ -120,6 +120,7 @@ sub redraw_line {
 
 our $cancel_requested = 0;
 our $reprompt_requested = 0;
+our $jobs_running = 0;
 
 sub readline {
     my ($self) = @_;

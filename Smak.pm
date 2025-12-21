@@ -2747,7 +2747,10 @@ sub unified_cli {
 sub reprompt()
 {
     # poke the readline mechanism to redraw
-    $SmakCli::reprompt_requested = 1;
+    # Only set flag if no jobs are running
+    if (!$SmakCli::jobs_running) {
+        $SmakCli::reprompt_requested = 1;
+    }
 }
 
 # Command dispatcher
@@ -2985,6 +2988,7 @@ sub cmd_build {
     if ($socket) {
         # Job server mode - submit jobs and wait for results
         my $exit_req = ${$state->{exit_requested}};
+        $SmakCli::jobs_running = 1;
         for my $target (@targets) {
             print $socket "SUBMIT_JOB\n";
             print $socket "$target\n";
@@ -3023,9 +3027,11 @@ sub cmd_build {
 
             last if $exit_req;
         }
+        $SmakCli::jobs_running = 0;
     } else {
         # No job server - build sequentially
         print "(Building in sequential mode - use 'start' for parallel builds)\n";
+        $SmakCli::jobs_running = 1;
         for my $target (@targets) {
             eval {
                 build_target($target);
@@ -3040,6 +3046,7 @@ sub cmd_build {
                 reprompt();
             }
         }
+        $SmakCli::jobs_running = 0;
     }
 }
 

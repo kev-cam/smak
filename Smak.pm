@@ -131,6 +131,7 @@ our $remote_cd = '';  # Remote directory for SSH workers
 our $job_server_socket;  # Socket to job-master
 our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
+our $cli_owner = -1;  # PID of process that owns the CLI (-1 = no owner)
 
 sub set_report_mode {
     my ($enabled, $fh) = @_;
@@ -170,6 +171,8 @@ sub start_job_server {
         exit 99;  # Should never reach here
     }
 
+    # Parent - track CLI ownership
+    $cli_owner = $$;
     warn "Spawned job-master with PID $job_server_pid\n" if $ENV{SMAK_DEBUG};
 
     # Wait for job-master to create port file
@@ -2734,6 +2737,7 @@ sub unified_cli {
         }
     } elsif ($detached) {
         # Detach was requested (explicit detach command only, not Ctrl-C)
+        $cli_owner = -1;  # Mark CLI as unowned
         if ($own_server) {
             print "Detaching from CLI (job server still running)...\n";
         } else {

@@ -404,6 +404,9 @@ my $prompt = 'smak-attach> ';
 
 my $term = Term::ReadLine->new($prompt);
 
+# Set CLI owner to this attached process
+$Smak::cli_owner = $$;
+
 # Enter unified CLI in attached mode
 Smak::unified_cli(
     mode => 'attached',

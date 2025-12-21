@@ -2732,6 +2732,11 @@ sub unified_cli {
     return $exit_requested ? 'stop' : 'detach';
 }
 
+sub reprompt()
+{
+    # poke the readline mechanism to redraw
+}
+
 # Command dispatcher
 sub dispatch_command {
     my ($cmd, $words, $opts, $state) = @_;
@@ -2995,6 +3000,7 @@ sub cmd_build {
                             print "✗ Build failed: $completed_target (exit code $exit_code)\n";
                         }
                         $job_done = 1;
+			repromt();
                     }
                 }
             }

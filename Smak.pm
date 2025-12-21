@@ -2713,6 +2713,13 @@ sub unified_cli {
 
         # Check for async notifications that arrived during command execution
         $check_notifications->();
+
+        # If reprompt was requested, show prompt before next readline
+        if ($SmakCli::reprompt_requested) {
+            $SmakCli::reprompt_requested = 0;
+            print $prompt;
+            STDOUT->flush();
+        }
     }
 
     $interactive = 0;

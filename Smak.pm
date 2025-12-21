@@ -2592,17 +2592,21 @@ sub unified_cli {
                     $now - $recent_file_notifications{$file} >= 1) {
                     print "\r\033[K[File changed: $file]\n";
                     $recent_file_notifications{$file} = $now;
+                    reprompt();
                     $had_output = 1;
                 }
             } elsif ($notif =~ /^OUTPUT (.*)$/) {
                 # Asynchronous job output
                 print "\r\033[K$1\n";
+                reprompt();
                 $had_output = 1;
             } elsif ($notif =~ /^ERROR (.*)$/) {
                 print "\r\033[KERROR: $1\n";
+                reprompt();
                 $had_output = 1;
             } elsif ($notif =~ /^WARN (.*)$/) {
                 print "\r\033[KWARN: $1\n";
+                reprompt();
                 $had_output = 1;
             } elsif ($notif =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                 # Asynchronous job completion notification
@@ -2612,6 +2616,7 @@ sub unified_cli {
                 } else {
                     print "\r\033[K[✗ Failed: $target (exit $exit_code)]\n";
                 }
+                reprompt();
                 $had_output = 1;
             } elsif ($notif =~ /^WATCH_STARTED|^WATCH_/) {
                 last;  # End of watch notification batch
@@ -2708,6 +2713,13 @@ sub unified_cli {
 
         # Check for async notifications that arrived during command execution
         $check_notifications->();
+
+        # If reprompt was requested, show prompt before next readline
+        if ($SmakCli::reprompt_requested) {
+            $SmakCli::reprompt_requested = 0;
+            print $prompt;
+            STDOUT->flush();
+        }
     }
 
     $interactive = 0;
@@ -2734,7 +2746,10 @@ sub unified_cli {
 
 sub reprompt()
 {
-    # poke the readline mechanism to redraw
+    # Send SIGWINCH to wake up readline and trigger redraw
+    if (!$SmakCli::jobs_running) {
+        kill 'WINCH', $$;
+    }
 }
 
 # Command dispatcher
@@ -2972,6 +2987,7 @@ sub cmd_build {
     if ($socket) {
         # Job server mode - submit jobs and wait for results
         my $exit_req = ${$state->{exit_requested}};
+        $SmakCli::jobs_running = 1;
         for my $target (@targets) {
             print $socket "SUBMIT_JOB\n";
             print $socket "$target\n";
@@ -2988,10 +3004,13 @@ sub cmd_build {
                     chomp $response;
                     if ($response =~ /^OUTPUT (.*)$/) {
                         print "$1\n";
+                        reprompt();
                     } elsif ($response =~ /^ERROR (.*)$/) {
                         print "ERROR: $1\n";
+                        reprompt();
                     } elsif ($response =~ /^WARN (.*)$/) {
                         print "WARN: $1\n";
+                        reprompt();
                     } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                         my ($completed_target, $exit_code) = ($1, $2);
                         if ($exit_code == 0) {
@@ -3007,9 +3026,11 @@ sub cmd_build {
 
             last if $exit_req;
         }
+        $SmakCli::jobs_running = 0;
     } else {
         # No job server - build sequentially
         print "(Building in sequential mode - use 'start' for parallel builds)\n";
+        $SmakCli::jobs_running = 1;
         for my $target (@targets) {
             eval {
                 build_target($target);
@@ -3017,11 +3038,14 @@ sub cmd_build {
             if ($@) {
                 print "✗ Build failed: $target\n";
                 print STDERR $@;
+                reprompt();
                 last;
             } else {
                 print "✓ Build succeeded: $target\n";
+                reprompt();
             }
         }
+        $SmakCli::jobs_running = 0;
     }
 }
 

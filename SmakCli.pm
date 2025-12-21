@@ -119,6 +119,11 @@ sub redraw_line {
 }
 
 our $cancel_requested = 0;
+our $reprompt_requested = 0;
+our $jobs_running = 0;
+our $current_buffer = '';
+our $current_pos = 0;
+our $current_prompt = '';
 
 sub readline {
     my ($self) = @_;
@@ -137,6 +142,13 @@ sub readline {
     print $self->{prompt};
     STDOUT->flush();
 
+    # Set up SIGWINCH handler for reprompt
+    my $winch_handler = sub {
+        # Redraw on SIGWINCH
+        $reprompt_requested = 1;
+    };
+    local $SIG{WINCH} = $winch_handler;
+
     # Set up select for multiplexing stdin and socket
     my $select = IO::Select->new();
     $select->add(\*STDIN);
@@ -148,6 +160,11 @@ sub readline {
 
     # eval {
         while (1) {
+            # Update globals for reprompt()
+            $current_buffer = $buffer;
+            $current_pos = $pos;
+            $current_prompt = $self->{prompt};
+
             # Check for async notifications
             if ($self->{check_notifications}) {
                 my $had_notification = $self->{check_notifications}->($buffer, $pos);
@@ -160,8 +177,14 @@ sub readline {
                 }
             }
 
+            # Check for reprompt request
+            if ($reprompt_requested) {
+                $reprompt_requested = 0;
+                $self->redraw_line($buffer, $pos);
+            }
+
             # Wait for input with timeout (for periodic notification checks)
-            my @ready = $select->can_read(0.1);
+            my @ready = $select->can_read(0.2);
 
             # Check if stdin has data
             my $stdin_ready = 0;

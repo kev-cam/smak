@@ -131,6 +131,7 @@ our $remote_cd = '';  # Remote directory for SSH workers
 our $job_server_socket;  # Socket to job-master
 our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
+our $busy = 0;  # Set when a build is in progress
 
 sub set_report_mode {
     my ($enabled, $fh) = @_;
@@ -2753,6 +2754,9 @@ sub unified_cli {
 sub reprompt()
 {
     # Send SIGWINCH to wake up readline and trigger redraw
+    # Only if we're not busy with a build
+    return if $busy;
+
     my $pid = $SmakCli::cli_owner;
     if ($pid >= 0) {
         kill 'WINCH', $pid;
@@ -2982,8 +2986,6 @@ Examples:
   restart 8           Restart workers with 8 workers
 HELP
 }
-
-our $busy = 0;
 
 sub enable_cli {
     my ($yes) = @_;

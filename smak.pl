@@ -573,8 +573,9 @@ if ($cli) {
     
     # Enter unified CLI
     my $quiet=0;
+    my $result;
     while (1) {
-	my $result = Smak::unified_cli(
+	$result = Smak::unified_cli(
 	    socket => $Smak::job_server_socket,
 	    server_pid => $Smak::job_server_pid,
 	    mode => 'standalone',
@@ -603,7 +604,7 @@ if ($cli) {
     $SmakCli::cli_owner = -1;
     
     # Stop job server if we own it
-    if ($own_server) {
+    if ($own_server && "stop" eq $result) {
         stop_job_server();
     }
     exit 0;

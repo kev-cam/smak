@@ -2543,6 +2543,7 @@ sub unified_cli {
     my $quiet = $opts{opts} || 1;
 
     my $prompt = $opts{prompt} || 'smak> ';
+    my $ret = "detach";
 
     # Track state
     my $watch_enabled = 0;
@@ -2730,32 +2731,39 @@ sub unified_cli {
     $interactive = 0;
 
     # Cleanup on exit
-    if ($exit_requested) {
+    if ($detached) {
+        # Detach was requested (explicit detach command only, not Ctrl-C)
+        $SmakCli::cli_owner = -1;  # Mark CLI as unowned
+        if ($own_server) {
+            print "Detaching from CLI (job server $Smak::job_server_pid still running)...\n";
+        } else {
+            print "Detaching from job server...\n";
+        }
+    }
+    elsif ($exit_requested) {
         # Always shut down the server when quitting (even when attached)
         if ($socket) {
             print "Shutting down job server...\n";
             print $socket "SHUTDOWN\n";
             my $ack = <$socket>;
         }
-    } elsif ($detached) {
-        # Detach was requested (explicit detach command only, not Ctrl-C)
-        $SmakCli::cli_owner = -1;  # Mark CLI as unowned
-        if ($own_server) {
-            print "Detaching from CLI (job server still running)...\n";
-        } else {
-            print "Detaching from job server...\n";
-        }
+	$ret = "stop";
     }
 
-    return $exit_requested ? 'stop' : 'detach';
+    return $ret;
 }
+
+our $busy = 0; # more to do, not just waiting.
+our $rp_pending = 0;
 
 sub reprompt()
 {
     # Send SIGWINCH to wake up readline and trigger redraw
-    my $pid = $SmakCli::cli_owner;
-    if ($pid >= 0) {
-        kill 'WINCH', $pid;
+    if ($busy) {
+	$rp_pending++;
+    } else {
+	my $pid = $SmakCli::cli_owner;
+	kill 'WINCH', $pid if ($pid >= 0);	
     }
 }
 
@@ -2983,8 +2991,6 @@ Examples:
 HELP
 }
 
-our $busy = 0;
-
 sub enable_cli {
     my ($yes) = @_;
     $SmakCli::enabled = $yes && ! $busy; 
@@ -2994,6 +3000,8 @@ sub enable_cli {
 
 sub cmd_build {
     my ($words, $socket, $opts, $state) = @_;
+    
+    $busy = 1;
 
     my @targets = @$words;
     if (@targets == 0) {
@@ -3007,9 +3015,6 @@ sub cmd_build {
             return;
         }
     }
-
-    enable_cli(0);
-    $busy = 1;
 
     if ($socket) {
         # Job server mode - submit jobs and wait for results
@@ -3072,7 +3077,9 @@ sub cmd_build {
     }
 
     $busy = 0;
-    enable_cli(1);
+    if ($rp_pending) {
+	reprompt();
+    }
 }
 
 sub cmd_rebuild {

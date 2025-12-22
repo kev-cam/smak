@@ -3009,7 +3009,8 @@ sub cmd_build {
     }
 
     enable_cli(0);
-    
+    $busy = 1;
+
     if ($socket) {
         # Job server mode - submit jobs and wait for results
         my $exit_req = ${$state->{exit_requested}};
@@ -3069,7 +3070,8 @@ sub cmd_build {
             }
         }
     }
-    
+
+    $busy = 0;
     enable_cli(1);
 }
 

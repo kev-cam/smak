@@ -132,6 +132,9 @@ our $job_server_socket;  # Socket to job-master
 our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
 
+# Output control
+our $stomp_prompt = "\r";
+
 sub set_report_mode {
     my ($enabled, $fh) = @_;
     $report_mode = $enabled;
@@ -5263,7 +5266,7 @@ sub run_job_master {
             vprint "Dispatched task $task_id to worker\n";
 
 	    if (! $silent_mode) {
-		print "$job->{command}\n";
+		print $stomp_prompt,"$job->{command}\n";
 	    }
 	    
             broadcast_observers("DISPATCHED $task_id $job->{target}");
@@ -6120,7 +6123,7 @@ sub run_job_master {
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
                     # Always print to stdout (job master's stdout is inherited from parent)
-                    print "$output\n";
+                    print $stomp_prompt,"$output\n";
                     # Also forward to attached clients if any
                     print $master_socket "OUTPUT $output\n" if $master_socket;
 

@@ -106,8 +106,11 @@ sub save_history {
     close($fh);
 }
 
+our $self;
+our $buffer;
+our $pos;
+
 sub redraw_line {
-    my ($self, $buffer, $pos) = @_;
 
     # Move to start of line, clear it, print prompt and buffer
     print "\r\033[K";  # CR + clear to end of line
@@ -116,17 +119,20 @@ sub redraw_line {
     # Move cursor to correct position
     my $cursor_pos = length($self->{prompt}) + $pos;
     print "\r\033[", $cursor_pos + 1, "G";  # Move to column (1-based)
+    STDOUT->flush();
 }
 
 our $cancel_requested = 0;
 our $reprompt_requested = 0;
 our $cli_owner = -1;
+our $enabled = 1;
 our $current_buffer = '';
 our $current_pos = 0;
 our $current_prompt = '';
 
 our @EXPORT_OK = qw(
     cli_owner
+    enabled 
     new
 );
 
@@ -135,16 +141,17 @@ our %EXPORT_TAGS = (
 );
 
 sub winch_handler {
-    if ($cli_owner == $$) {
+    if ($enabled && $cli_owner == $$) {
 	# Redraw on SIGWINCH
+	$self->{redraw_line};
     }
 };
 
 sub readline {
-    my ($self) = @_;
+    ($self) = @_;
 
-    my $buffer = '';
-    my $pos = 0;  # Cursor position in buffer
+    $buffer = '';
+    $pos = 0;  # Cursor position in buffer
     
     # Reset history position
     $self->{history_pos} = @{$self->{history}};
@@ -181,7 +188,7 @@ sub readline {
             if ($self->{check_notifications}) {
                 my $had_notification = $self->{check_notifications}->($buffer, $pos);
                 if ($had_notification) {
-                    $self->redraw_line($buffer, $pos);
+                    redraw_line();
 		    if (-2 == $had_notification ) {
 			$result = undef;
 			last;
@@ -192,7 +199,7 @@ sub readline {
             # Check for reprompt request
             if ($reprompt_requested) {
                 $reprompt_requested = 0;
-                $self->redraw_line($buffer, $pos);
+                redraw_line();
             }
 
             # Wait for input with timeout (for periodic notification checks)
@@ -233,7 +240,7 @@ sub readline {
                 kill('TSTP', $$);
                 # Will resume here when fg'd
                 $self->set_raw_mode();
-                $self->redraw_line($buffer, $pos);
+                redraw_line();
             }
             elsif ($ord == 13 || $ord == 10) {  # Enter
                 print "\n";
@@ -244,7 +251,7 @@ sub readline {
                 if ($pos > 0) {
                     substr($buffer, $pos - 1, 1) = '';
                     $pos--;
-                    $self->redraw_line($buffer, $pos);
+                    redraw_line();
                 }
             }
             elsif ($ord == 27) {  # Escape sequence (arrow keys, etc.)
@@ -269,7 +276,7 @@ sub readline {
                             $self->{history_pos}--;
                             $buffer = $self->{history}[$self->{history_pos}];
                             $pos = length($buffer);
-                            $self->redraw_line($buffer, $pos);
+                            redraw_line();
                         }
                     }
                     elsif ($code == 66) {  # Down arrow
@@ -281,7 +288,7 @@ sub readline {
                                 $buffer = $self->{history}[$self->{history_pos}];
                             }
                             $pos = length($buffer);
-                            $self->redraw_line($buffer, $pos);
+                            redraw_line();
                         }
                     }
                     elsif ($code == 67) {  # Right arrow
@@ -331,7 +338,7 @@ sub readline {
                     $completion .= '/' if -d $completion;
                     substr($buffer, $word_start, $pos - $word_start) = $completion;
                     $pos = $word_start + length($completion);
-                    $self->redraw_line($buffer, $pos);
+                    redraw_line();
                 } else {
                     # Multiple matches - find common prefix
                     my $common = $matches[0];
@@ -350,7 +357,7 @@ sub readline {
                         # Replace with common prefix
                         substr($buffer, $word_start, $pos - $word_start) = $common;
                         $pos = $word_start + length($common);
-                        $self->redraw_line($buffer, $pos);
+                        redraw_line();
                     } else {
                         # Show all matches
                         print "\n";
@@ -369,14 +376,14 @@ sub readline {
                             print "\n" if (($i + 1) % $num_cols == 0);
                         }
                         print "\n" if (@matches % $num_cols != 0);
-                        $self->redraw_line($buffer, $pos);
+                        redraw_line();
                     }
                 }
             }
             elsif ($ord >= 32 && $ord < 127) {  # Printable character
                 substr($buffer, $pos, 0) = $char;
                 $pos++;
-                $self->redraw_line($buffer, $pos);
+                redraw_line();
             }
 
             STDOUT->flush();

@@ -2557,6 +2557,9 @@ sub unified_cli {
 	print "\n";
     }
 
+    $ENV{SMAK_CLI_PID} = $SmakCli::cli_owner;
+    $ENV{SMAK_PID}     = $$;
+    
     # Helper: check for asynchronous notifications and job output
     my %recent_file_notifications;  # Track recent file notifications to avoid spam
     my $check_notifications = sub {
@@ -2980,6 +2983,13 @@ Examples:
 HELP
 }
 
+our $busy = 0;
+
+sub enable_cli {
+    my ($yes) = @_;
+    $SmakCli::enabled = $yes && ! $busy; 
+}
+
 # Command handlers - work in both standalone and attached modes
 
 sub cmd_build {
@@ -2998,10 +3008,11 @@ sub cmd_build {
         }
     }
 
+    enable_cli(0);
+    
     if ($socket) {
         # Job server mode - submit jobs and wait for results
         my $exit_req = ${$state->{exit_requested}};
-        $SmakCli::jobs_running = 1;
         for my $target (@targets) {
             print $socket "SUBMIT_JOB\n";
             print $socket "$target\n";
@@ -3040,11 +3051,9 @@ sub cmd_build {
 
             last if $exit_req;
         }
-        $SmakCli::jobs_running = 0;
     } else {
         # No job server - build sequentially
         print "(Building in sequential mode - use 'start' for parallel builds)\n";
-        $SmakCli::jobs_running = 1;
         for my $target (@targets) {
             eval {
                 build_target($target);
@@ -3059,8 +3068,9 @@ sub cmd_build {
                 reprompt();
             }
         }
-        $SmakCli::jobs_running = 0;
     }
+    
+    enable_cli(1);
 }
 
 sub cmd_rebuild {
@@ -4901,6 +4911,7 @@ sub run_job_master {
                     $in_progress{$target} = "failed";
                     $failed_targets{$target} = $failed_targets{$failed_deps[0]};
                     print STDERR "Composite target '$target' FAILED due to failed dependency '$failed_deps[0]'\n";
+		    reprompt();
                 } else {
                     my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
                     if (@pending_deps) {
@@ -5265,6 +5276,7 @@ sub run_job_master {
     # Main event loop
     my $last_consistency_check = time();
     my $jobs_received = 0;  # Track if we've received any job submissions
+
     while (1) {
         # Check if all work is complete AND master has disconnected
         # (In interactive mode, stay running even when idle)

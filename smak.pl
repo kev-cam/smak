@@ -569,6 +569,8 @@ if ($cli) {
     }
     print "\n";
 
+    $SmakCli::cli_owner = $$;
+    
     # Enter unified CLI
     my $quiet=0;
     while (1) {
@@ -598,6 +600,8 @@ if ($cli) {
 	last;
     }
 
+    $SmakCli::cli_owner = -1;
+    
     # Stop job server if we own it
     if ($own_server) {
         stop_job_server();

@@ -115,6 +115,11 @@ our %stale_targets_cache;
 # Files to ignore for dependency checking
 our %ignored_files;
 
+# Directories to ignore for dependency checking (from SMAK_IGNORE_DIRS env var)
+# These are system directories we know won't change during builds
+our @ignore_dirs;
+our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
+
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
 our $prompt = "smak> ";  # Prompt string for interactive mode
@@ -1241,15 +1246,51 @@ sub parse_included_makefile {
     close($fh);
     $makefile = $saved_makefile;
 
-    # Detect inactive patterns once after parsing the main makefile
+    # Initialize optimizations once after parsing the main makefile
     # (not for included makefiles)
     if (!defined $saved_makefile && !%inactive_patterns) {
+        init_ignore_dirs();
         detect_inactive_patterns();
     }
 }
 
 sub get_default_target {
     return $default_target;
+}
+
+# Initialize ignored directories from SMAK_IGNORE_DIRS environment variable
+# Format: colon-separated list like "/usr/include:/usr/local/include"
+sub init_ignore_dirs {
+    return if @ignore_dirs;  # Already initialized
+
+    if ($ENV{SMAK_IGNORE_DIRS}) {
+        @ignore_dirs = split(':', $ENV{SMAK_IGNORE_DIRS});
+
+        # Cache directory mtimes for efficient checking
+        for my $dir (@ignore_dirs) {
+            if (-d $dir) {
+                $ignore_dir_mtimes{$dir} = (stat($dir))[9];
+                warn "DEBUG: Ignoring directory '$dir' (mtime=" . $ignore_dir_mtimes{$dir} . ")\n" if $ENV{SMAK_DEBUG};
+            } else {
+                warn "WARNING: SMAK_IGNORE_DIRS contains non-existent directory: $dir\n";
+            }
+        }
+    }
+}
+
+# Check if a file is under an ignored directory
+# Returns the ignored directory path if found, undef otherwise
+sub is_ignored_dir {
+    my ($file) = @_;
+
+    for my $dir (@ignore_dirs) {
+        # Check if file is under this directory
+        if ($file =~ m{^\Q$dir\E(/|$)}) {
+            return $dir;
+        }
+    }
+
+    return undef;
 }
 
 # Detect which implicit rule patterns are inactive (don't exist in the project)
@@ -1315,6 +1356,12 @@ sub resolve_vpath {
     # This avoids unnecessary vpath resolution and debug spam for patterns that don't exist
     if (is_inactive_pattern($file)) {
         return $file;  # Return as-is without vpath resolution
+    }
+
+    # Skip files in ignored directories (e.g., /usr/include, /usr/local/include)
+    # These are system directories that won't change, so no need for vpath resolution
+    if (is_ignored_dir($file)) {
+        return $file;  # Return as-is, system files don't need vpath resolution
     }
 
     # Check if file exists in current directory first
@@ -1973,6 +2020,23 @@ sub build_target {
     my $visit_key = "$makefile\t$target";
     return if $visited->{$visit_key};
     $visited->{$visit_key} = 1;
+
+    # Early exit for files in ignored directories (e.g., /usr/include, /usr/local/include)
+    # Check entire directories instead of individual files for efficiency
+    if (my $ignored_dir = is_ignored_dir($target)) {
+        # Check if the directory itself has been modified
+        if (exists $ignore_dir_mtimes{$ignored_dir}) {
+            my $current_mtime = (stat($ignored_dir))[9];
+            if ($current_mtime == $ignore_dir_mtimes{$ignored_dir}) {
+                # Directory unchanged, skip this file entirely
+                return;
+            } else {
+                # Directory changed - update cache and continue processing
+                warn "WARNING: Ignored directory '$ignored_dir' has changed (rebuilding dependencies)\n";
+                $ignore_dir_mtimes{$ignored_dir} = $current_mtime;
+            }
+        }
+    }
 
     # Early exit for system headers and external dependencies
     # If a file exists on disk, is an absolute path (system header), and has no explicit rule,

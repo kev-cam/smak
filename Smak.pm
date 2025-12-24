@@ -123,6 +123,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
+our $CACHE_VERSION = 2;  # Increment to invalidate old caches
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -781,6 +782,15 @@ sub parse_makefile {
     # Try to load from cache if available and valid
     if (load_state_cache($makefile_path)) {
         warn "DEBUG: Using cached state, skipping parse\n" if $ENV{SMAK_DEBUG};
+
+        # Ensure inactive patterns are detected even if cache didn't have them
+        # (handles old caches created before this feature)
+        if (!%inactive_patterns) {
+            warn "DEBUG: Cache missing inactive patterns, detecting now\n" if $ENV{SMAK_DEBUG};
+            init_ignore_dirs();
+            detect_inactive_patterns();
+        }
+
         return;  # Cache loaded successfully, skip parsing
     }
 
@@ -1439,6 +1449,10 @@ sub save_state_cache {
     print $fh "# Smak state cache generated " . localtime() . "\n";
     print $fh "# DO NOT EDIT - automatically generated\n\n";
 
+    # Save cache version for invalidation
+    print $fh "# Cache version\n";
+    print $fh "\$Smak::_cache_version = $CACHE_VERSION;\n\n";
+
     # Save file mtimes for validation
     print $fh "# File mtimes for cache validation\n";
     print $fh "\%Smak::parsed_file_mtimes = (\n";
@@ -1509,6 +1523,13 @@ sub load_state_cache {
         } elsif ($!) {
             warn "WARNING: Cannot read cache file: $!\n" if $ENV{SMAK_DEBUG};
         }
+        return 0;
+    }
+
+    # Check cache version
+    our $_cache_version;
+    if (!defined $_cache_version || $_cache_version != $CACHE_VERSION) {
+        warn "DEBUG: Cache invalid - version mismatch (cache=$_cache_version, current=$CACHE_VERSION)\n" if $ENV{SMAK_DEBUG};
         return 0;
     }
 

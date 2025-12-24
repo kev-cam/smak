@@ -3210,6 +3210,16 @@ sub reprompt()
     }
 }
 
+sub esc_expr {
+    my ($x) = @_;
+
+    if ($x =~ /\".*\"/) { # double quote for eval
+	$x = "'$x'";
+    }
+
+    return $x;
+}
+
 # Command dispatcher
 sub dispatch_command {
     my ($cmd, $words, $opts, $state) = @_;
@@ -3292,7 +3302,11 @@ sub dispatch_command {
 
     } elsif ($cmd eq 'eval') {
         # Evaluate Perl expression
-        my $expr = join(' ', @$words);
+        my $expr = "";
+	my $punc = "";
+	foreach my $x (@$words) {
+	    $expr .= $punc.esc_expr($x); $punc=" ";
+	}
         my $result = eval $expr;
         if ($@) {
             print "Error: $@\n";

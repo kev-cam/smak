@@ -1249,7 +1249,7 @@ sub resolve_vpath {
     # Check if file exists in current directory first
     my $file_path = $file =~ m{^/} ? $file : "$dir/$file";
     if (-e $file_path) {
-        print STDERR "DEBUG vpath: '$file' found in current directory\n" if $ENV{SMAK_DEBUG};
+        # File found in current directory (common case, no debug needed)
         return $file;
     }
 
@@ -2766,7 +2766,7 @@ sub reprompt()
 	$rp_pending++;
     } else {
 	my $pid = $SmakCli::cli_owner;
-	kill 'WINCH', $pid if ($pid >= 0);	
+	kill 'WINCH', $pid if ($pid >= 0);
     }
 }
 

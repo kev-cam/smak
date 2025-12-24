@@ -95,6 +95,12 @@ our %vpath;
 # Maps pattern names to boolean (1 = inactive, skip processing)
 our %inactive_patterns;
 
+# Source control file extensions/suffixes to always ignore
+# These should never be built as targets (prevents infinite recursion)
+our %source_control_extensions = (
+    ',v' => 1,      # RCS files
+);
+
 our @job_queue;
 
 # Hash for Makefile variables
@@ -2245,6 +2251,15 @@ sub build_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
     $depth ||= 0;
+
+    # FIRST: Skip source control files entirely (prevents infinite recursion)
+    # Check for ,v suffix (RCS) or other source control patterns
+    for my $ext (keys %source_control_extensions) {
+        if ($target =~ /\Q$ext\E/) {
+            warn "DEBUG: Skipping source control file '$target' (contains $ext)\n" if $ENV{SMAK_DEBUG};
+            return;
+        }
+    }
 
     # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
     # This prevents infinite loops and wasted processing for patterns that don't exist

@@ -91,6 +91,10 @@ our %pseudo_deps;
 # VPATH search directories: pattern => [directories]
 our %vpath;
 
+# Inactive implicit rule patterns - dynamically detected
+# Maps pattern names to boolean (1 = inactive, skip processing)
+our %inactive_patterns;
+
 our @job_queue;
 
 # Hash for Makefile variables
@@ -110,6 +114,15 @@ our %stale_targets_cache;
 
 # Files to ignore for dependency checking
 our %ignored_files;
+
+# Directories to ignore for dependency checking (from SMAK_IGNORE_DIRS env var)
+# These are system directories we know won't change during builds
+our @ignore_dirs;
+our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
+
+# State caching variables
+our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
+our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -765,6 +778,12 @@ sub parse_makefile {
     $makefile = $makefile_path;
     undef $default_target;
 
+    # Try to load from cache if available and valid
+    if (load_state_cache($makefile_path)) {
+        warn "DEBUG: Using cached state, skipping parse\n" if $ENV{SMAK_DEBUG};
+        return;  # Cache loaded successfully, skip parsing
+    }
+
     # Reset state
     %fixed_rule = ();
     %fixed_deps = ();
@@ -774,6 +793,7 @@ sub parse_makefile {
     %pseudo_deps = ();
     %MV = ();
     @modifications = ();
+    %parsed_file_mtimes = ();
 
     # Set default built-in make variables
     # Use the actual invocation command for recursive makes
@@ -805,6 +825,11 @@ sub parse_makefile {
     $MV{CURDIR} = getcwd();
 
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
+
+    # Track file mtime for cache validation
+    use Cwd 'abs_path';
+    my $abs_makefile = abs_path($makefile) || $makefile;
+    $parsed_file_mtimes{$abs_makefile} = (stat($makefile))[9];
 
     my @current_targets;  # Array to handle multiple targets (e.g., "target1 target2:")
     my $current_rule = '';
@@ -1236,15 +1261,323 @@ sub parse_included_makefile {
 
     close($fh);
     $makefile = $saved_makefile;
+
+    # Initialize optimizations once (first time any makefile is parsed)
+    if (!%inactive_patterns) {
+        init_ignore_dirs();
+        detect_inactive_patterns();
+    }
+
+    # Save state to cache for faster startup next time
+    save_state_cache($makefile);
 }
 
 sub get_default_target {
     return $default_target;
 }
 
+# Initialize ignored directories from SMAK_IGNORE_DIRS environment variable
+# Format: colon-separated list like "/usr/include:/usr/local/include"
+sub init_ignore_dirs {
+    return if @ignore_dirs;  # Already initialized
+
+    if ($ENV{SMAK_IGNORE_DIRS}) {
+        @ignore_dirs = split(':', $ENV{SMAK_IGNORE_DIRS});
+
+        # Cache directory mtimes for efficient checking
+        for my $dir (@ignore_dirs) {
+            if (-d $dir) {
+                $ignore_dir_mtimes{$dir} = (stat($dir))[9];
+                warn "DEBUG: Ignoring directory '$dir' (mtime=" . $ignore_dir_mtimes{$dir} . ")\n" if $ENV{SMAK_DEBUG};
+            } else {
+                warn "WARNING: SMAK_IGNORE_DIRS contains non-existent directory: $dir\n";
+            }
+        }
+    }
+}
+
+# Check if a file is under an ignored directory
+# Returns the ignored directory path if found, undef otherwise
+sub is_ignored_dir {
+    my ($file) = @_;
+
+    for my $dir (@ignore_dirs) {
+        # Check if file is under this directory
+        if ($file =~ m{^\Q$dir\E(/|$)}) {
+            return $dir;
+        }
+    }
+
+    return undef;
+}
+
+# Detect which implicit rule patterns are inactive (don't exist in the project)
+# This is called once at startup to optimize away unnecessary pattern checks
+sub detect_inactive_patterns {
+    # Check for RCS version control files
+    # Quick heuristic: if no RCS directory exists in common locations, mark as inactive
+    my $has_rcs = 0;
+    if (-d "RCS" || -d "src/RCS" || -d "../RCS") {
+        $has_rcs = 1;
+    } else {
+        # Also check if any ,v files exist in current directory
+        my @rcs_files = glob("*,v");  # Note: comma before v, not dot
+        $has_rcs = 1 if @rcs_files;
+    }
+
+    if (!$has_rcs) {
+        $inactive_patterns{'RCS'} = 1;
+        warn "DEBUG: RCS patterns marked inactive (no RCS files detected)\n" if $ENV{SMAK_DEBUG};
+    } else {
+        warn "DEBUG: RCS files detected in project, keeping RCS patterns active\n" if $ENV{SMAK_DEBUG};
+    }
+
+    # Check for SCCS version control files
+    my $has_sccs = 0;
+    if (-d "SCCS" || -d "src/SCCS" || -d "../SCCS") {
+        $has_sccs = 1;
+    } else {
+        # Also check if any s.* files exist in current directory
+        my @sccs_files = glob("s.*");
+        $has_sccs = 1 if @sccs_files;
+    }
+
+    if (!$has_sccs) {
+        $inactive_patterns{'SCCS'} = 1;
+        warn "DEBUG: SCCS patterns marked inactive (no SCCS files detected)\n" if $ENV{SMAK_DEBUG};
+    } else {
+        warn "DEBUG: SCCS files detected in project, keeping SCCS patterns active\n" if $ENV{SMAK_DEBUG};
+    }
+}
+
+# Check if a file matches inactive implicit rule patterns
+# Returns 1 if the file should be skipped (inactive pattern), 0 otherwise
+sub is_inactive_pattern {
+    my ($file) = @_;
+
+    # Debug: show what we're checking and what patterns are inactive
+    if ($ENV{SMAK_DEBUG} && ($file =~ /RCS/ || $file =~ /SCCS/ || $file =~ /,v/ || $file =~ /^s\./)) {
+        my $rcs_inactive = $inactive_patterns{'RCS'} || 0;
+        my $sccs_inactive = $inactive_patterns{'SCCS'} || 0;
+        warn "DEBUG is_inactive_pattern: checking '$file' (RCS=$rcs_inactive, SCCS=$sccs_inactive)\n";
+    }
+
+    # Check RCS patterns if inactive
+    if ($inactive_patterns{'RCS'}) {
+        return 1 if $file =~ m{(?:^|/)RCS/};  # RCS/ directory anywhere in path
+        return 1 if $file =~ /,v+$/;           # ,v suffix (possibly repeated)
+        return 1 if $file =~ /,v,/;            # Multiple ,v suffixes (recursive pattern)
+    }
+
+    # Check SCCS patterns if inactive
+    if ($inactive_patterns{'SCCS'}) {
+        return 1 if $file =~ m{(?:^|/)SCCS/};  # SCCS/ directory anywhere in path
+        return 1 if $file =~ m{(?:^|/)s\.};    # s.* prefix (anywhere after /)
+    }
+
+    return 0;
+}
+
+# Get cache directory for current project
+# Returns undef if caching is disabled
+sub get_cache_dir {
+    use Cwd 'abs_path';
+    use File::Basename;
+
+    # Check if caching is enabled (automatic in debug mode, or via SMAK_CACHE_DIR)
+    return undef unless ($ENV{SMAK_DEBUG} || $ENV{SMAK_CACHE_DIR});
+
+    # Determine cache directory
+    if ($ENV{SMAK_CACHE_DIR}) {
+        return $ENV{SMAK_CACHE_DIR};
+    }
+
+    # Default: /tmp/<user>/smak/<project>/
+    my $user = $ENV{USER} || $ENV{USERNAME} || 'unknown';
+    my $cwd = Cwd::getcwd();
+    my $proj_name = basename($cwd);
+
+    return "/tmp/$user/smak/$proj_name";
+}
+
+# Get path to cache file for given makefile
+sub get_cache_file {
+    my ($makefile_path) = @_;
+
+    my $dir = get_cache_dir();
+    return undef unless $dir;
+
+    # Create cache directory if it doesn't exist
+    unless (-d $dir) {
+        use File::Path qw(make_path);
+        make_path($dir) or do {
+            warn "WARNING: Cannot create cache directory '$dir': $!\n";
+            return undef;
+        };
+    }
+
+    # Use makefile basename for cache file (simple approach)
+    my $cache_file = "$dir/state.cache";
+    return $cache_file;
+}
+
+# Save current state to cache file
+sub save_state_cache {
+    my ($makefile_path) = @_;
+
+    my $cache_file = get_cache_file($makefile_path);
+    return unless $cache_file;
+
+    warn "DEBUG: Saving state to '$cache_file'\n" if $ENV{SMAK_DEBUG};
+
+    open(my $fh, '>', $cache_file) or do {
+        warn "WARNING: Cannot write cache file '$cache_file': $!\n";
+        return;
+    };
+
+    # Write Perl code to restore state
+    print $fh "# Smak state cache generated " . localtime() . "\n";
+    print $fh "# DO NOT EDIT - automatically generated\n\n";
+
+    # Save file mtimes for validation
+    print $fh "# File mtimes for cache validation\n";
+    print $fh "\%Smak::parsed_file_mtimes = (\n";
+    for my $file (sort keys %parsed_file_mtimes) {
+        my $mtime = $parsed_file_mtimes{$file};
+        print $fh "    " . _quote_string($file) . " => $mtime,\n";
+    }
+    print $fh ");\n\n";
+
+    # Save default target
+    if (defined $default_target) {
+        print $fh "\$Smak::default_target = " . _quote_string($default_target) . ";\n\n";
+    }
+
+    # Save MV hash
+    print $fh "# Makefile variables\n";
+    print $fh "\%Smak::MV = (\n";
+    for my $var (sort keys %MV) {
+        print $fh "    " . _quote_string($var) . " => " . _quote_string($MV{$var}) . ",\n";
+    }
+    print $fh ");\n\n";
+
+    # Save rules and dependencies
+    _save_hash($fh, "fixed_rule", \%fixed_rule);
+    _save_hash($fh, "fixed_deps", \%fixed_deps);
+    _save_hash($fh, "pattern_rule", \%pattern_rule);
+    _save_hash($fh, "pattern_deps", \%pattern_deps);
+    _save_hash($fh, "pseudo_rule", \%pseudo_rule);
+    _save_hash($fh, "pseudo_deps", \%pseudo_deps);
+
+    # Save vpath
+    print $fh "# VPATH directories\n";
+    print $fh "\%Smak::vpath = (\n";
+    for my $pattern (sort keys %vpath) {
+        my @dirs = @{$vpath{$pattern}};
+        print $fh "    " . _quote_string($pattern) . " => [" . join(", ", map { _quote_string($_) } @dirs) . "],\n";
+    }
+    print $fh ");\n\n";
+
+    # Save inactive patterns
+    print $fh "# Inactive patterns\n";
+    print $fh "\%Smak::inactive_patterns = (\n";
+    for my $pattern (sort keys %inactive_patterns) {
+        print $fh "    " . _quote_string($pattern) . " => " . $inactive_patterns{$pattern} . ",\n";
+    }
+    print $fh ");\n\n";
+
+    close($fh);
+    warn "DEBUG: State saved successfully\n" if $ENV{SMAK_DEBUG};
+}
+
+# Load state from cache file if valid
+# Returns 1 if loaded successfully, 0 otherwise
+sub load_state_cache {
+    my ($makefile_path) = @_;
+
+    my $cache_file = get_cache_file($makefile_path);
+    return 0 unless $cache_file;
+    return 0 unless -f $cache_file;
+
+    warn "DEBUG: Checking cache file '$cache_file'\n" if $ENV{SMAK_DEBUG};
+
+    # Load the cache file
+    my $result = do $cache_file;
+    unless (defined $result) {
+        if ($@) {
+            warn "WARNING: Error loading cache: $@\n" if $ENV{SMAK_DEBUG};
+        } elsif ($!) {
+            warn "WARNING: Cannot read cache file: $!\n" if $ENV{SMAK_DEBUG};
+        }
+        return 0;
+    }
+
+    # Validate cache - check if any makefile is newer than cache
+    my $cache_mtime = (stat($cache_file))[9];
+    for my $file (keys %parsed_file_mtimes) {
+        if (-f $file) {
+            my $file_mtime = (stat($file))[9];
+            if ($file_mtime != $parsed_file_mtimes{$file} || $file_mtime > $cache_mtime) {
+                warn "DEBUG: Cache invalid - '$file' has changed\n" if $ENV{SMAK_DEBUG};
+                return 0;
+            }
+        } else {
+            warn "DEBUG: Cache invalid - '$file' no longer exists\n" if $ENV{SMAK_DEBUG};
+            return 0;
+        }
+    }
+
+    warn "DEBUG: Cache loaded successfully\n" if $ENV{SMAK_DEBUG};
+    return 1;
+}
+
+# Helper: save a hash to cache file
+sub _save_hash {
+    my ($fh, $name, $hashref) = @_;
+
+    print $fh "# $name\n";
+    print $fh "\%Smak::$name = (\n";
+    for my $key (sort keys %$hashref) {
+        my $val = $hashref->{$key};
+        if (ref($val) eq 'ARRAY') {
+            print $fh "    " . _quote_string($key) . " => [" . join(", ", map { _quote_string($_) } @$val) . "],\n";
+        } else {
+            print $fh "    " . _quote_string($key) . " => " . _quote_string($val) . ",\n";
+        }
+    }
+    print $fh ");\n\n";
+}
+
+# Helper: quote a string for Perl code
+sub _quote_string {
+    my ($str) = @_;
+    return 'undef' unless defined $str;
+    $str =~ s/\\/\\\\/g;  # Escape backslashes
+    $str =~ s/'/\\'/g;    # Escape single quotes
+    return "'$str'";
+}
+
 # Resolve a file through vpath directories
 sub resolve_vpath {
     my ($file, $dir) = @_;
+
+    # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
+    # This avoids unnecessary vpath resolution and debug spam for patterns that don't exist
+    if (is_inactive_pattern($file)) {
+        warn "DEBUG vpath: Skipping inactive pattern file '$file'\n" if $ENV{SMAK_DEBUG};
+        return $file;  # Return as-is without vpath resolution
+    }
+
+    # Skip files in ignored directories (e.g., /usr/include, /usr/local/include)
+    # These are system directories that won't change, so no need for vpath resolution
+    if (is_ignored_dir($file)) {
+        return $file;  # Return as-is, system files don't need vpath resolution
+    }
+
+    # Early exit if no vpath patterns are defined - no point in checking
+    unless (keys %vpath) {
+        return $file;  # No vpath to search, return original
+    }
 
     # Check if file exists in current directory first
     my $file_path = $file =~ m{^/} ? $file : "$dir/$file";
@@ -1885,11 +2218,9 @@ sub build_target {
     $visited ||= {};
     $depth ||= 0;
 
-    # Skip RCS/SCCS implicit rule patterns (these create infinite loops)
-    # Make's built-in rules try: RCS/file,v, SCCS/s.file, etc.
-    if ($target =~ m{(?:^|/)(?:RCS|SCCS)/} ||
-        $target =~ /^s\./ ||
-        $target =~ /,v+$/) {
+    # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
+    # This prevents infinite loops and wasted processing for patterns that don't exist
+    if (is_inactive_pattern($target)) {
         return;
     }
 
@@ -1905,10 +2236,36 @@ sub build_target {
     return if $visited->{$visit_key};
     $visited->{$visit_key} = 1;
 
+    # Early exit for files in ignored directories (e.g., /usr/include, /usr/local/include)
+    # Check entire directories instead of individual files for efficiency
+    if (my $ignored_dir = is_ignored_dir($target)) {
+        # Check if the directory itself has been modified
+        if (exists $ignore_dir_mtimes{$ignored_dir}) {
+            my $current_mtime = (stat($ignored_dir))[9];
+            if ($current_mtime == $ignore_dir_mtimes{$ignored_dir}) {
+                # Directory unchanged, skip this file entirely
+                return;
+            } else {
+                # Directory changed - update cache and continue processing
+                warn "WARNING: Ignored directory '$ignored_dir' has changed (rebuilding dependencies)\n";
+                $ignore_dir_mtimes{$ignored_dir} = $current_mtime;
+            }
+        }
+    }
+
+    # Early exit for system headers and external dependencies
+    # If a file exists on disk, is an absolute path (system header), and has no explicit rule,
+    # skip all the expensive processing (pattern matching, variable expansion, etc.)
+    my $key = "$makefile\t$target";
+    if ($target =~ m{^/} && -e $target &&
+        !exists $fixed_deps{$key} && !exists $pattern_deps{$key} && !exists $pseudo_deps{$key}) {
+        warn "DEBUG[" . __LINE__ . "]: Skipping system dependency '$target' (exists, no rule)\n" if $ENV{SMAK_DEBUG};
+        return;
+    }
+
     # Debug: show what we're building
     warn "DEBUG[" . __LINE__ . "]: Building target '$target' (depth=$depth, makefile=$makefile)\n" if $ENV{SMAK_DEBUG};
 
-    my $key = "$makefile\t$target";
     my @deps;
     my $rule = '';
     my $stem = '';  # Track stem for $* automatic variable

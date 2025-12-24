@@ -1246,6 +1246,15 @@ sub get_default_target {
 sub resolve_vpath {
     my ($file, $dir) = @_;
 
+    # Skip RCS/SCCS implicit rule patterns (same as build_target)
+    # These are legacy version control patterns that Make checks automatically
+    # but don't exist in modern projects and just create noise
+    if ($file =~ m{(?:^|/)(?:RCS|SCCS)/} ||
+        $file =~ /^s\./ ||
+        $file =~ /,v+$/) {
+        return $file;  # Return as-is without vpath resolution or debug spam
+    }
+
     # Check if file exists in current directory first
     my $file_path = $file =~ m{^/} ? $file : "$dir/$file";
     if (-e $file_path) {

@@ -98,8 +98,26 @@ our %inactive_patterns;
 # Source control file extensions/suffixes to always ignore
 # These should never be built as targets (prevents infinite recursion)
 our %source_control_extensions = (
-    ',v' => 1,      # RCS files
+    ',v' => 1,      # RCS files (foo,v)
 );
+
+# Source control directory patterns that indicate recursion
+# Check for repeated directories like RCS/RCS/ or SCCS/SCCS/
+sub has_source_control_recursion {
+    my ($path) = @_;
+
+    # Check for repeated RCS/ directories
+    return 1 if $path =~ m{RCS/.*RCS/};
+
+    # Check for repeated SCCS/ directories
+    return 1 if $path =~ m{SCCS/.*SCCS/};
+
+    # Check for repeated s. prefix (SCCS recursion: s.s.foo)
+    return 1 if $path =~ m{/s\..*[/.]s\.};
+    return 1 if $path =~ m{^s\..*[/.]s\.};
+
+    return 0;
+}
 
 our @job_queue;
 
@@ -2259,6 +2277,12 @@ sub build_target {
             warn "DEBUG: Skipping source control file '$target' (contains $ext)\n" if $ENV{SMAK_DEBUG};
             return;
         }
+    }
+
+    # Check for source control directory recursion (RCS/RCS/, SCCS/SCCS/, s.s., etc.)
+    if (has_source_control_recursion($target)) {
+        warn "DEBUG: Skipping recursive source control path '$target'\n" if $ENV{SMAK_DEBUG};
+        return;
     }
 
     # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
@@ -5194,6 +5218,8 @@ sub run_job_master {
         my @filtered_deps;
         for my $dep (@deps) {
             my $skip = 0;
+
+            # Check for source control file extensions (,v)
             for my $ext (keys %source_control_extensions) {
                 if ($dep =~ /\Q$ext\E/) {
                     print STDERR "Filtering source control dependency: $dep (contains $ext)\n" if $ENV{SMAK_DEBUG};
@@ -5201,6 +5227,13 @@ sub run_job_master {
                     last;
                 }
             }
+
+            # Check for source control directory recursion (RCS/RCS/, SCCS/SCCS/, etc.)
+            if (!$skip && has_source_control_recursion($dep)) {
+                print STDERR "Filtering recursive source control dependency: $dep\n" if $ENV{SMAK_DEBUG};
+                $skip = 1;
+            }
+
             push @filtered_deps, $dep unless $skip;
         }
         @deps = @filtered_deps;

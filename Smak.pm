@@ -1905,10 +1905,19 @@ sub build_target {
     return if $visited->{$visit_key};
     $visited->{$visit_key} = 1;
 
+    # Early exit for system headers and external dependencies
+    # If a file exists on disk, is an absolute path (system header), and has no explicit rule,
+    # skip all the expensive processing (pattern matching, variable expansion, etc.)
+    my $key = "$makefile\t$target";
+    if ($target =~ m{^/} && -e $target &&
+        !exists $fixed_deps{$key} && !exists $pattern_deps{$key} && !exists $pseudo_deps{$key}) {
+        warn "DEBUG[" . __LINE__ . "]: Skipping system dependency '$target' (exists, no rule)\n" if $ENV{SMAK_DEBUG};
+        return;
+    }
+
     # Debug: show what we're building
     warn "DEBUG[" . __LINE__ . "]: Building target '$target' (depth=$depth, makefile=$makefile)\n" if $ENV{SMAK_DEBUG};
 
-    my $key = "$makefile\t$target";
     my @deps;
     my $rule = '';
     my $stem = '';  # Track stem for $* automatic variable

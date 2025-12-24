@@ -1337,6 +1337,13 @@ sub detect_inactive_patterns {
 sub is_inactive_pattern {
     my ($file) = @_;
 
+    # Debug: show what we're checking and what patterns are inactive
+    if ($ENV{SMAK_DEBUG} && ($file =~ /RCS/ || $file =~ /SCCS/ || $file =~ /,v/ || $file =~ /^s\./)) {
+        my $rcs_inactive = $inactive_patterns{'RCS'} || 0;
+        my $sccs_inactive = $inactive_patterns{'SCCS'} || 0;
+        warn "DEBUG is_inactive_pattern: checking '$file' (RCS=$rcs_inactive, SCCS=$sccs_inactive)\n";
+    }
+
     # Check RCS patterns if inactive
     if ($inactive_patterns{'RCS'}) {
         return 1 if $file =~ m{(?:^|/)RCS/};  # RCS/ directory anywhere in path
@@ -1360,6 +1367,7 @@ sub resolve_vpath {
     # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
     # This avoids unnecessary vpath resolution and debug spam for patterns that don't exist
     if (is_inactive_pattern($file)) {
+        warn "DEBUG vpath: Skipping inactive pattern file '$file'\n" if $ENV{SMAK_DEBUG};
         return $file;  # Return as-is without vpath resolution
     }
 
@@ -1367,6 +1375,11 @@ sub resolve_vpath {
     # These are system directories that won't change, so no need for vpath resolution
     if (is_ignored_dir($file)) {
         return $file;  # Return as-is, system files don't need vpath resolution
+    }
+
+    # Early exit if no vpath patterns are defined - no point in checking
+    unless (keys %vpath) {
+        return $file;  # No vpath to search, return original
     }
 
     # Check if file exists in current directory first

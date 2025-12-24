@@ -91,6 +91,10 @@ our %pseudo_deps;
 # VPATH search directories: pattern => [directories]
 our %vpath;
 
+# Inactive implicit rule patterns - dynamically detected
+# Maps pattern names to boolean (1 = inactive, skip processing)
+our %inactive_patterns;
+
 our @job_queue;
 
 # Hash for Makefile variables
@@ -1236,23 +1240,81 @@ sub parse_included_makefile {
 
     close($fh);
     $makefile = $saved_makefile;
+
+    # Detect inactive patterns once after parsing the main makefile
+    # (not for included makefiles)
+    if (!defined $saved_makefile && !%inactive_patterns) {
+        detect_inactive_patterns();
+    }
 }
 
 sub get_default_target {
     return $default_target;
 }
 
+# Detect which implicit rule patterns are inactive (don't exist in the project)
+# This is called once at startup to optimize away unnecessary pattern checks
+sub detect_inactive_patterns {
+    # Check for RCS version control files
+    # Quick heuristic: if no RCS directory exists in common locations, mark as inactive
+    my $has_rcs = 0;
+    if (-d "RCS" || -d "src/RCS" || -d "../RCS") {
+        $has_rcs = 1;
+    } else {
+        # Also check if any ,v files exist in current directory
+        my @rcs_files = glob("*.v");
+        $has_rcs = 1 if @rcs_files;
+    }
+
+    if (!$has_rcs) {
+        $inactive_patterns{'RCS'} = 1;
+        warn "DEBUG: RCS patterns marked inactive (no RCS files detected)\n" if $ENV{SMAK_DEBUG};
+    }
+
+    # Check for SCCS version control files
+    my $has_sccs = 0;
+    if (-d "SCCS" || -d "src/SCCS" || -d "../SCCS") {
+        $has_sccs = 1;
+    } else {
+        # Also check if any s.* files exist in current directory
+        my @sccs_files = glob("s.*");
+        $has_sccs = 1 if @sccs_files;
+    }
+
+    if (!$has_sccs) {
+        $inactive_patterns{'SCCS'} = 1;
+        warn "DEBUG: SCCS patterns marked inactive (no SCCS files detected)\n" if $ENV{SMAK_DEBUG};
+    }
+}
+
+# Check if a file matches inactive implicit rule patterns
+# Returns 1 if the file should be skipped (inactive pattern), 0 otherwise
+sub is_inactive_pattern {
+    my ($file) = @_;
+
+    # Check RCS patterns if inactive
+    if ($inactive_patterns{'RCS'}) {
+        return 1 if $file =~ m{(?:^|/)RCS/};  # RCS/ directory
+        return 1 if $file =~ /,v+$/;           # .v suffix
+    }
+
+    # Check SCCS patterns if inactive
+    if ($inactive_patterns{'SCCS'}) {
+        return 1 if $file =~ m{(?:^|/)SCCS/};  # SCCS/ directory
+        return 1 if $file =~ /^s\./;           # s.* prefix
+    }
+
+    return 0;
+}
+
 # Resolve a file through vpath directories
 sub resolve_vpath {
     my ($file, $dir) = @_;
 
-    # Skip RCS/SCCS implicit rule patterns (same as build_target)
-    # These are legacy version control patterns that Make checks automatically
-    # but don't exist in modern projects and just create noise
-    if ($file =~ m{(?:^|/)(?:RCS|SCCS)/} ||
-        $file =~ /^s\./ ||
-        $file =~ /,v+$/) {
-        return $file;  # Return as-is without vpath resolution or debug spam
+    # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
+    # This avoids unnecessary vpath resolution and debug spam for patterns that don't exist
+    if (is_inactive_pattern($file)) {
+        return $file;  # Return as-is without vpath resolution
     }
 
     # Check if file exists in current directory first
@@ -1894,11 +1956,9 @@ sub build_target {
     $visited ||= {};
     $depth ||= 0;
 
-    # Skip RCS/SCCS implicit rule patterns (these create infinite loops)
-    # Make's built-in rules try: RCS/file,v, SCCS/s.file, etc.
-    if ($target =~ m{(?:^|/)(?:RCS|SCCS)/} ||
-        $target =~ /^s\./ ||
-        $target =~ /,v+$/) {
+    # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
+    # This prevents infinite loops and wasted processing for patterns that don't exist
+    if (is_inactive_pattern($target)) {
         return;
     }
 

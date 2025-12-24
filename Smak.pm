@@ -1324,6 +1324,8 @@ sub is_ignored_dir {
 # Detect which implicit rule patterns are inactive (don't exist in the project)
 # This is called once at startup to optimize away unnecessary pattern checks
 sub detect_inactive_patterns {
+    warn "DEBUG: detect_inactive_patterns() called\n" if $ENV{SMAK_DEBUG};
+
     # Check for RCS version control files
     # Quick heuristic: if no RCS directory exists in common locations, mark as inactive
     my $has_rcs = 0;
@@ -1357,6 +1359,11 @@ sub detect_inactive_patterns {
         warn "DEBUG: SCCS patterns marked inactive (no SCCS files detected)\n" if $ENV{SMAK_DEBUG};
     } else {
         warn "DEBUG: SCCS files detected in project, keeping SCCS patterns active\n" if $ENV{SMAK_DEBUG};
+    }
+
+    # Debug: show final state
+    if ($ENV{SMAK_DEBUG}) {
+        warn "DEBUG: Inactive patterns after detection: " . join(", ", map { "$_=$inactive_patterns{$_}" } keys %inactive_patterns) . "\n";
     }
 }
 

@@ -95,6 +95,12 @@ our %vpath;
 # Maps pattern names to boolean (1 = inactive, skip processing)
 our %inactive_patterns;
 
+# Source control file extensions/suffixes to always ignore
+# These should never be built as targets (prevents infinite recursion)
+our %source_control_extensions = (
+    ',v' => 1,      # RCS files
+);
+
 our @job_queue;
 
 # Hash for Makefile variables
@@ -1324,6 +1330,8 @@ sub is_ignored_dir {
 # Detect which implicit rule patterns are inactive (don't exist in the project)
 # This is called once at startup to optimize away unnecessary pattern checks
 sub detect_inactive_patterns {
+    warn "DEBUG: detect_inactive_patterns() called\n" if $ENV{SMAK_DEBUG};
+
     # Check for RCS version control files
     # Quick heuristic: if no RCS directory exists in common locations, mark as inactive
     my $has_rcs = 0;
@@ -1357,6 +1365,11 @@ sub detect_inactive_patterns {
         warn "DEBUG: SCCS patterns marked inactive (no SCCS files detected)\n" if $ENV{SMAK_DEBUG};
     } else {
         warn "DEBUG: SCCS files detected in project, keeping SCCS patterns active\n" if $ENV{SMAK_DEBUG};
+    }
+
+    # Debug: show final state
+    if ($ENV{SMAK_DEBUG}) {
+        warn "DEBUG: Inactive patterns after detection: " . join(", ", map { "$_=$inactive_patterns{$_}" } keys %inactive_patterns) . "\n";
     }
 }
 
@@ -2238,6 +2251,15 @@ sub build_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
     $depth ||= 0;
+
+    # FIRST: Skip source control files entirely (prevents infinite recursion)
+    # Check for ,v suffix (RCS) or other source control patterns
+    for my $ext (keys %source_control_extensions) {
+        if ($target =~ /\Q$ext\E/) {
+            warn "DEBUG: Skipping source control file '$target' (contains $ext)\n" if $ENV{SMAK_DEBUG};
+            return;
+        }
+    }
 
     # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
     # This prevents infinite loops and wasted processing for patterns that don't exist
@@ -5167,6 +5189,21 @@ sub run_job_master {
             push @expanded_deps, $dep;
         }
         @deps = @expanded_deps;
+
+        # Filter out source control files from dependencies (prevents recursion)
+        my @filtered_deps;
+        for my $dep (@deps) {
+            my $skip = 0;
+            for my $ext (keys %source_control_extensions) {
+                if ($dep =~ /\Q$ext\E/) {
+                    print STDERR "Filtering source control dependency: $dep (contains $ext)\n" if $ENV{SMAK_DEBUG};
+                    $skip = 1;
+                    last;
+                }
+            }
+            push @filtered_deps, $dep unless $skip;
+        }
+        @deps = @filtered_deps;
 
         # For composite targets (no rule but has deps), register them BEFORE queuing dependencies
         # This ensures they can be failed if a dependency fails during recursive queuing

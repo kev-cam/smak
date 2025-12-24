@@ -36,8 +36,10 @@ our @jobservers;
 sub find_jobservers {
     my @jobservers;
 
-    # Scan /tmp for port files - this is the source of truth
-    my @port_files = glob("/tmp/smak-jobserver-*.port");
+    # Scan port file directory for port files - this is the source of truth
+    my $user = $ENV{USER} || $ENV{USERNAME} || 'unknown';
+    my $port_dir = "/tmp/$user/smak";
+    my @port_files = glob("$port_dir/smak-jobserver-*.port");
 
     for my $port_file (@port_files) {
         my ($pid) = $port_file =~ /smak-jobserver-(\d+)\.port/;

@@ -98,8 +98,26 @@ our %inactive_patterns;
 # Source control file extensions/suffixes to always ignore
 # These should never be built as targets (prevents infinite recursion)
 our %source_control_extensions = (
-    ',v' => 1,      # RCS files
+    ',v' => 1,      # RCS files (foo,v)
 );
+
+# Source control directory patterns that indicate recursion
+# Check for repeated directories like RCS/RCS/ or SCCS/SCCS/
+sub has_source_control_recursion {
+    my ($path) = @_;
+
+    # Check for repeated RCS/ directories
+    return 1 if $path =~ m{RCS/.*RCS/};
+
+    # Check for repeated SCCS/ directories
+    return 1 if $path =~ m{SCCS/.*SCCS/};
+
+    # Check for repeated s. prefix (SCCS recursion: s.s.foo)
+    return 1 if $path =~ m{/s\..*[/.]s\.};
+    return 1 if $path =~ m{^s\..*[/.]s\.};
+
+    return 0;
+}
 
 our @job_queue;
 
@@ -198,7 +216,8 @@ sub start_job_server {
     warn "Spawned job-master with PID $job_server_pid\n" if $ENV{SMAK_DEBUG};
 
     # Wait for job-master to create port file
-    my $port_file = "/tmp/smak-jobserver-$job_server_pid.port";
+    my $port_dir = get_port_file_dir();
+    my $port_file = "$port_dir/smak-jobserver-$job_server_pid.port";
     my $timeout = 10;
     my $start = time();
     while (! -f $port_file) {
@@ -1423,6 +1442,21 @@ sub get_cache_dir {
     return "/tmp/$user/smak/$proj_name";
 }
 
+# Get directory for job-server port files
+# Always returns a directory (used for all port files, not just when caching)
+sub get_port_file_dir {
+    my $user = $ENV{USER} || $ENV{USERNAME} || 'unknown';
+    my $dir = "/tmp/$user/smak";
+
+    # Create directory if it doesn't exist
+    unless (-d $dir) {
+        use File::Path qw(make_path);
+        make_path($dir) or warn "WARNING: Cannot create port file directory '$dir': $!\n";
+    }
+
+    return $dir;
+}
+
 # Get path to cache file for given makefile
 sub get_cache_file {
     my ($makefile_path) = @_;
@@ -2259,6 +2293,12 @@ sub build_target {
             warn "DEBUG: Skipping source control file '$target' (contains $ext)\n" if $ENV{SMAK_DEBUG};
             return;
         }
+    }
+
+    # Check for source control directory recursion (RCS/RCS/, SCCS/SCCS/, s.s., etc.)
+    if (has_source_control_recursion($target)) {
+        warn "DEBUG: Skipping recursive source control path '$target'\n" if $ENV{SMAK_DEBUG};
+        return;
     }
 
     # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
@@ -4724,7 +4764,8 @@ sub run_job_master {
     vprint "Job-master observer server on port $observer_port\n";
 
     # Write ports to file for smak-attach to find
-    open(my $port_fh, '>', "/tmp/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
+    my $port_dir = get_port_file_dir();
+    open(my $port_fh, '>', "$port_dir/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
     if ($port_fh) {
         print $port_fh "$observer_port\n";
         print $port_fh "$master_port\n";
@@ -5194,6 +5235,8 @@ sub run_job_master {
         my @filtered_deps;
         for my $dep (@deps) {
             my $skip = 0;
+
+            # Check for source control file extensions (,v)
             for my $ext (keys %source_control_extensions) {
                 if ($dep =~ /\Q$ext\E/) {
                     print STDERR "Filtering source control dependency: $dep (contains $ext)\n" if $ENV{SMAK_DEBUG};
@@ -5201,6 +5244,13 @@ sub run_job_master {
                     last;
                 }
             }
+
+            # Check for source control directory recursion (RCS/RCS/, SCCS/SCCS/, etc.)
+            if (!$skip && has_source_control_recursion($dep)) {
+                print STDERR "Filtering recursive source control dependency: $dep\n" if $ENV{SMAK_DEBUG};
+                $skip = 1;
+            }
+
             push @filtered_deps, $dep unless $skip;
         }
         @deps = @filtered_deps;

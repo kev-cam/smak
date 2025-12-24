@@ -1246,9 +1246,8 @@ sub parse_included_makefile {
     close($fh);
     $makefile = $saved_makefile;
 
-    # Initialize optimizations once after parsing the main makefile
-    # (not for included makefiles)
-    if (!defined $saved_makefile && !%inactive_patterns) {
+    # Initialize optimizations once (first time any makefile is parsed)
+    if (!%inactive_patterns) {
         init_ignore_dirs();
         detect_inactive_patterns();
     }

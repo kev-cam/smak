@@ -51,7 +51,8 @@ while [ 0 != $# ] ; do
 		 cd $1
 	         if [ 0 != $? ] ; then exit 1 ; fi
 		 shift ;;
-	-attach) script=${script}$1 ; shift ;;
+	-attach|-man)
+	         script=${script}$1 ; shift ;;
 	*)       break ;;
     esac
 done

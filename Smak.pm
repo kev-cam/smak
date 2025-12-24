@@ -878,6 +878,19 @@ sub parse_makefile {
             my $key = "$makefile\t$target";
             my $type = classify_target($target);
 
+            # Skip source control pattern rules if those systems are inactive
+            if ($type eq 'pattern') {
+                # Check if this is a source control rule that should be discarded
+                if (is_inactive_pattern($target)) {
+                    warn "DEBUG: Discarding inactive pattern rule: $target\n" if $ENV{SMAK_DEBUG};
+                    next;  # Skip this rule entirely
+                }
+                if (has_source_control_recursion($target)) {
+                    warn "DEBUG: Discarding recursive pattern rule: $target\n" if $ENV{SMAK_DEBUG};
+                    next;  # Skip this rule entirely
+                }
+            }
+
             if ($type eq 'fixed') {
                 $fixed_rule{$key} = $current_rule;
             } elsif ($type eq 'pattern') {
@@ -1046,6 +1059,18 @@ sub parse_makefile {
             for my $target (@targets) {
                 my $key = "$makefile\t$target";
                 my $type = classify_target($target);
+
+                # Skip storing dependencies for inactive pattern rules
+                if ($type eq 'pattern') {
+                    if (is_inactive_pattern($target)) {
+                        warn "DEBUG: Skipping dependencies for inactive pattern: $target\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+                    if (has_source_control_recursion($target)) {
+                        warn "DEBUG: Skipping dependencies for recursive pattern: $target\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+                }
 
                 if ($type eq 'fixed') {
                     # Append dependencies if target already exists (like gmake)

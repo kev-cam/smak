@@ -5190,6 +5190,21 @@ sub run_job_master {
         }
         @deps = @expanded_deps;
 
+        # Filter out source control files from dependencies (prevents recursion)
+        my @filtered_deps;
+        for my $dep (@deps) {
+            my $skip = 0;
+            for my $ext (keys %source_control_extensions) {
+                if ($dep =~ /\Q$ext\E/) {
+                    print STDERR "Filtering source control dependency: $dep (contains $ext)\n" if $ENV{SMAK_DEBUG};
+                    $skip = 1;
+                    last;
+                }
+            }
+            push @filtered_deps, $dep unless $skip;
+        }
+        @deps = @filtered_deps;
+
         # For composite targets (no rule but has deps), register them BEFORE queuing dependencies
         # This ensures they can be failed if a dependency fails during recursive queuing
         if (!($rule && $rule =~ /\S/) && @deps > 0) {

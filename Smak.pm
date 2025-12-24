@@ -216,7 +216,8 @@ sub start_job_server {
     warn "Spawned job-master with PID $job_server_pid\n" if $ENV{SMAK_DEBUG};
 
     # Wait for job-master to create port file
-    my $port_file = "/tmp/smak-jobserver-$job_server_pid.port";
+    my $port_dir = get_port_file_dir();
+    my $port_file = "$port_dir/smak-jobserver-$job_server_pid.port";
     my $timeout = 10;
     my $start = time();
     while (! -f $port_file) {
@@ -1439,6 +1440,21 @@ sub get_cache_dir {
     my $proj_name = basename($cwd);
 
     return "/tmp/$user/smak/$proj_name";
+}
+
+# Get directory for job-server port files
+# Always returns a directory (used for all port files, not just when caching)
+sub get_port_file_dir {
+    my $user = $ENV{USER} || $ENV{USERNAME} || 'unknown';
+    my $dir = "/tmp/$user/smak";
+
+    # Create directory if it doesn't exist
+    unless (-d $dir) {
+        use File::Path qw(make_path);
+        make_path($dir) or warn "WARNING: Cannot create port file directory '$dir': $!\n";
+    }
+
+    return $dir;
 }
 
 # Get path to cache file for given makefile
@@ -4748,7 +4764,8 @@ sub run_job_master {
     vprint "Job-master observer server on port $observer_port\n";
 
     # Write ports to file for smak-attach to find
-    open(my $port_fh, '>', "/tmp/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
+    my $port_dir = get_port_file_dir();
+    open(my $port_fh, '>', "$port_dir/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
     if ($port_fh) {
         print $port_fh "$observer_port\n";
         print $port_fh "$master_port\n";

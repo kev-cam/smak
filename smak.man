@@ -1,0 +1,233 @@
+.TH SMAK 1 "December 2025" "smak 1.0" "User Commands"
+.SH NAME
+smak \- a fast, parallel make implementation with interactive features
+.SH SYNOPSIS
+.B smak
+[\fIOPTIONS\fR] [\fITARGET\fR...]
+.SH DESCRIPTION
+.B smak
+is a make-compatible build tool with advanced features including parallel job execution, interactive CLI, state caching, and intelligent dependency tracking. It parses standard Makefiles and executes build rules with support for pattern rules, VPATH, variables, and implicit rules.
+
+.B smak
+offers significant performance improvements over traditional make through parallel builds, state caching, and optimized dependency resolution. It automatically detects and skips inactive implicit rules (RCS/SCCS) and can ignore system directories for faster builds.
+
+.SH OPTIONS
+.TP
+.B \-f \fIMAKEFILE\fR
+Use \fIMAKEFILE\fR instead of the default (Makefile, makefile, or GNUmakefile)
+.TP
+.B \-j \fIN\fR
+Execute up to \fIN\fR jobs in parallel (default: 1)
+.TP
+.B \-n, \-\-dry\-run
+Print commands without executing them
+.TP
+.B \-s, \-\-silent
+Silent mode - don't print commands before executing
+.TP
+.B \-cli
+Start interactive CLI mode (allows build control and inspection)
+.TP
+.B \-wheel
+Show spinning wheel progress indicator instead of verbose output
+.TP
+.B \-\-help
+Display usage information and exit
+.TP
+.B \-\-version
+Display version information and exit
+
+.SH ENVIRONMENT VARIABLES
+.TP
+.B SMAK_DEBUG
+Enable debug mode. Shows detailed parsing and execution information. Also enables automatic state caching.
+.TP
+.B SMAK_VERBOSE
+Control verbosity. Set to 'w' for wheel mode (spinning indicator).
+.TP
+.B SMAK_CACHE_DIR
+Directory for cached state files. Default: /tmp/$USER/smak/<project>/
+.IP
+State caching saves parsed makefile data for instant loading on subsequent runs. Cache is automatically invalidated when makefiles change.
+.TP
+.B SMAK_IGNORE_DIRS
+Colon-separated list of directories to ignore for dependency checking.
+.IP
+Example: SMAK_IGNORE_DIRS="/usr/include:/usr/local/include"
+.IP
+For ignored directories, smak checks the directory modification time once instead of checking individual files, dramatically improving performance for builds with many system header dependencies.
+.TP
+.B SMAK_INVOKED_AS
+Internal variable set by wrapper script. Preserved for recursive make calls.
+
+.SH INTERACTIVE CLI
+When started with \fB\-cli\fR, smak provides an interactive command-line interface:
+
+.TP
+.B build \fITARGET\fR
+Build the specified target
+.TP
+.B progress
+Show current build progress and job queue status
+.TP
+.B list
+List all defined targets
+.TP
+.B show \fITARGET\fR
+Show dependencies and rule for a target
+.TP
+.B vars
+Show all defined variables
+.TP
+.B eval \fIEXPRESSION\fR
+Evaluate a Perl expression (debug)
+.TP
+.B detach
+Detach from CLI, leaving job server running
+.TP
+.B quit
+Stop all jobs and exit
+.TP
+.B help
+Show available commands
+
+.SH JOB SERVER
+.B smak
+uses a job server architecture for parallel builds:
+
+.IP \(bu 2
+Master process manages job queue and dependencies
+.IP \(bu 2
+Worker processes execute build commands
+.IP \(bu 2
+Automatic dependency resolution and parallelization
+.IP \(bu 2
+Can detach from CLI and reattach later using \fBsmak\-attach\fR
+
+.SH STATE CACHING
+State caching dramatically improves startup time for large projects:
+
+.IP \(bu 2
+Automatically enabled in debug mode
+.IP \(bu 2
+Saves parsed rules, dependencies, and variables
+.IP \(bu 2
+Validates cache by checking makefile modification times
+.IP \(bu 2
+Cache location: SMAK_CACHE_DIR or /tmp/$USER/smak/<project>/
+.IP \(bu 2
+Transparent - automatically loads/saves
+
+.SH OPTIMIZATIONS
+.TP
+.B Inactive Pattern Detection
+Automatically detects and skips RCS/SCCS implicit rules when no such files exist in the project, preventing infinite recursion and unnecessary file system checks.
+
+.TP
+.B Directory-Level Ignore
+SMAK_IGNORE_DIRS allows ignoring entire directory trees (like /usr/include) by checking directory mtimes instead of individual files, eliminating hundreds of stat() calls.
+
+.TP
+.B Early Exit for System Headers
+Absolute paths with no explicit rules are skipped early, avoiding expensive pattern matching for system dependencies.
+
+.TP
+.B VPATH Optimization
+Skips VPATH resolution when no VPATH patterns are defined, and skips inactive patterns.
+
+.SH EXAMPLES
+.TP
+Build default target:
+.B smak
+
+.TP
+Parallel build with 8 jobs:
+.B smak \-j 8
+
+.TP
+Interactive mode with parallel builds:
+.B smak \-j 4 \-cli
+
+.TP
+Dry run to see commands:
+.B smak \-n all
+
+.TP
+Silent build:
+.B smak \-s \-j 4
+
+.TP
+Build with debug and caching:
+.B SMAK_DEBUG=1 smak \-j 8
+
+.TP
+Ignore system directories:
+.B SMAK_IGNORE_DIRS="/usr/include:/usr/local/include" smak \-j 8
+
+.TP
+Custom cache directory:
+.B SMAK_CACHE_DIR=/var/cache/smak smak
+
+.TP
+Detach and reattach:
+.nf
+smak \-cli
+smak> detach
+(later)
+smak\-attach
+.fi
+
+.SH FILES
+.TP
+.B Makefile, makefile, GNUmakefile
+Default makefile names, searched in order
+.TP
+.B /tmp/$USER/smak/<project>/state.cache
+Default location for cached state
+.TP
+.B /tmp/smak\-jobserver\-<pid>.port
+Job server port file for reconnection
+
+.SH MAKEFILE SYNTAX
+.B smak
+supports standard Makefile syntax:
+
+.IP \(bu 2
+Fixed rules: target: dependencies
+.IP \(bu 2
+Pattern rules: %.o: %.c
+.IP \(bu 2
+Pseudo targets: .PHONY
+.IP \(bu 2
+Variables: VAR = value, $(VAR)
+.IP \(bu 2
+VPATH: vpath %.c src
+.IP \(bu 2
+Include: include other.mk
+.IP \(bu 2
+Built-in variables: CC, CFLAGS, etc.
+.IP \(bu 2
+Automatic variables: $@, $<, $^, etc.
+
+.SH LIMITATIONS
+.IP \(bu 2
+Some GNU make extensions may not be supported
+.IP \(bu 2
+Interactive git commands not supported (use \-\-no\-verify flags)
+.IP \(bu 2
+Complex shell constructs in rules may behave differently
+
+.SH SEE ALSO
+.BR make (1),
+.BR smak\-attach (1),
+.BR smak\-worker.pl (1)
+
+.SH AUTHORS
+Written by the smak development team.
+
+.SH BUGS
+Report bugs at: https://github.com/anthropics/smak/issues
+
+.SH COPYRIGHT
+Copyright \(co 2025 smak project.
+This is free software; see the source for copying conditions.

@@ -1303,13 +1303,15 @@ sub detect_inactive_patterns {
         $has_rcs = 1;
     } else {
         # Also check if any ,v files exist in current directory
-        my @rcs_files = glob("*.v");
+        my @rcs_files = glob("*,v");  # Note: comma before v, not dot
         $has_rcs = 1 if @rcs_files;
     }
 
     if (!$has_rcs) {
         $inactive_patterns{'RCS'} = 1;
         warn "DEBUG: RCS patterns marked inactive (no RCS files detected)\n" if $ENV{SMAK_DEBUG};
+    } else {
+        warn "DEBUG: RCS files detected in project, keeping RCS patterns active\n" if $ENV{SMAK_DEBUG};
     }
 
     # Check for SCCS version control files
@@ -1325,6 +1327,8 @@ sub detect_inactive_patterns {
     if (!$has_sccs) {
         $inactive_patterns{'SCCS'} = 1;
         warn "DEBUG: SCCS patterns marked inactive (no SCCS files detected)\n" if $ENV{SMAK_DEBUG};
+    } else {
+        warn "DEBUG: SCCS files detected in project, keeping SCCS patterns active\n" if $ENV{SMAK_DEBUG};
     }
 }
 
@@ -1335,14 +1339,15 @@ sub is_inactive_pattern {
 
     # Check RCS patterns if inactive
     if ($inactive_patterns{'RCS'}) {
-        return 1 if $file =~ m{(?:^|/)RCS/};  # RCS/ directory
-        return 1 if $file =~ /,v+$/;           # .v suffix
+        return 1 if $file =~ m{(?:^|/)RCS/};  # RCS/ directory anywhere in path
+        return 1 if $file =~ /,v+$/;           # ,v suffix (possibly repeated)
+        return 1 if $file =~ /,v,/;            # Multiple ,v suffixes (recursive pattern)
     }
 
     # Check SCCS patterns if inactive
     if ($inactive_patterns{'SCCS'}) {
-        return 1 if $file =~ m{(?:^|/)SCCS/};  # SCCS/ directory
-        return 1 if $file =~ /^s\./;           # s.* prefix
+        return 1 if $file =~ m{(?:^|/)SCCS/};  # SCCS/ directory anywhere in path
+        return 1 if $file =~ m{(?:^|/)s\.};    # s.* prefix (anywhere after /)
     }
 
     return 0;

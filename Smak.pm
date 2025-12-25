@@ -166,7 +166,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
-our $CACHE_VERSION = 6;  # Increment to invalidate old caches
+our $CACHE_VERSION = 7;  # Increment to invalidate old caches
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -1500,8 +1500,14 @@ sub get_cache_dir {
     # Determine cache directory
     my $cdir = $ENV{SMAK_CACHE_DIR};
     if (defined $cdir) {
-        return undef if ($cdir eq "off"     || $cdir != 0);
-        return $cdir if ($cdir ne "default" && $cdir != 1);
+        # Disable caching for "off" or "0"
+        return undef if ($cdir eq "off" || $cdir eq "0" || $cdir == 0);
+        # Use default location for "default" or "1"
+        # (fall through to default calculation below)
+        unless ($cdir eq "default" || $cdir eq "1" || $cdir == 1) {
+            # Use specified path
+            return $cdir;
+        }
     }
 
     # Default: /tmp/<user>/smak/<project>/
@@ -1986,9 +1992,15 @@ sub _save_ninja_build {
     $fixed_deps{$key} = \@inputs;
     $fixed_rule{$key} = $command;
 
-    # Set default target
+    # Set default target (skip targets with variables or special targets)
     if (!defined $default_target) {
-        $default_target = $output;
+        # Skip targets with unexpanded variables
+        unless ($output =~ /\$/) {
+            # Skip special targets
+            unless ($output =~ /^\./) {
+                $default_target = $output;
+            }
+        }
     }
 }
 

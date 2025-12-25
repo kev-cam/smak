@@ -214,6 +214,9 @@ sub set_jobs {
 }
 
 sub start_job_server {
+    my ($wait) = @_;
+    $wait //= 0;  # Default to not waiting for workers
+
     use IO::Socket::INET;
     use IO::Select;
     use FindBin qw($RealBin);
@@ -276,12 +279,23 @@ sub start_job_server {
     }
     print $job_server_socket "ENV_END\n";
 
-    # Wait for workers to be ready
-    my $workers_ready = <$job_server_socket>;
-    chomp $workers_ready if defined $workers_ready;
-    die "Job-master workers not ready\n" unless $workers_ready eq 'JOBSERVER_WORKERS_READY';
-
-    warn "Job-master and all workers ready\n" if $ENV{SMAK_DEBUG};
+    if ($wait) {
+        # Wait for workers to be ready
+        my $workers_ready = <$job_server_socket>;
+        chomp $workers_ready if defined $workers_ready;
+        die "Job-master workers not ready\n" unless $workers_ready eq 'JOBSERVER_WORKERS_READY';
+        warn "Job-master and all workers ready\n" if $ENV{SMAK_DEBUG};
+    } else {
+        # Don't wait - workers can connect asynchronously
+        # Just wait for acknowledgment that environment was received
+        my $ack = <$job_server_socket>;
+        chomp $ack if defined $ack;
+        if ($ack ne 'JOBSERVER_WORKERS_READY') {
+            # Put it back for later processing if it wasn't the ready message
+            # This shouldn't happen, but handle gracefully
+        }
+        warn "Job-master started (workers will connect asynchronously)\n" if $ENV{SMAK_DEBUG};
+    }
 }
 
 sub stop_job_server {
@@ -3451,6 +3465,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'start') {
         cmd_start($words, $opts, $state);
 
+    } elsif ($cmd eq 'stop') {
+        cmd_stop($words, $opts, $state);
+
     } elsif ($cmd eq 'kill') {
         cmd_kill($socket);
 
@@ -4233,13 +4250,23 @@ sub cmd_start {
     my ($words, $opts, $state) = @_;
 
     my $socket = ${$state->{socket}};
+    my $num_workers = @$words > 0 ? $words->[0] : 1;
+
     if ($socket) {
-        print "Job server already running.\n";
+        # Server already running - add workers
+        print "Adding $num_workers worker(s) to job server...\n";
+        print $socket "ADD_WORKER $num_workers\n";
+        my $response = <$socket>;
+        chomp $response if $response;
+        print "$response\n" if $response;
         return;
     }
 
+    # No server running - start new one
     my $num_jobs = @$words > 0 ? $words->[0] : ($opts->{jobs} || 1);
-    print "Starting job server with $num_jobs workers...\n";
+    my $wait = $opts->{wait} // 0;
+
+    print "Starting job server with $num_jobs workers" . ($wait ? " (waiting for workers)" : " (async)") . "...\n";
 
     # Set global $jobs variable before calling start_job_server
     # (start_job_server doesn't take parameters, it uses the global)
@@ -4249,7 +4276,7 @@ sub cmd_start {
     # Start the job server with error handling
     eval {
         require Smak;  # Make sure we have access to start_job_server
-        Smak::start_job_server();
+        Smak::start_job_server($wait);
     };
 
     if ($@) {
@@ -4272,6 +4299,23 @@ sub cmd_start {
     ${$state->{server_pid}} = $Smak::job_server_pid;
 
     print "Job server started (PID: $Smak::job_server_pid)\n";
+}
+
+sub cmd_stop {
+    my ($words, $opts, $state) = @_;
+
+    my $socket = ${$state->{socket}};
+    if (!$socket) {
+        print "Job server not running.\n";
+        return;
+    }
+
+    my $num_workers = @$words > 0 ? $words->[0] : 1;
+    print "Removing $num_workers worker(s) from job server...\n";
+    print $socket "REMOVE_WORKER $num_workers\n";
+    my $response = <$socket>;
+    chomp $response if $response;
+    print "$response\n" if $response;
 }
 
 sub cmd_kill {
@@ -6310,6 +6354,64 @@ sub run_job_master {
                     %worker_status = ();
                     %running_jobs = ();
                     print $master_socket "All workers killed\n";
+
+                } elsif ($line =~ /^ADD_WORKER (\d+)$/) {
+                    my $count = $1;
+                    print STDERR "Adding $count worker(s)\n";
+
+                    # Spawn new workers
+                    my $worker_port = $worker_server->sockport();
+                    for (my $i = 0; $i < $count; $i++) {
+                        my $worker_pid = fork();
+                        if ($worker_pid == 0) {
+                            if ($ssh_host) {
+                                my $local_path = getcwd();
+                                $local_path =~ s=^$fuse_mountpoint/== if $fuse_mountpoint;
+                                # SSH mode: launch worker on remote host with reverse port forwarding
+                                # Use -R to tunnel remote port back to local worker_port
+                                my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
+                                my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
+                                if ($remote_cd) {
+                                    push @ssh_cmd, "smak-worker -cd $remote_cd/$local_path 127.0.0.1:$remote_port";
+                                } else {
+                                    push @ssh_cmd, "smak-worker 127.0.0.1:$remote_port";
+                                }
+                                exec(@ssh_cmd);
+                                die "Failed to exec SSH worker: $!\n";
+                            } else {
+                                # Local mode
+                                exec($worker_script, "127.0.0.1:$worker_port");
+                                die "Failed to exec worker: $!\n";
+                            }
+                        }
+                    }
+                    print $master_socket "Added $count worker(s). Workers will connect asynchronously.\n";
+
+                } elsif ($line =~ /^REMOVE_WORKER (\d+)$/) {
+                    my $count = $1;
+                    my $removed = 0;
+
+                    # Remove idle workers (ready workers first, to avoid interrupting running jobs)
+                    for my $worker (@workers) {
+                        last if $removed >= $count;
+                        if ($worker_status{$worker}{ready}) {
+                            print STDERR "Removing ready worker\n";
+                            print $worker "SHUTDOWN\n";
+                            close($worker);
+                            $select->remove($worker);
+                            delete $worker_status{$worker};
+                            $removed++;
+                        }
+                    }
+
+                    # Update workers array
+                    @workers = grep { exists $worker_status{$_} } @workers;
+
+                    if ($removed < $count) {
+                        print $master_socket "Removed $removed worker(s) (only $removed idle workers available)\n";
+                    } else {
+                        print $master_socket "Removed $count worker(s)\n";
+                    }
 
                 } elsif ($line =~ /^RESTART_WORKERS (\d+)$/) {
                     my $new_count = $1;

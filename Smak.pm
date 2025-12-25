@@ -119,6 +119,25 @@ sub has_source_control_recursion {
     return 0;
 }
 
+# Check if a dependency should be filtered out (source control file)
+# Returns 1 if dependency should be filtered, 0 otherwise
+sub should_filter_dependency {
+    my ($dep) = @_;
+
+    # Check for source control file extensions (,v)
+    for my $ext (keys %source_control_extensions) {
+        return 1 if $dep =~ /\Q$ext\E/;
+    }
+
+    # Check for source control directory recursion
+    return 1 if has_source_control_recursion($dep);
+
+    # Check for inactive patterns
+    return 1 if is_inactive_pattern($dep);
+
+    return 0;
+}
+
 our @job_queue;
 
 # Hash for Makefile variables
@@ -147,7 +166,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
-our $CACHE_VERSION = 2;  # Increment to invalidate old caches
+our $CACHE_VERSION = 5;  # Increment to invalidate old caches
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -878,6 +897,19 @@ sub parse_makefile {
             my $key = "$makefile\t$target";
             my $type = classify_target($target);
 
+            # Skip source control pattern rules if those systems are inactive
+            if ($type eq 'pattern') {
+                # Check if this is a source control rule that should be discarded
+                if (is_inactive_pattern($target)) {
+                    warn "DEBUG: Discarding inactive pattern rule: $target\n" if $ENV{SMAK_DEBUG};
+                    next;  # Skip this rule entirely
+                }
+                if (has_source_control_recursion($target)) {
+                    warn "DEBUG: Discarding recursive pattern rule: $target\n" if $ENV{SMAK_DEBUG};
+                    next;  # Skip this rule entirely
+                }
+            }
+
             if ($type eq 'fixed') {
                 $fixed_rule{$key} = $current_rule;
             } elsif ($type eq 'pattern') {
@@ -1042,10 +1074,40 @@ sub parse_makefile {
             $current_type = classify_target($current_targets[0]) if @current_targets;
             $current_rule = '';
 
+            # For pattern rules, check if ALL dependencies would be filtered
+            # If so, discard the entire rule by clearing @current_targets
+            if ($current_type eq 'pattern' && @deps) {
+                my $all_deps_filtered = 1;
+                for my $dep (@deps) {
+                    if (!should_filter_dependency($dep)) {
+                        $all_deps_filtered = 0;
+                        last;
+                    }
+                }
+
+                if ($all_deps_filtered) {
+                    warn "DEBUG: Discarding pattern rule with all filtered dependencies: @targets\n" if $ENV{SMAK_DEBUG};
+                    @current_targets = ();  # Clear to prevent rule from being saved
+                    next;  # Skip dependency storage
+                }
+            }
+
             # Store dependencies for all targets
             for my $target (@targets) {
                 my $key = "$makefile\t$target";
                 my $type = classify_target($target);
+
+                # Skip storing dependencies for inactive pattern rules
+                if ($type eq 'pattern') {
+                    if (is_inactive_pattern($target)) {
+                        warn "DEBUG: Skipping dependencies for inactive pattern: $target\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+                    if (has_source_control_recursion($target)) {
+                        warn "DEBUG: Skipping dependencies for recursive pattern: $target\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+                }
 
                 if ($type eq 'fixed') {
                     # Append dependencies if target already exists (like gmake)
@@ -1070,8 +1132,8 @@ sub parse_makefile {
                     }
                 }
 
-                # Set default target to first non-pseudo target (like gmake)
-                if (!defined $default_target && $type ne 'pseudo') {
+                # Set default target to first non-pseudo, non-pattern target (like gmake)
+                if (!defined $default_target && $type ne 'pseudo' && $type ne 'pattern') {
                     $default_target = $target;
                 }
             }
@@ -5437,6 +5499,8 @@ sub run_job_master {
                 print STDERR "ERROR: No rule to make target '$target' (needed by other targets)\n";
                 $in_progress{$target} = "failed";
                 $failed_targets{$target} = 1;
+                # Send completion message to master socket if this was a submitted job
+                print $msocket "JOB_COMPLETE $target 1\n" if $msocket;
                 # Fail any composite targets waiting for this
                 fail_dependent_composite_targets($target, 1);
             }

@@ -166,7 +166,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
-our $CACHE_VERSION = 6;  # Increment to invalidate old caches
+our $CACHE_VERSION = 9;  # Increment to invalidate old caches
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -831,9 +831,12 @@ sub parse_makefile {
         # (handles old caches created before this feature)
         if (!%inactive_patterns) {
             warn "DEBUG: Cache missing inactive patterns, detecting now\n" if $ENV{SMAK_DEBUG};
-            init_ignore_dirs();
             detect_inactive_patterns();
         }
+
+        # Always initialize ignore_dirs from environment (not saved in cache)
+        # This ensures SMAK_IGNORE_DIRS is respected even when using cached state
+        init_ignore_dirs();
 
         return;  # Cache loaded successfully, skip parsing
     }
@@ -1136,11 +1139,27 @@ sub parse_makefile {
                 # Also exclude targets with unexpanded variables and special targets
                 if (!defined $default_target && $type ne 'pseudo' && $type ne 'pattern') {
                     # Skip targets with unexpanded variables like $(VERBOSE).SILENT
-                    next if $target =~ /\$/;
+                    if ($target =~ /\$/) {
+                        warn "DEBUG: Skipping target with variable: '$target'\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
                     # Skip special targets like .SILENT, .PHONY, etc.
-                    next if $target =~ /^\./;
+                    if ($target =~ /^\./) {
+                        warn "DEBUG: Skipping special target: '$target'\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+                    # Skip targets declared in .PHONY
+                    my $phony_key = "$makefile\t.PHONY";
+                    if (exists $pseudo_deps{$phony_key}) {
+                        my @phony_targets = @{$pseudo_deps{$phony_key} || []};
+                        if (grep { $_ eq $target } @phony_targets) {
+                            warn "DEBUG: Skipping .PHONY target: '$target'\n" if $ENV{SMAK_DEBUG};
+                            next;
+                        }
+                    }
 
                     $default_target = $target;
+                    warn "DEBUG: Setting default target to: '$target'\n" if $ENV{SMAK_DEBUG};
                 }
             }
 
@@ -1366,9 +1385,15 @@ sub parse_included_makefile {
     $makefile = $saved_makefile;
 
     # Initialize optimizations once (first time any makefile is parsed)
+    warn "DEBUG: Checking if init needed - inactive_patterns has " . scalar(keys %inactive_patterns) . " entries\n" if $ENV{SMAK_DEBUG};
     if (!%inactive_patterns) {
+        warn "DEBUG: Initializing ignore dirs and inactive patterns\n" if $ENV{SMAK_DEBUG};
         init_ignore_dirs();
         detect_inactive_patterns();
+    } else {
+        warn "DEBUG: Skipping pattern detection - inactive_patterns already populated\n" if $ENV{SMAK_DEBUG};
+        # Still need to init ignore_dirs even if patterns are cached
+        init_ignore_dirs();
     }
 
     # Save state to cache for faster startup next time
@@ -1382,10 +1407,14 @@ sub get_default_target {
 # Initialize ignored directories from SMAK_IGNORE_DIRS environment variable
 # Format: colon-separated list like "/usr/include:/usr/local/include"
 sub init_ignore_dirs {
+    warn "DEBUG: init_ignore_dirs() called, \@ignore_dirs has " . scalar(@ignore_dirs) . " entries\n" if $ENV{SMAK_DEBUG};
+    warn "DEBUG: SMAK_IGNORE_DIRS = '" . ($ENV{SMAK_IGNORE_DIRS} || "(not set)") . "'\n" if $ENV{SMAK_DEBUG};
+
     return if @ignore_dirs;  # Already initialized
 
     if ($ENV{SMAK_IGNORE_DIRS}) {
         @ignore_dirs = split(':', $ENV{SMAK_IGNORE_DIRS});
+        warn "DEBUG: Split into " . scalar(@ignore_dirs) . " directories\n" if $ENV{SMAK_DEBUG};
 
         # Cache directory mtimes for efficient checking
         for my $dir (@ignore_dirs) {
@@ -1500,8 +1529,14 @@ sub get_cache_dir {
     # Determine cache directory
     my $cdir = $ENV{SMAK_CACHE_DIR};
     if (defined $cdir) {
-        return undef if ($cdir eq "off"     || $cdir != 0);
-        return $cdir if ($cdir ne "default" && $cdir != 1);
+        # Disable caching for "off" or "0"
+        return undef if ($cdir eq "off" || $cdir eq "0" || $cdir == 0);
+        # Use default location for "default" or "1"
+        # (fall through to default calculation below)
+        unless ($cdir eq "default" || $cdir eq "1" || $cdir == 1) {
+            # Use specified path
+            return $cdir;
+        }
     }
 
     # Default: /tmp/<user>/smak/<project>/
@@ -1986,9 +2021,24 @@ sub _save_ninja_build {
     $fixed_deps{$key} = \@inputs;
     $fixed_rule{$key} = $command;
 
-    # Set default target
+    # Set default target (skip targets with variables or special targets)
     if (!defined $default_target) {
-        $default_target = $output;
+        # Skip targets with unexpanded variables
+        if ($output =~ /\$/) {
+            warn "DEBUG: add_rule skipping target with variable: '$output'\n" if $ENV{SMAK_DEBUG};
+        }
+        # Skip special targets
+        elsif ($output =~ /^\./) {
+            warn "DEBUG: add_rule skipping special target: '$output'\n" if $ENV{SMAK_DEBUG};
+        }
+        # Skip phony targets
+        elsif (exists $phony_targets{$output}) {
+            warn "DEBUG: add_rule skipping phony target: '$output'\n" if $ENV{SMAK_DEBUG};
+        }
+        else {
+            $default_target = $output;
+            warn "DEBUG: add_rule setting default target to: '$output'\n" if $ENV{SMAK_DEBUG};
+        }
     }
 }
 
@@ -3174,7 +3224,7 @@ sub unified_cli {
             # EOF (Ctrl-D) or Ctrl-C
 	    if ($SmakCli::cancel_requested) { # Ctrl-C
 	        $SmakCli::cancel_requested = 0; # clear it
-		return undef;
+		next;  # Return to prompt, don't exit
 	    }
             last;
         }
@@ -3479,7 +3529,7 @@ Available commands:
   rm <file>           Remove file (saves to .{file}.prev) and mark dirty
   ignore <file>       Ignore a file for dependency checking
   ignore -none        Clear all ignored files
-  ignore              List currently ignored files
+  ignore              List ignored files and directories
   needs <file>        Show which targets depend on a file
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
@@ -3910,6 +3960,24 @@ sub cmd_ignore {
 
     # List ignored files if no arguments
     if (@$words == 0) {
+        # Show ignored directories from SMAK_IGNORE_DIRS
+        if (@Smak::ignore_dirs) {
+            print "Ignored directories (from SMAK_IGNORE_DIRS):\n";
+            for my $dir (sort @Smak::ignore_dirs) {
+                my $status = "";
+                if (exists $Smak::ignore_dir_mtimes{$dir}) {
+                    $status = " (mtime=" . $Smak::ignore_dir_mtimes{$dir} . ")";
+                } else {
+                    $status = " (not found)";
+                }
+                print "  $dir$status\n";
+            }
+            print "\n" . (scalar @Smak::ignore_dirs) . " director(ies) ignored\n\n";
+        } else {
+            print "No ignored directories (set SMAK_IGNORE_DIRS to ignore system directories)\n\n";
+        }
+
+        # Show ignored files
         if (keys %Smak::ignored_files) {
             print "Ignored files:\n";
             for my $file (sort keys %Smak::ignored_files) {
@@ -3921,6 +3989,7 @@ sub cmd_ignore {
         }
         print "\nUsage: ignore <file>    - Ignore a file for dependency checking\n";
         print "       ignore -none     - Clear all ignored files\n";
+        print "       Set SMAK_IGNORE_DIRS environment variable to ignore directories\n";
         return;
     }
 

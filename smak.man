@@ -40,15 +40,35 @@ Display version information and exit
 .SH ENVIRONMENT VARIABLES
 .TP
 .B SMAK_DEBUG
-Enable debug mode. Shows detailed parsing and execution information. Also enables automatic state caching.
+Enable debug mode and set verbosity level. Also enables automatic state caching.
+.IP
+Values:
+.RS
+.IP \(bu 2
+\fB1\fR - Basic debug output (recommended)
+.IP \(bu 2
+\fB2\fR or higher - Verbose debug output (includes all pattern matching details)
+.RE
+.IP
+Level 1 shows important debug information while suppressing repetitive messages about inactive patterns. Use level 2 when diagnosing pattern rule or vpath resolution issues.
 .TP
 .B SMAK_VERBOSE
 Control verbosity. Set to 'w' for wheel mode (spinning indicator).
 .TP
 .B SMAK_CACHE_DIR
-Directory for cached state files. Default: /tmp/$USER/smak/<project>/
+Control state caching behavior. State caching saves parsed makefile data for instant loading on subsequent runs. Cache is automatically invalidated when makefiles change.
 .IP
-State caching saves parsed makefile data for instant loading on subsequent runs. Cache is automatically invalidated when makefiles change.
+Values:
+.RS
+.IP \(bu 2
+\fBoff\fR or \fB0\fR - Disable caching
+.IP \(bu 2
+\fBdefault\fR or \fB1\fR - Use default cache directory (/tmp/$USER/smak/<project>/)
+.IP \(bu 2
+\fB/path/to/dir\fR - Use specified directory for cache files
+.RE
+.IP
+When SMAK_DEBUG is set, caching is automatically enabled with the default location unless explicitly disabled with SMAK_CACHE_DIR=off
 .TP
 .B SMAK_IGNORE_DIRS
 Colon-separated list of directories to ignore for dependency checking.

@@ -2442,17 +2442,23 @@ sub build_target {
     # Early exit for files in ignored directories (e.g., /usr/include, /usr/local/include)
     # Check entire directories instead of individual files for efficiency
     if (my $ignored_dir = is_ignored_dir($target)) {
+        warn "DEBUG[" . __LINE__ . "]:   File '$target' is in ignored directory '$ignored_dir'\n" if ($ENV{SMAK_DEBUG} || 0) >= 2;
         # Check if the directory itself has been modified
         if (exists $ignore_dir_mtimes{$ignored_dir}) {
             my $current_mtime = (stat($ignored_dir))[9];
-            if ($current_mtime == $ignore_dir_mtimes{$ignored_dir}) {
+            if (defined $current_mtime && $current_mtime == $ignore_dir_mtimes{$ignored_dir}) {
                 # Directory unchanged, skip this file entirely
+                warn "DEBUG[" . __LINE__ . "]:   Skipping - directory unchanged (mtime=$current_mtime)\n" if ($ENV{SMAK_DEBUG} || 0) >= 2;
                 return;
             } else {
                 # Directory changed - update cache and continue processing
                 warn "WARNING: Ignored directory '$ignored_dir' has changed (rebuilding dependencies)\n";
-                $ignore_dir_mtimes{$ignored_dir} = $current_mtime;
+                $ignore_dir_mtimes{$ignored_dir} = $current_mtime if defined $current_mtime;
             }
+        } else {
+            # Directory not in cache - skip file anyway (system directory)
+            warn "DEBUG[" . __LINE__ . "]:   Skipping - directory not cached (assuming system directory)\n" if ($ENV{SMAK_DEBUG} || 0) >= 2;
+            return;
         }
     }
 
@@ -2582,10 +2588,26 @@ sub build_target {
     my $cwd = getcwd();
     @deps = map { resolve_vpath($_, $cwd) } @deps;
 
+    # Filter out dependencies in ignored directories
+    # Keep them separate for sanity checks and reporting
+    my @ignored_deps;
+    my @active_deps;
+    for my $dep (@deps) {
+        if (is_ignored_dir($dep)) {
+            push @ignored_deps, $dep;
+        } else {
+            push @active_deps, $dep;
+        }
+    }
+    @deps = @active_deps;
+
     # Debug: show dependencies and rule status
     if ($ENV{SMAK_DEBUG}) {
         if (@deps) {
             warn "DEBUG[" . __LINE__ . "]:   Dependencies: " . join(', ', @deps) . "\n";
+        }
+        if (@ignored_deps && ($ENV{SMAK_DEBUG} || 0) >= 2) {
+            warn "DEBUG[" . __LINE__ . "]:   Ignored dependencies (" . scalar(@ignored_deps) . "): " . join(', ', @ignored_deps[0..9]) . (@ignored_deps > 10 ? "... (" . (@ignored_deps - 10) . " more)" : "") . "\n";
         }
         if ($rule && $rule =~ /\S/) {
             warn "DEBUG[" . __LINE__ . "]:   Has rule: yes\n";
@@ -2651,13 +2673,16 @@ sub build_target {
 
     # Recursively build dependencies
     # In parallel mode, skip this - let job-master handle dependency expansion
+    warn "DEBUG[" . __LINE__ . "]:   Checking job_server_socket: " . (defined $job_server_socket ? "SET (fd=" . fileno($job_server_socket) . ")" : "NOT SET") . "\n" if $ENV{SMAK_DEBUG};
     unless ($job_server_socket) {
-        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies...\n" if $ENV{SMAK_DEBUG};
+        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies sequentially (no job server)...\n" if $ENV{SMAK_DEBUG};
         for my $dep (@deps) {
             warn "DEBUG[" . __LINE__ . "]:     Building dependency: $dep\n" if $ENV{SMAK_DEBUG};
             build_target($dep, $visited, $depth + 1);
         }
         warn "DEBUG[" . __LINE__ . "]:   Finished building dependencies\n" if $ENV{SMAK_DEBUG};
+    } else {
+        warn "DEBUG[" . __LINE__ . "]:   Skipping dependency expansion - job server will handle it\n" if $ENV{SMAK_DEBUG};
     }
 
     warn "DEBUG[" . __LINE__ . "]:   Checking if should execute rule: rule defined=" . (defined $rule ? "yes" : "no") . ", has content=" . (($rule && $rule =~ /\S/) ? "yes" : "no") . "\n" if $ENV{SMAK_DEBUG};
@@ -4766,13 +4791,27 @@ sub show_dependencies {
             print "Target: $target (fixed rule)\n";
             print "Base directory: $base\n";
             my @deps = @{$fixed_deps{$key} || []};
-            if (@deps) {
+            my @active_deps = grep { !is_ignored_dir($_) } @deps;
+            my @ignored_deps = grep { is_ignored_dir($_) } @deps;
+
+            if (@active_deps) {
                 print "Dependencies:\n";
-                foreach my $dep (@deps) {
+                foreach my $dep (@active_deps) {
                     print "  $dep\n";
                 }
             } else {
                 print "No dependencies\n";
+            }
+
+            if (@ignored_deps) {
+                print "Ignored dependencies (" . scalar(@ignored_deps) . " in system directories):\n";
+                foreach my $dep (@ignored_deps[0..9]) {
+                    last unless defined $dep;
+                    print "  $dep\n";
+                }
+                if (@ignored_deps > 10) {
+                    print "  ... (" . (@ignored_deps - 10) . " more)\n";
+                }
             }
             if (exists $fixed_rule{$key}) {
                 print "Rule:\n";
@@ -5596,7 +5635,18 @@ sub run_job_master {
 	                                       || scalar(keys %running_jobs)) {
 	    vprint "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
 	    vprint "$ready_workers/" . scalar(@workers) . " ready, ";
-	    vprint scalar(keys %running_jobs) . " running\n";
+	    vprint scalar(keys %running_jobs) . " running";
+
+	    # Show running targets (up to 5)
+	    if (keys %running_jobs) {
+	        my @running = sort map { $running_jobs{$_}{target} } keys %running_jobs;
+	        if (@running <= 5) {
+	            vprint " (" . join(", ", @running) . ")";
+	        } else {
+	            vprint " (" . join(", ", @running[0..4]) . ", ... " . (@running - 5) . " more)";
+	        }
+	    }
+	    vprint "\n";
 	}
 	
 	if (@job_queue > 0 && @job_queue <= 5) {

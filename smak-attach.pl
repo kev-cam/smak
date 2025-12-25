@@ -414,9 +414,6 @@ if ($selected_js->{cwd}) {
     chdir($selected_js->{cwd}) or warn "Warning: Could not change to directory $selected_js->{cwd}: $!\n";
 }
 
-# Set CLI owner to this attached process
-$Smak::cli_owner = $$;
-
 if ($test_mode) {
     # Enter test mode
     SmakTest::run_interactive_tests($socket);

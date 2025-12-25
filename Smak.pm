@@ -5633,7 +5633,8 @@ sub run_job_master {
 
 	if (scalar(@workers) != $ready_workers || scalar(@job_queue)
 	                                       || scalar(keys %running_jobs)) {
-	    vprint "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
+	    vprint $stomp_prompt,
+		   "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
 	    vprint "$ready_workers/" . scalar(@workers) . " ready, ";
 	    vprint scalar(keys %running_jobs) . " running";
 

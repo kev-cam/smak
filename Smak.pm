@@ -1401,10 +1401,14 @@ sub get_default_target {
 # Initialize ignored directories from SMAK_IGNORE_DIRS environment variable
 # Format: colon-separated list like "/usr/include:/usr/local/include"
 sub init_ignore_dirs {
+    warn "DEBUG: init_ignore_dirs() called, \@ignore_dirs has " . scalar(@ignore_dirs) . " entries\n" if $ENV{SMAK_DEBUG};
+    warn "DEBUG: SMAK_IGNORE_DIRS = '" . ($ENV{SMAK_IGNORE_DIRS} || "(not set)") . "'\n" if $ENV{SMAK_DEBUG};
+
     return if @ignore_dirs;  # Already initialized
 
     if ($ENV{SMAK_IGNORE_DIRS}) {
         @ignore_dirs = split(':', $ENV{SMAK_IGNORE_DIRS});
+        warn "DEBUG: Split into " . scalar(@ignore_dirs) . " directories\n" if $ENV{SMAK_DEBUG};
 
         # Cache directory mtimes for efficient checking
         for my $dir (@ignore_dirs) {

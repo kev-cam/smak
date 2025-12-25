@@ -2588,10 +2588,26 @@ sub build_target {
     my $cwd = getcwd();
     @deps = map { resolve_vpath($_, $cwd) } @deps;
 
+    # Filter out dependencies in ignored directories
+    # Keep them separate for sanity checks and reporting
+    my @ignored_deps;
+    my @active_deps;
+    for my $dep (@deps) {
+        if (is_ignored_dir($dep)) {
+            push @ignored_deps, $dep;
+        } else {
+            push @active_deps, $dep;
+        }
+    }
+    @deps = @active_deps;
+
     # Debug: show dependencies and rule status
     if ($ENV{SMAK_DEBUG}) {
         if (@deps) {
             warn "DEBUG[" . __LINE__ . "]:   Dependencies: " . join(', ', @deps) . "\n";
+        }
+        if (@ignored_deps && ($ENV{SMAK_DEBUG} || 0) >= 2) {
+            warn "DEBUG[" . __LINE__ . "]:   Ignored dependencies (" . scalar(@ignored_deps) . "): " . join(', ', @ignored_deps[0..9]) . (@ignored_deps > 10 ? "... (" . (@ignored_deps - 10) . " more)" : "") . "\n";
         }
         if ($rule && $rule =~ /\S/) {
             warn "DEBUG[" . __LINE__ . "]:   Has rule: yes\n";
@@ -4772,13 +4788,27 @@ sub show_dependencies {
             print "Target: $target (fixed rule)\n";
             print "Base directory: $base\n";
             my @deps = @{$fixed_deps{$key} || []};
-            if (@deps) {
+            my @active_deps = grep { !is_ignored_dir($_) } @deps;
+            my @ignored_deps = grep { is_ignored_dir($_) } @deps;
+
+            if (@active_deps) {
                 print "Dependencies:\n";
-                foreach my $dep (@deps) {
+                foreach my $dep (@active_deps) {
                     print "  $dep\n";
                 }
             } else {
                 print "No dependencies\n";
+            }
+
+            if (@ignored_deps) {
+                print "Ignored dependencies (" . scalar(@ignored_deps) . " in system directories):\n";
+                foreach my $dep (@ignored_deps[0..9]) {
+                    last unless defined $dep;
+                    print "  $dep\n";
+                }
+                if (@ignored_deps > 10) {
+                    print "  ... (" . (@ignored_deps - 10) . " more)\n";
+                }
             }
             if (exists $fixed_rule{$key}) {
                 print "Rule:\n";

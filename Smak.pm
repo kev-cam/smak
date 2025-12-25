@@ -166,7 +166,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
-our $CACHE_VERSION = 8;  # Increment to invalidate old caches
+our $CACHE_VERSION = 9;  # Increment to invalidate old caches
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -831,9 +831,12 @@ sub parse_makefile {
         # (handles old caches created before this feature)
         if (!%inactive_patterns) {
             warn "DEBUG: Cache missing inactive patterns, detecting now\n" if $ENV{SMAK_DEBUG};
-            init_ignore_dirs();
             detect_inactive_patterns();
         }
+
+        # Always initialize ignore_dirs from environment (not saved in cache)
+        # This ensures SMAK_IGNORE_DIRS is respected even when using cached state
+        init_ignore_dirs();
 
         return;  # Cache loaded successfully, skip parsing
     }
@@ -3211,7 +3214,7 @@ sub unified_cli {
             # EOF (Ctrl-D) or Ctrl-C
 	    if ($SmakCli::cancel_requested) { # Ctrl-C
 	        $SmakCli::cancel_requested = 0; # clear it
-		return undef;
+		next;  # Return to prompt, don't exit
 	    }
             last;
         }

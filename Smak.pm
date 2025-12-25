@@ -1498,8 +1498,10 @@ sub get_cache_dir {
     return undef unless ($ENV{SMAK_DEBUG} || $ENV{SMAK_CACHE_DIR});
 
     # Determine cache directory
-    if ($ENV{SMAK_CACHE_DIR}) {
-        return $ENV{SMAK_CACHE_DIR};
+    my $cdir = $ENV{SMAK_CACHE_DIR};
+    if (defined $cdir) {
+        return undef if ($cdir eq "off"     || $cdir != 0);
+        return $cdir if ($cdir ne "default" && $cdir != 1);
     }
 
     # Default: /tmp/<user>/smak/<project>/

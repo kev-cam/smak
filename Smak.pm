@@ -5639,7 +5639,7 @@ sub run_job_master {
 
 	    # Show running targets (up to 5)
 	    if (keys %running_jobs) {
-	        my @running = sort keys %running_jobs;
+	        my @running = sort map { $running_jobs{$_}{target} } keys %running_jobs;
 	        if (@running <= 5) {
 	            vprint " (" . join(", ", @running) . ")";
 	        } else {

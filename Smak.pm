@@ -2442,17 +2442,23 @@ sub build_target {
     # Early exit for files in ignored directories (e.g., /usr/include, /usr/local/include)
     # Check entire directories instead of individual files for efficiency
     if (my $ignored_dir = is_ignored_dir($target)) {
+        warn "DEBUG[" . __LINE__ . "]:   File '$target' is in ignored directory '$ignored_dir'\n" if ($ENV{SMAK_DEBUG} || 0) >= 2;
         # Check if the directory itself has been modified
         if (exists $ignore_dir_mtimes{$ignored_dir}) {
             my $current_mtime = (stat($ignored_dir))[9];
-            if ($current_mtime == $ignore_dir_mtimes{$ignored_dir}) {
+            if (defined $current_mtime && $current_mtime == $ignore_dir_mtimes{$ignored_dir}) {
                 # Directory unchanged, skip this file entirely
+                warn "DEBUG[" . __LINE__ . "]:   Skipping - directory unchanged (mtime=$current_mtime)\n" if ($ENV{SMAK_DEBUG} || 0) >= 2;
                 return;
             } else {
                 # Directory changed - update cache and continue processing
                 warn "WARNING: Ignored directory '$ignored_dir' has changed (rebuilding dependencies)\n";
-                $ignore_dir_mtimes{$ignored_dir} = $current_mtime;
+                $ignore_dir_mtimes{$ignored_dir} = $current_mtime if defined $current_mtime;
             }
+        } else {
+            # Directory not in cache - skip file anyway (system directory)
+            warn "DEBUG[" . __LINE__ . "]:   Skipping - directory not cached (assuming system directory)\n" if ($ENV{SMAK_DEBUG} || 0) >= 2;
+            return;
         }
     }
 

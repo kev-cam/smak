@@ -402,6 +402,11 @@ print "Job-master ready. Entering CLI mode.\n";
 print "Working directory: $selected_js->{cwd}\n" if $selected_js->{cwd};
 print "Workers: $selected_js->{workers}\n\n";
 
+# Change to the same directory as the original smak process
+if ($selected_js->{cwd}) {
+    chdir($selected_js->{cwd}) or warn "Warning: Could not change to directory $selected_js->{cwd}: $!\n";
+}
+
 my $prompt = 'smak-attach> ';
 
 my $term = Term::ReadLine->new($prompt);

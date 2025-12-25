@@ -5650,8 +5650,30 @@ sub run_job_master {
 	    vprint scalar(keys %running_jobs) . " running";
 
 	    # Show running targets (up to 5)
+	    # For each job, try to extract the actual file being built from the command
 	    if (keys %running_jobs) {
-	        my @running = sort map { $running_jobs{$_}{target} } keys %running_jobs;
+	        my @running;
+	        for my $task_id (keys %running_jobs) {
+	            my $job = $running_jobs{$task_id};
+	            my $display_name = $job->{target};
+
+	            # Try to extract output filename from command (look for -o argument)
+	            my $cmd = $job->{command};
+	            if ($cmd =~ /-o\s+(\S+)/) {
+	                # Found -o outputfile
+	                my $output = $1;
+	                # Strip directory path, just show filename
+	                $output =~ s{.*/}{};
+	                $display_name = $output if $output;
+	            } elsif ($job->{target} =~ /\.(o|a|so|exe|out)$/) {
+	                # Target looks like a file, use it as-is
+	                $display_name = $job->{target};
+	            }
+
+	            push @running, $display_name;
+	        }
+
+	        @running = sort @running;
 	        if (@running <= 5) {
 	            vprint " (" . join(", ", @running) . ")";
 	        } else {

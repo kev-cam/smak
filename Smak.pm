@@ -1385,9 +1385,15 @@ sub parse_included_makefile {
     $makefile = $saved_makefile;
 
     # Initialize optimizations once (first time any makefile is parsed)
+    warn "DEBUG: Checking if init needed - inactive_patterns has " . scalar(keys %inactive_patterns) . " entries\n" if $ENV{SMAK_DEBUG};
     if (!%inactive_patterns) {
+        warn "DEBUG: Initializing ignore dirs and inactive patterns\n" if $ENV{SMAK_DEBUG};
         init_ignore_dirs();
         detect_inactive_patterns();
+    } else {
+        warn "DEBUG: Skipping pattern detection - inactive_patterns already populated\n" if $ENV{SMAK_DEBUG};
+        # Still need to init ignore_dirs even if patterns are cached
+        init_ignore_dirs();
     }
 
     # Save state to cache for faster startup next time

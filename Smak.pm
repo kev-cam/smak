@@ -5485,6 +5485,8 @@ sub run_job_master {
                 print STDERR "ERROR: No rule to make target '$target' (needed by other targets)\n";
                 $in_progress{$target} = "failed";
                 $failed_targets{$target} = 1;
+                # Send completion message to master socket if this was a submitted job
+                print $msocket "JOB_COMPLETE $target 1\n" if $msocket;
                 # Fail any composite targets waiting for this
                 fail_dependent_composite_targets($target, 1);
             }

@@ -823,6 +823,10 @@ sub parse_makefile {
     $makefile = $makefile_path;
     undef $default_target;
 
+    # Always initialize ignore_dirs from environment (not saved in cache)
+    # This ensures SMAK_IGNORE_DIRS is respected even when using cached state
+    init_ignore_dirs();
+
     # Try to load from cache if available and valid
     if (load_state_cache($makefile_path)) {
         warn "DEBUG: Using cached state, skipping parse\n" if $ENV{SMAK_DEBUG};
@@ -833,10 +837,6 @@ sub parse_makefile {
             warn "DEBUG: Cache missing inactive patterns, detecting now\n" if $ENV{SMAK_DEBUG};
             detect_inactive_patterns();
         }
-
-        # Always initialize ignore_dirs from environment (not saved in cache)
-        # This ensures SMAK_IGNORE_DIRS is respected even when using cached state
-        init_ignore_dirs();
 
         return;  # Cache loaded successfully, skip parsing
     }
@@ -1384,16 +1384,16 @@ sub parse_included_makefile {
     close($fh);
     $makefile = $saved_makefile;
 
+    # Always do this
+    init_ignore_dirs();
+
     # Initialize optimizations once (first time any makefile is parsed)
     warn "DEBUG: Checking if init needed - inactive_patterns has " . scalar(keys %inactive_patterns) . " entries\n" if $ENV{SMAK_DEBUG};
     if (!%inactive_patterns) {
         warn "DEBUG: Initializing ignore dirs and inactive patterns\n" if $ENV{SMAK_DEBUG};
-        init_ignore_dirs();
         detect_inactive_patterns();
     } else {
         warn "DEBUG: Skipping pattern detection - inactive_patterns already populated\n" if $ENV{SMAK_DEBUG};
-        # Still need to init ignore_dirs even if patterns are cached
-        init_ignore_dirs();
     }
 
     # Save state to cache for faster startup next time

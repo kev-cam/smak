@@ -1136,11 +1136,18 @@ sub parse_makefile {
                 # Also exclude targets with unexpanded variables and special targets
                 if (!defined $default_target && $type ne 'pseudo' && $type ne 'pattern') {
                     # Skip targets with unexpanded variables like $(VERBOSE).SILENT
-                    next if $target =~ /\$/;
+                    if ($target =~ /\$/) {
+                        warn "DEBUG: Skipping target with variable: '$target'\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
                     # Skip special targets like .SILENT, .PHONY, etc.
-                    next if $target =~ /^\./;
+                    if ($target =~ /^\./) {
+                        warn "DEBUG: Skipping special target: '$target'\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
 
                     $default_target = $target;
+                    warn "DEBUG: Setting default target to: '$target'\n" if $ENV{SMAK_DEBUG};
                 }
             }
 
@@ -1995,11 +2002,16 @@ sub _save_ninja_build {
     # Set default target (skip targets with variables or special targets)
     if (!defined $default_target) {
         # Skip targets with unexpanded variables
-        unless ($output =~ /\$/) {
-            # Skip special targets
-            unless ($output =~ /^\./) {
-                $default_target = $output;
-            }
+        if ($output =~ /\$/) {
+            warn "DEBUG: add_rule skipping target with variable: '$output'\n" if $ENV{SMAK_DEBUG};
+        }
+        # Skip special targets
+        elsif ($output =~ /^\./) {
+            warn "DEBUG: add_rule skipping special target: '$output'\n" if $ENV{SMAK_DEBUG};
+        }
+        else {
+            $default_target = $output;
+            warn "DEBUG: add_rule setting default target to: '$output'\n" if $ENV{SMAK_DEBUG};
         }
     }
 }

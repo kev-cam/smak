@@ -7,16 +7,19 @@ use Cwd 'abs_path';
 use Getopt::Long;
 use Term::ReadLine;
 use Smak qw(:all);
+use SmakTest qw(run_interactive_tests);
 
 # Parse command-line options
 my $target_pid;
 my $target_port;
 my $pid_arg;
 my $kill_all = 0;
+my $test_mode = 0;
 GetOptions(
     'pid=s' => \$pid_arg,
     'kill-all' => \$kill_all,
-) or die "Usage: $0 [-pid <process-id>[:<port>]] [--kill-all]\n";
+    'test' => \$test_mode,
+) or die "Usage: $0 [-pid <process-id>[:<port>]] [--kill-all] [--test]\n";
 
 # Parse PID and optional port from -pid argument
 if ($pid_arg) {
@@ -398,25 +401,41 @@ unless ($ready && $ready eq 'JOBSERVER_WORKERS_READY') {
     die "Job-master not ready (got: " . ($ready || "EOF") . ")\n";
 }
 
-print "Job-master ready. Entering CLI mode.\n";
+if ($test_mode) {
+    print "Job-master ready. Entering TEST mode.\n";
+} else {
+    print "Job-master ready. Entering CLI mode.\n";
+}
 print "Working directory: $selected_js->{cwd}\n" if $selected_js->{cwd};
 print "Workers: $selected_js->{workers}\n\n";
 
-my $prompt = 'smak-attach> ';
+# Change to the same directory as the original smak process
+if ($selected_js->{cwd}) {
+    chdir($selected_js->{cwd}) or warn "Warning: Could not change to directory $selected_js->{cwd}: $!\n";
+}
 
-my $term = Term::ReadLine->new($prompt);
+# Set CLI owner to this attached process
+$Smak::cli_owner = $$;
 
-# Enter unified CLI in attached mode
-Smak::unified_cli(
-    mode => 'attached',
-    socket => $socket,
-    server_pid => $jobserver_pid,
-    own_server => 0,  # We're attaching to existing server
-    jobs => 1,  # Unknown, will use server's config
-    makefile => 'Makefile',  # Default
-    prompt => $prompt,
-    term => $term,
-);
+if ($test_mode) {
+    # Enter test mode
+    SmakTest::run_interactive_tests($socket);
+} else {
+    # Enter unified CLI in attached mode
+    my $prompt = 'smak-attach> ';
+    my $term = Term::ReadLine->new($prompt);
+
+    Smak::unified_cli(
+        mode => 'attached',
+        socket => $socket,
+        server_pid => $jobserver_pid,
+        own_server => 0,  # We're attaching to existing server
+        jobs => 1,  # Unknown, will use server's config
+        makefile => 'Makefile',  # Default
+        prompt => $prompt,
+        term => $term,
+    );
+}
 
 close($socket);
 exit 0;

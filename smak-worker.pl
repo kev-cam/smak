@@ -149,6 +149,14 @@ while (my $line = <$socket>) {
         last;
     }
 
+    # Handle CLI owner change
+    if ($line =~ /^CLI_OWNER (\d+)$/) {
+        my $new_owner = $1;
+        $ENV{SMAK_CLI_PID} = $new_owner;
+        # Worker doesn't prompt, so just update environment
+        next;
+    }
+
     # Parse command format: "task <#> ; cd <dir> ; <command>"
     # Or simplified: "TASK <#>\nDIR <dir>\nCMD <command>\n"
     if ($line =~ /^TASK (\d+)$/) {

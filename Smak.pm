@@ -3146,9 +3146,21 @@ sub unified_cli {
 	print "\n";
     }
 
+    # Claim CLI ownership
+    $SmakCli::cli_owner = $$;
     $ENV{SMAK_CLI_PID} = $SmakCli::cli_owner;
     $ENV{SMAK_PID}     = $$;
-    
+
+    # Broadcast ownership to job server and all workers via SIGWINCH
+    if ($socket && $server_pid) {
+        # Send ownership info to job server
+        print $socket "CLI_OWNER $$\n";
+        $socket->flush() if $socket->can('flush');
+
+        # Signal all processes to pick up the new CLI owner
+        kill 'WINCH', $server_pid if $server_pid > 0;
+    }
+
     # Helper: check for asynchronous notifications and job output
     my %recent_file_notifications;  # Track recent file notifications to avoid spam
     my $check_notifications = sub {
@@ -6145,7 +6157,23 @@ sub run_job_master {
                     shutdown_workers();
                     print $master_socket "SHUTDOWN_ACK\n";
                     exit 0;
-		    
+
+                } elsif ($line =~ /^CLI_OWNER (\d+)$/) {
+                    # Update CLI owner in job master
+                    my $new_owner = $1;
+                    $SmakCli::cli_owner = $new_owner;
+                    $ENV{SMAK_CLI_PID} = $new_owner;
+                    vprint "CLI ownership claimed by PID $new_owner\n";
+
+                    # Broadcast to all workers via socket
+                    for my $worker (@workers) {
+                        print $worker "CLI_OWNER $new_owner\n";
+                        $worker->flush() if $worker->can('flush');
+                    }
+
+                    # Send SIGWINCH to job master itself to trigger any handlers
+                    kill 'WINCH', $$;
+
                 } elsif ($line =~ /^SUBMIT_JOB$/) {
                     # Read job details
                     my $target = <$socket>; chomp $target if defined $target;

@@ -3519,7 +3519,7 @@ Available commands:
   rm <file>           Remove file (saves to .{file}.prev) and mark dirty
   ignore <file>       Ignore a file for dependency checking
   ignore -none        Clear all ignored files
-  ignore              List currently ignored files
+  ignore              List ignored files and directories
   needs <file>        Show which targets depend on a file
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
@@ -3950,6 +3950,24 @@ sub cmd_ignore {
 
     # List ignored files if no arguments
     if (@$words == 0) {
+        # Show ignored directories from SMAK_IGNORE_DIRS
+        if (@Smak::ignore_dirs) {
+            print "Ignored directories (from SMAK_IGNORE_DIRS):\n";
+            for my $dir (sort @Smak::ignore_dirs) {
+                my $status = "";
+                if (exists $Smak::ignore_dir_mtimes{$dir}) {
+                    $status = " (mtime=" . $Smak::ignore_dir_mtimes{$dir} . ")";
+                } else {
+                    $status = " (not found)";
+                }
+                print "  $dir$status\n";
+            }
+            print "\n" . (scalar @Smak::ignore_dirs) . " director(ies) ignored\n\n";
+        } else {
+            print "No ignored directories (set SMAK_IGNORE_DIRS to ignore system directories)\n\n";
+        }
+
+        # Show ignored files
         if (keys %Smak::ignored_files) {
             print "Ignored files:\n";
             for my $file (sort keys %Smak::ignored_files) {
@@ -3961,6 +3979,7 @@ sub cmd_ignore {
         }
         print "\nUsage: ignore <file>    - Ignore a file for dependency checking\n";
         print "       ignore -none     - Clear all ignored files\n";
+        print "       Set SMAK_IGNORE_DIRS environment variable to ignore directories\n";
         return;
     }
 

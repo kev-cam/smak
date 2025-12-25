@@ -2673,13 +2673,16 @@ sub build_target {
 
     # Recursively build dependencies
     # In parallel mode, skip this - let job-master handle dependency expansion
+    warn "DEBUG[" . __LINE__ . "]:   Checking job_server_socket: " . (defined $job_server_socket ? "SET (fd=" . fileno($job_server_socket) . ")" : "NOT SET") . "\n" if $ENV{SMAK_DEBUG};
     unless ($job_server_socket) {
-        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies...\n" if $ENV{SMAK_DEBUG};
+        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies sequentially (no job server)...\n" if $ENV{SMAK_DEBUG};
         for my $dep (@deps) {
             warn "DEBUG[" . __LINE__ . "]:     Building dependency: $dep\n" if $ENV{SMAK_DEBUG};
             build_target($dep, $visited, $depth + 1);
         }
         warn "DEBUG[" . __LINE__ . "]:   Finished building dependencies\n" if $ENV{SMAK_DEBUG};
+    } else {
+        warn "DEBUG[" . __LINE__ . "]:   Skipping dependency expansion - job server will handle it\n" if $ENV{SMAK_DEBUG};
     }
 
     warn "DEBUG[" . __LINE__ . "]:   Checking if should execute rule: rule defined=" . (defined $rule ? "yes" : "no") . ", has content=" . (($rule && $rule =~ /\S/) ? "yes" : "no") . "\n" if $ENV{SMAK_DEBUG};

@@ -119,6 +119,25 @@ sub has_source_control_recursion {
     return 0;
 }
 
+# Check if a dependency should be filtered out (source control file)
+# Returns 1 if dependency should be filtered, 0 otherwise
+sub should_filter_dependency {
+    my ($dep) = @_;
+
+    # Check for source control file extensions (,v)
+    for my $ext (keys %source_control_extensions) {
+        return 1 if $dep =~ /\Q$ext\E/;
+    }
+
+    # Check for source control directory recursion
+    return 1 if has_source_control_recursion($dep);
+
+    # Check for inactive patterns
+    return 1 if is_inactive_pattern($dep);
+
+    return 0;
+}
+
 our @job_queue;
 
 # Hash for Makefile variables
@@ -1054,6 +1073,24 @@ sub parse_makefile {
             @current_targets = @targets;
             $current_type = classify_target($current_targets[0]) if @current_targets;
             $current_rule = '';
+
+            # For pattern rules, check if ALL dependencies would be filtered
+            # If so, discard the entire rule by clearing @current_targets
+            if ($current_type eq 'pattern' && @deps) {
+                my $all_deps_filtered = 1;
+                for my $dep (@deps) {
+                    if (!should_filter_dependency($dep)) {
+                        $all_deps_filtered = 0;
+                        last;
+                    }
+                }
+
+                if ($all_deps_filtered) {
+                    warn "DEBUG: Discarding pattern rule with all filtered dependencies: @targets\n" if $ENV{SMAK_DEBUG};
+                    @current_targets = ();  # Clear to prevent rule from being saved
+                    next;  # Skip dependency storage
+                }
+            }
 
             # Store dependencies for all targets
             for my $target (@targets) {

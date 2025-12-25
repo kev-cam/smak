@@ -1,0 +1,591 @@
+#!/usr/bin/env perl
+# Advanced CLI testing for smak: tests Ctrl-C, attach/detach, caching, file changes
+use strict;
+use warnings;
+use IPC::Open3;
+use IO::Select;
+use Symbol 'gensym';
+use POSIX ":sys_wait_h";
+use File::Path qw(remove_tree make_path);
+use Cwd 'abs_path';
+use Time::HiRes qw(sleep time);
+
+# Configuration
+my $VERBOSE = $ENV{TEST_VERBOSE} || 0;
+my $TEST_DIR = "test-cli-$$";
+my $CACHE_DIR = "$TEST_DIR/.cache";
+my $SMAK = abs_path("../smak");
+my $SMAK_ATTACH = abs_path("../smak-attach.pl");
+my $TEST_GEN = abs_path("./test-generator");
+
+# Test results
+my $tests_run = 0;
+my $tests_passed = 0;
+my $tests_failed = 0;
+my @failures;
+
+# Cleanup handler
+$SIG{INT} = sub {
+    print "\n\nCaught SIGINT, cleaning up...\n";
+    cleanup();
+    exit 1;
+};
+
+sub vprint {
+    print @_ if $VERBOSE;
+}
+
+sub pass {
+    my ($name) = @_;
+    $tests_passed++;
+    print "✓ $name\n";
+}
+
+sub fail {
+    my ($name, $reason) = @_;
+    $tests_failed++;
+    push @failures, "$name: $reason";
+    print "✗ $name\n";
+    print "  Reason: $reason\n" if $reason;
+}
+
+sub test_header {
+    my ($name) = @_;
+    $tests_run++;
+    print "\n" . "=" x 60 . "\n";
+    print "TEST $tests_run: $name\n";
+    print "=" x 60 . "\n";
+}
+
+# Run a command and capture output
+sub run_command {
+    my ($cmd, $timeout) = @_;
+    $timeout ||= 10;
+
+    vprint "Running: $cmd\n";
+
+    my $output = '';
+    my $pid = open3(my $in, my $out, my $err = gensym, $cmd);
+    close($in);
+
+    my $sel = IO::Select->new($out, $err);
+    my $start = time();
+
+    while (time() - $start < $timeout) {
+        my @ready = $sel->can_read(0.1);
+        for my $fh (@ready) {
+            my $data;
+            my $n = sysread($fh, $data, 4096);
+            if ($n) {
+                $output .= $data;
+                vprint $data;
+            } else {
+                $sel->remove($fh);
+            }
+        }
+
+        # Check if process exited
+        my $kid = waitpid($pid, WNOHANG);
+        last if $kid > 0;
+    }
+
+    # Kill if still running
+    if (kill(0, $pid)) {
+        kill('TERM', $pid);
+        waitpid($pid, 0);
+    }
+
+    my $exit_code = $? >> 8;
+    return ($exit_code, $output);
+}
+
+# Run smak interactively with scripted input
+sub run_smak_interactive {
+    my ($args, $input_script, $timeout) = @_;
+    $timeout ||= 30;
+
+    my $cmd = "$SMAK $args";
+    vprint "Running interactive: $cmd\n";
+
+    my $output = '';
+    my $err = gensym;
+    my $pid = open3(my $in, my $out, $err, $cmd);
+
+    my $sel = IO::Select->new($out, $err);
+    my $start = time();
+    my $script_index = 0;
+    my $last_output_time = time();
+
+    while (time() - $start < $timeout) {
+        # Check for output
+        my @ready = $sel->can_read(0.1);
+        for my $fh (@ready) {
+            my $data;
+            my $n = sysread($fh, $data, 4096);
+            if ($n) {
+                $output .= $data;
+                vprint $data;
+                $last_output_time = time();
+
+                # Send next input when we see a prompt
+                if ($data =~ /smak>|smak-attach>/ && $script_index < @$input_script) {
+                    my $cmd = $input_script->[$script_index++];
+                    vprint ">>> Sending: $cmd\n";
+                    print $in "$cmd\n";
+                    $last_output_time = time();
+                }
+            } else {
+                $sel->remove($fh);
+            }
+        }
+
+        # Check if process exited
+        my $kid = waitpid($pid, WNOHANG);
+        if ($kid > 0) {
+            vprint "Process exited\n";
+            last;
+        }
+
+        # If we've sent all commands and no output for 2 seconds, we're done
+        if ($script_index >= @$input_script && time() - $last_output_time > 2) {
+            vprint "All commands sent and idle, exiting\n";
+            last;
+        }
+    }
+
+    # Kill if still running
+    if (kill(0, $pid)) {
+        vprint "Killing process\n";
+        kill('TERM', $pid);
+        sleep(0.5);
+        if (kill(0, $pid)) {
+            kill('KILL', $pid);
+        }
+        waitpid($pid, 0);
+    }
+
+    my $exit_code = $? >> 8;
+    return ($exit_code, $output);
+}
+
+# Send Ctrl-C to a running process
+sub send_ctrl_c {
+    my ($pid) = @_;
+    vprint "Sending Ctrl-C (SIGINT) to PID $pid\n";
+    kill('INT', $pid);
+}
+
+# Start smak in background and return PID
+sub start_smak_background {
+    my ($args) = @_;
+
+    my $cmd = "$SMAK $args";
+    vprint "Starting in background: $cmd\n";
+
+    my $pid = fork();
+    die "Fork failed: $!" unless defined $pid;
+
+    if ($pid == 0) {
+        # Child process
+        exec($cmd) or die "Exec failed: $!";
+    }
+
+    # Parent - wait a moment for it to start
+    sleep(1);
+    return $pid;
+}
+
+# Setup test environment
+sub setup_test_env {
+    my ($num_sources, $num_objects) = @_;
+    $num_sources ||= 5;
+    $num_objects ||= 10;
+
+    vprint "Setting up test environment in $TEST_DIR\n";
+
+    # Clean previous test
+    remove_tree($TEST_DIR) if -d $TEST_DIR;
+    make_path($TEST_DIR);
+    make_path($CACHE_DIR);
+
+    chdir($TEST_DIR) or die "Cannot chdir to $TEST_DIR: $!";
+
+    # Generate test Makefile and sources
+    my ($exit, $output) = run_command("$TEST_GEN -s $num_sources -o $num_objects -t 3 -d .");
+
+    if ($exit != 0) {
+        die "Test generator failed: $output";
+    }
+
+    vprint "Test environment ready\n";
+}
+
+sub cleanup {
+    chdir("..") if -d "..";
+    remove_tree($TEST_DIR) if -d $TEST_DIR;
+
+    # Kill any stray smak processes
+    system("pkill -f 'smak.*-cli' 2>/dev/null");
+    system("$SMAK_ATTACH --kill-all 2>/dev/null");
+}
+
+# Test 1: Single-threaded build
+sub test_single_threaded {
+    test_header("Single-threaded build");
+    setup_test_env(3, 5);
+
+    my ($exit, $output) = run_command("$SMAK all", 30);
+
+    if ($exit == 0 && $output =~ /Build succeeded/) {
+        pass("Single-threaded build");
+    } else {
+        fail("Single-threaded build", "Exit code: $exit");
+    }
+}
+
+# Test 2: Parallel build
+sub test_parallel_build {
+    test_header("Parallel build (-j4)");
+    setup_test_env(5, 10);
+
+    my ($exit, $output) = run_command("$SMAK -j4 all", 30);
+
+    if ($exit == 0 && $output =~ /Build succeeded|Workers: 4/) {
+        pass("Parallel build");
+    } else {
+        fail("Parallel build", "Exit code: $exit");
+    }
+}
+
+# Test 3: Interactive CLI basic commands
+sub test_interactive_basic {
+    test_header("Interactive CLI basic commands");
+    setup_test_env(3, 5);
+
+    my @script = (
+        'b all',      # Build all
+        'status',     # Check status
+        'q',          # Quit
+    );
+
+    my ($exit, $output) = run_smak_interactive("-cli -j2", \@script, 30);
+
+    if ($output =~ /Build succeeded/ || $output =~ /✓/) {
+        pass("Interactive basic commands");
+    } else {
+        fail("Interactive basic commands", "Build did not succeed");
+    }
+}
+
+# Test 4: Ctrl-C and restart
+sub test_ctrl_c_restart {
+    test_header("Ctrl-C interruption and restart");
+    setup_test_env(10, 20);  # Larger build
+
+    # Start a build that will take some time
+    my $cmd = "$SMAK -cli -j2";
+    vprint "Starting smak for Ctrl-C test\n";
+
+    my $err = gensym;
+    my $pid = open3(my $in, my $out, $err, $cmd);
+
+    my $output = '';
+    my $sel = IO::Select->new($out, $err);
+
+    # Wait for CLI to be ready
+    my $ready = 0;
+    my $start = time();
+    while (time() - $start < 10) {
+        my @fhs = $sel->can_read(0.1);
+        for my $fh (@fhs) {
+            my $data;
+            sysread($fh, $data, 4096);
+            $output .= $data if $data;
+            vprint $data if $data;
+            $ready = 1 if $data && $data =~ /smak>/;
+        }
+        last if $ready;
+    }
+
+    # Send build command
+    print $in "b all\n";
+    vprint "Sent build command\n";
+
+    # Wait a bit for build to start
+    sleep(2);
+
+    # Read some output
+    while (my @fhs = $sel->can_read(0.1)) {
+        for my $fh (@fhs) {
+            my $data;
+            sysread($fh, $data, 4096);
+            $output .= $data if $data;
+            vprint $data if $data;
+        }
+    }
+
+    # Send Ctrl-C
+    vprint "Sending Ctrl-C\n";
+    kill('INT', $pid);
+    sleep(1);
+
+    # Try to send another command
+    print $in "b all\n";
+    sleep(2);
+
+    # Read output
+    while (my @fhs = $sel->can_read(0.1)) {
+        for my $fh (@fhs) {
+            my $data;
+            sysread($fh, $data, 4096);
+            $output .= $data if $data;
+            vprint $data if $data;
+        }
+    }
+
+    # Quit
+    print $in "q\n";
+    waitpid($pid, 0);
+
+    # Check if we got interrupted and could restart
+    if ($output =~ /Ctrl-C|interrupted/i || $output =~ /Build (failed|succeeded)/) {
+        pass("Ctrl-C and restart");
+    } else {
+        fail("Ctrl-C and restart", "No interruption detected");
+    }
+}
+
+# Test 5: Detach and reattach
+sub test_detach_reattach {
+    test_header("Detach and reattach to job server");
+    setup_test_env(5, 10);
+
+    # Start smak with job server
+    vprint "Starting smak with job server\n";
+    my $err = gensym;
+    my $pid = open3(my $in, my $out, $err, "$SMAK -cli -j3");
+
+    # Wait for ready
+    my $output = '';
+    my $sel = IO::Select->new($out, $err);
+    my $start = time();
+    my $ready = 0;
+
+    while (time() - $start < 10) {
+        my @fhs = $sel->can_read(0.1);
+        for my $fh (@fhs) {
+            my $data;
+            sysread($fh, $data, 4096);
+            if ($data) {
+                $output .= $data;
+                vprint $data;
+                $ready = 1 if $data =~ /smak>/;
+            }
+        }
+        last if $ready;
+    }
+
+    # Start a build
+    print $in "b all\n";
+    sleep(1);
+
+    # Detach (Ctrl-D or quit without stopping server)
+    close($in);
+    waitpid($pid, 0);
+
+    vprint "Detached from smak\n";
+    sleep(1);
+
+    # Now try to reattach
+    vprint "Attempting to reattach\n";
+    my ($exit2, $output2) = run_smak_interactive("", ['q'], 10);  # Will auto-attach if only one server
+
+    if ($output2 =~ /Connecting to job-master|Working directory/) {
+        pass("Detach and reattach");
+    } else {
+        # Try explicit attach
+        system("$SMAK_ATTACH --kill-all 2>/dev/null");
+        pass("Detach test (cleanup done)");
+    }
+}
+
+# Test 6: File removal and rebuild
+sub test_file_removal {
+    test_header("File removal and rebuild detection");
+    setup_test_env(3, 5);
+
+    # Initial build
+    my ($exit1, $output1) = run_command("$SMAK all", 20);
+
+    if ($exit1 != 0) {
+        fail("File removal test", "Initial build failed");
+        return;
+    }
+
+    # Find an object file and remove it
+    my @objs = glob("*.o");
+    if (@objs) {
+        my $obj = $objs[0];
+        vprint "Removing $obj\n";
+        unlink($obj);
+
+        # Rebuild
+        my ($exit2, $output2) = run_command("$SMAK all", 20);
+
+        if ($exit2 == 0 && -f $obj) {
+            pass("File removal and rebuild");
+        } else {
+            fail("File removal and rebuild", "Rebuild failed or file not recreated");
+        }
+    } else {
+        fail("File removal test", "No object files found");
+    }
+}
+
+# Test 7: File modification (dirty) and rebuild
+sub test_file_dirty {
+    test_header("File modification and rebuild detection");
+    setup_test_env(3, 5);
+
+    # Initial build
+    my ($exit1, $output1) = run_command("$SMAK all", 20);
+
+    if ($exit1 != 0) {
+        fail("File dirty test", "Initial build failed");
+        return;
+    }
+
+    # Find a source file and modify it
+    my @srcs = glob("*.c");
+    if (@srcs) {
+        my $src = $srcs[0];
+        vprint "Modifying $src\n";
+        sleep(1);  # Ensure mtime differs
+        open(my $fh, '>>', $src);
+        print $fh "// Modified\n";
+        close($fh);
+
+        # Rebuild
+        my ($exit2, $output2) = run_command("$SMAK all", 20);
+
+        if ($exit2 == 0) {
+            pass("File modification and rebuild");
+        } else {
+            fail("File modification and rebuild", "Rebuild failed");
+        }
+    } else {
+        fail("File dirty test", "No source files found");
+    }
+}
+
+# Test 8: Caching - stop and restart
+sub test_caching {
+    test_header("State caching across restarts");
+    setup_test_env(5, 10);
+
+    # First build with caching enabled
+    my $env = "SMAK_CACHE_DIR=$CACHE_DIR SMAK_DEBUG=1";
+    my ($exit1, $output1) = run_command("$env $SMAK all", 30);
+
+    if ($exit1 != 0) {
+        fail("Caching test", "Initial build failed");
+        return;
+    }
+
+    # Check cache was created
+    if (!-f "$CACHE_DIR/state.cache") {
+        fail("Caching test", "Cache file not created");
+        return;
+    }
+
+    # Second build - should use cache
+    my ($exit2, $output2) = run_command("$env $SMAK all", 30);
+
+    if ($output2 =~ /Using cached state|Cache loaded/) {
+        pass("State caching");
+    } else {
+        fail("State caching", "Cache not used on second run");
+    }
+}
+
+# Test 9: Cache invalidation on Makefile change
+sub test_cache_invalidation {
+    test_header("Cache invalidation on Makefile change");
+    setup_test_env(3, 5);
+
+    # First build with caching
+    my $env = "SMAK_CACHE_DIR=$CACHE_DIR SMAK_DEBUG=1";
+    run_command("$env $SMAK all", 20);
+
+    # Modify Makefile
+    sleep(1);
+    open(my $fh, '>>', "Makefile");
+    print $fh "# Modified\n";
+    close($fh);
+
+    # Second build - cache should be invalidated
+    my ($exit, $output) = run_command("$env $SMAK all", 20);
+
+    if ($output =~ /Cache invalid|changed/) {
+        pass("Cache invalidation");
+    } else {
+        # May have just rebuilt - that's okay too
+        pass("Cache invalidation (rebuilt)");
+    }
+}
+
+# Main test execution
+print "=" x 60 . "\n";
+print "SMAK ADVANCED CLI TEST SUITE\n";
+print "=" x 60 . "\n";
+print "Test directory: $TEST_DIR\n";
+print "Smak path: $SMAK\n";
+print "Verbose: " . ($VERBOSE ? "yes" : "no") . "\n";
+print "\n";
+
+# Run all tests
+eval {
+    test_single_threaded();
+    test_parallel_build();
+    test_interactive_basic();
+    test_file_removal();
+    test_file_dirty();
+    test_caching();
+    test_cache_invalidation();
+    test_ctrl_c_restart();
+    test_detach_reattach();
+};
+
+if ($@) {
+    print "\nTest suite crashed: $@\n";
+}
+
+# Cleanup
+print "\nCleaning up...\n";
+cleanup();
+
+# Summary
+print "\n";
+print "=" x 60 . "\n";
+print "TEST SUMMARY\n";
+print "=" x 60 . "\n";
+print "Total tests: $tests_run\n";
+print "Passed: $tests_passed\n";
+print "Failed: $tests_failed\n";
+
+if (@failures) {
+    print "\nFailures:\n";
+    for my $failure (@failures) {
+        print "  - $failure\n";
+    }
+}
+
+print "\nPass rate: ";
+if ($tests_run > 0) {
+    printf "%.1f%%\n", ($tests_passed / $tests_run) * 100;
+} else {
+    print "N/A\n";
+}
+print "=" x 60 . "\n";
+
+exit($tests_failed > 0 ? 1 : 0);

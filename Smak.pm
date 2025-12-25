@@ -166,7 +166,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
-our $CACHE_VERSION = 7;  # Increment to invalidate old caches
+our $CACHE_VERSION = 8;  # Increment to invalidate old caches
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -1145,6 +1145,15 @@ sub parse_makefile {
                         warn "DEBUG: Skipping special target: '$target'\n" if $ENV{SMAK_DEBUG};
                         next;
                     }
+                    # Skip targets declared in .PHONY
+                    my $phony_key = "$makefile\t.PHONY";
+                    if (exists $pseudo_deps{$phony_key}) {
+                        my @phony_targets = @{$pseudo_deps{$phony_key} || []};
+                        if (grep { $_ eq $target } @phony_targets) {
+                            warn "DEBUG: Skipping .PHONY target: '$target'\n" if $ENV{SMAK_DEBUG};
+                            next;
+                        }
+                    }
 
                     $default_target = $target;
                     warn "DEBUG: Setting default target to: '$target'\n" if $ENV{SMAK_DEBUG};
@@ -2008,6 +2017,10 @@ sub _save_ninja_build {
         # Skip special targets
         elsif ($output =~ /^\./) {
             warn "DEBUG: add_rule skipping special target: '$output'\n" if $ENV{SMAK_DEBUG};
+        }
+        # Skip phony targets
+        elsif (exists $phony_targets{$output}) {
+            warn "DEBUG: add_rule skipping phony target: '$output'\n" if $ENV{SMAK_DEBUG};
         }
         else {
             $default_target = $output;

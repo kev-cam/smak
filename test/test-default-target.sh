@@ -53,7 +53,7 @@ mkdir -p "$TEST_DIR"
 cd "$TEST_DIR"
 
 cat > Makefile << 'EOF'
-.PHONY: all clean
+.PHONY: clean
 
 .SILENT:
 

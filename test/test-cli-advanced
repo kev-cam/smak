@@ -9,6 +9,8 @@ use POSIX ":sys_wait_h";
 use File::Path qw(remove_tree make_path);
 use Cwd 'abs_path';
 use Time::HiRes qw(sleep time);
+use lib '..';  # Add parent directory for SmakTest
+use SmakTest;
 
 # Configuration
 my $VERBOSE = $ENV{TEST_VERBOSE} || 0;

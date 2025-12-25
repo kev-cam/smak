@@ -166,7 +166,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
-our $CACHE_VERSION = 5;  # Increment to invalidate old caches
+our $CACHE_VERSION = 6;  # Increment to invalidate old caches
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -1133,7 +1133,13 @@ sub parse_makefile {
                 }
 
                 # Set default target to first non-pseudo, non-pattern target (like gmake)
+                # Also exclude targets with unexpanded variables and special targets
                 if (!defined $default_target && $type ne 'pseudo' && $type ne 'pattern') {
+                    # Skip targets with unexpanded variables like $(VERBOSE).SILENT
+                    next if $target =~ /\$/;
+                    # Skip special targets like .SILENT, .PHONY, etc.
+                    next if $target =~ /^\./;
+
                     $default_target = $target;
                 }
             }
@@ -1459,8 +1465,8 @@ sub detect_inactive_patterns {
 sub is_inactive_pattern {
     my ($file) = @_;
 
-    # Debug: show what we're checking and what patterns are inactive
-    if ($ENV{SMAK_DEBUG} && ($file =~ /RCS/ || $file =~ /SCCS/ || $file =~ /,v/ || $file =~ /^s\./)) {
+    # Debug: show what we're checking and what patterns are inactive (level 2+)
+    if (($ENV{SMAK_DEBUG} || 0) >= 2 && ($file =~ /RCS/ || $file =~ /SCCS/ || $file =~ /,v/ || $file =~ /^s\./)) {
         my $rcs_inactive = $inactive_patterns{'RCS'} || 0;
         my $sccs_inactive = $inactive_patterns{'SCCS'} || 0;
         warn "DEBUG is_inactive_pattern: checking '$file' (RCS=$rcs_inactive, SCCS=$sccs_inactive)\n";
@@ -1694,7 +1700,7 @@ sub resolve_vpath {
     # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
     # This avoids unnecessary vpath resolution and debug spam for patterns that don't exist
     if (is_inactive_pattern($file)) {
-        warn "DEBUG vpath: Skipping inactive pattern file '$file'\n" if $ENV{SMAK_DEBUG};
+        warn "DEBUG vpath: Skipping inactive pattern file '$file'\n" if ($ENV{SMAK_DEBUG} || 0) >= 2;
         return $file;  # Return as-is without vpath resolution
     }
 

@@ -20,6 +20,9 @@ Usage: $0 [OPTIONS]
 
 Run smak regression test suite.
 
+All tests are run twice - once with cache disabled and once with cache enabled.
+This ensures consistent behavior between cached and non-cached execution.
+
 Options:
   (none)        Run quick regression tests (non-interactive unit tests)
   -f, --full    Run full test suite including random builds and CLI tests
@@ -72,31 +75,56 @@ run_test() {
     fi
 
     # Run test and capture output
-    local output
+    local output_nocache output_cache
     local start_time=$(date +%s)
 
     if [ $VERBOSE -eq 1 ]; then
-        ./"$test_script"
-        local result=$?
+        echo ""
+        echo "  [no-cache]"
+        SMAK_CACHE_DIR=off ./"$test_script"
+        local result_nocache=$?
+        echo "  [with-cache]"
+        SMAK_CACHE_DIR=default ./"$test_script"
+        local result_cache=$?
     else
-        output=$(./"$test_script" 2>&1 < /dev/null)
-        local result=$?
+        # Run without cache
+        output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
+        local result_nocache=$?
+
+        # Run with cache
+        output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
+        local result_cache=$?
     fi
 
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
 
-    if [ $result -eq 0 ]; then
+    # Check if both runs passed
+    if [ $result_nocache -eq 0 ] && [ $result_cache -eq 0 ]; then
         echo -e "${GREEN}PASS${NC} (${duration}s)"
         ((PASSED++))
         PASSED_TESTS+=("$test_name")
+    # Check if cache behavior differs from no-cache
+    elif [ $result_nocache -ne $result_cache ]; then
+        echo -e "${RED}FAIL${NC} (cache mismatch: no-cache=$result_nocache, cache=$result_cache)"
+        ((FAILED++))
+        FAILED_TESTS+=("$test_name")
+        # Save both outputs for comparison
+        if [ $VERBOSE -eq 0 ]; then
+            echo "=== NO CACHE ===" > "/tmp/smak-test-fail-$test_name.log"
+            echo "$output_nocache" >> "/tmp/smak-test-fail-$test_name.log"
+            echo "" >> "/tmp/smak-test-fail-$test_name.log"
+            echo "=== WITH CACHE ===" >> "/tmp/smak-test-fail-$test_name.log"
+            echo "$output_cache" >> "/tmp/smak-test-fail-$test_name.log"
+        fi
     else
+        # Both failed with same result
         echo -e "${RED}FAIL${NC} (${duration}s)"
         ((FAILED++))
         FAILED_TESTS+=("$test_name")
-        # Save failure output
+        # Save failure output (no-cache version)
         if [ $VERBOSE -eq 0 ]; then
-            echo "$output" > "/tmp/smak-test-fail-$test_name.log"
+            echo "$output_nocache" > "/tmp/smak-test-fail-$test_name.log"
         fi
     fi
 }

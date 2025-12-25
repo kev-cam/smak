@@ -5635,7 +5635,18 @@ sub run_job_master {
 	                                       || scalar(keys %running_jobs)) {
 	    vprint "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
 	    vprint "$ready_workers/" . scalar(@workers) . " ready, ";
-	    vprint scalar(keys %running_jobs) . " running\n";
+	    vprint scalar(keys %running_jobs) . " running";
+
+	    # Show running targets (up to 5)
+	    if (keys %running_jobs) {
+	        my @running = sort keys %running_jobs;
+	        if (@running <= 5) {
+	            vprint " (" . join(", ", @running) . ")";
+	        } else {
+	            vprint " (" . join(", ", @running[0..4]) . ", ... " . (@running - 5) . " more)";
+	        }
+	    }
+	    vprint "\n";
 	}
 	
 	if (@job_queue > 0 && @job_queue <= 5) {

@@ -503,6 +503,13 @@ $Smak::remote_cd = $remote_cd if $remote_cd;
 # This ensures %rules is populated when job-master inherits it
 parse_makefile($makefile);
 
+# Auto-load <makefile>.smak if it exists
+my $auto_script = "$makefile.smak";
+if (-f $auto_script) {
+    print "Auto-loading script: $auto_script\n" if $ENV{SMAK_DEBUG};
+    execute_script_file($auto_script);
+}
+
 # Start job server if parallel builds are requested
 # Skip in debug, dry-run, or CLI mode (CLI mode starts its own server in run_cli)
 unless ($debug || $dry_run || $cli) {

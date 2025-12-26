@@ -1547,10 +1547,10 @@ sub get_cache_dir {
     my $cdir = $ENV{SMAK_CACHE_DIR};
     if (defined $cdir) {
         # Disable caching for "off" or "0"
-        return undef if ($cdir eq "off" || $cdir eq "0" || $cdir == 0);
+        return undef if ($cdir eq "off" || $cdir eq "0");
         # Use default location for "default" or "1"
         # (fall through to default calculation below)
-        unless ($cdir eq "default" || $cdir eq "1" || $cdir == 1) {
+        unless ($cdir eq "default" || $cdir eq "1") {
             # Use specified path
             return $cdir;
         }

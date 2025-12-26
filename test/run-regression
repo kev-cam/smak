@@ -118,7 +118,7 @@ run_test() {
     # Determine how to run the test
     if true; then
         # Handle interactive tests with script files using automated script runner
-        if [ $is_interactive -eq 1 ] && [ $has_heredoc -eq 0 ] && [ $has_script -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
+        if [ $is_interactive -eq 1 ] && [ $has_script -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
             # Run with script automation using run-with-script.pl (with timeout)
             output_nocache=$(timeout 30 env SMAK_CACHE_DIR=off ./run-with-script.pl "$script_file" ./"$test_script" 2>&1)
             local result_nocache=$?
@@ -136,8 +136,8 @@ run_test() {
                 return
             fi
 
-        # Interactive tests with heredoc OR TTY mode: allow stdin (with timeout)
-        elif [ $is_interactive -eq 1 ] && ([ $has_heredoc -eq 1 ] || [ $TTY_MODE -eq 1 ]); then
+        # Interactive tests in TTY mode: allow stdin (with timeout)
+        elif [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 1 ]; then
             output_nocache=$(timeout 60 env SMAK_CACHE_DIR=off ./"$test_script" 2>&1)
             local result_nocache=$?
             if [ $result_nocache -eq 124 ]; then
@@ -176,6 +176,16 @@ run_test() {
 
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
+
+    # Display output in verbose mode
+    if [ $show_output -eq 1 ]; then
+        echo "=== NO CACHE OUTPUT ==="
+        echo "$output_nocache"
+        echo ""
+        echo "=== WITH CACHE OUTPUT ==="
+        echo "$output_cache"
+        echo ""
+    fi
 
     # Check if both runs passed
     if [ $result_nocache -eq 0 ] && [ $result_cache -eq 0 ]; then

@@ -6662,6 +6662,19 @@ sub run_job_master {
                     # Try to dispatch
                     dispatch_jobs();
 
+                    # Check if target is already complete (no jobs queued)
+                    # If so, send JOB_COMPLETE immediately so client doesn't hang
+                    if (exists $completed_targets{$target} ||
+                        (exists $in_progress{$target} && $in_progress{$target} eq "done")) {
+                        print $master_socket "JOB_COMPLETE $target 0\n";
+                        print STDERR "Target '$target' already up-to-date, notified client\n" if $ENV{SMAK_DEBUG};
+                    } elsif (exists $failed_targets{$target} ||
+                             (exists $in_progress{$target} && $in_progress{$target} eq "failed")) {
+                        my $exit_code = $failed_targets{$target} || 1;
+                        print $master_socket "JOB_COMPLETE $target $exit_code\n";
+                        print STDERR "Target '$target' already failed, notified client (exit $exit_code)\n" if $ENV{SMAK_DEBUG};
+                    }
+
                 } elsif ($line =~ /^COMMAND\s+(.*)/) {
 		    print STDERR "Command: $1\n";
 		    interactive_debug($master_socket,$1);

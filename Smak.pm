@@ -6038,6 +6038,7 @@ sub run_job_master {
                 dir => $job->{dir},
                 command => $job->{command},
                 started => 0,
+                output => [],  # Capture output for error analysis
             };
 	    
 	    $j++;
@@ -6982,6 +6983,13 @@ sub run_job_master {
 
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
+                    # Capture output for the task running on this worker
+                    if (exists $worker_status{$socket}{task_id}) {
+                        my $task_id = $worker_status{$socket}{task_id};
+                        if (exists $running_jobs{$task_id}) {
+                            push @{$running_jobs{$task_id}{output}}, $output;
+                        }
+                    }
                     # Always print to stdout (job master's stdout is inherited from parent)
                     print $stomp_prompt,"$output\n";
                     # Also forward to attached clients if any
@@ -6989,6 +6997,13 @@ sub run_job_master {
 
                 } elsif ($line =~ /^ERROR (.*)$/) {
                     my $error = $1;
+                    # Capture error for the task running on this worker
+                    if (exists $worker_status{$socket}{task_id}) {
+                        my $task_id = $worker_status{$socket}{task_id};
+                        if (exists $running_jobs{$task_id}) {
+                            push @{$running_jobs{$task_id}{output}}, "ERROR: $error";
+                        }
+                    }
                     # Always print to stderr (job master's stderr is inherited from parent)
                     print STDERR "ERROR: $error\n";
                     # Also forward to attached clients if any
@@ -7151,10 +7166,31 @@ sub run_job_master {
                     } else {
                         # Check if we should auto-retry this target
                         my $should_retry = 0;
-                        if ($job->{target} && @auto_retry_patterns) {
-                            my $retry_count = $retry_counts{$job->{target}} || 0;
-                            if ($retry_count < 1) {  # Max 1 retry
-                                # Check if target matches any auto-retry pattern
+                        my $retry_reason = "";
+
+                        my $retry_count = $retry_counts{$job->{target}} || 0;
+                        if ($job->{target} && $retry_count < 1) {  # Max 1 retry
+                            # Analyze captured output for retryable errors
+                            my @output = $job->{output} ? @{$job->{output}} : ();
+
+                            for my $line (@output) {
+                                # Check for "No such file or directory" errors
+                                if ($line =~ /(fatal error|error):\s+(.+?):\s+No such file or directory/i) {
+                                    my $missing_file = $2;
+                                    $missing_file =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+                                    # Check if file exists now (race condition resolved)
+                                    my $file_path = $missing_file =~ m{^/} ? $missing_file : "$job->{dir}/$missing_file";
+                                    if (-f $file_path) {
+                                        $should_retry = 1;
+                                        $retry_reason = "file '$missing_file' exists now (race condition)";
+                                        last;
+                                    }
+                                }
+                            }
+
+                            # If no intelligent retry detected, fall back to pattern matching
+                            if (!$should_retry && @auto_retry_patterns) {
                                 for my $pattern (@auto_retry_patterns) {
                                     # Convert glob pattern to regex
                                     my $regex = $pattern;
@@ -7163,6 +7199,7 @@ sub run_job_master {
                                     $regex =~ s/\?/./g;     # ? matches single char
                                     if ($job->{target} =~ /^$regex$/ || $job->{target} =~ /$regex$/) {
                                         $should_retry = 1;
+                                        $retry_reason = "matches pattern '$pattern'";
                                         last;
                                     }
                                 }
@@ -7172,7 +7209,7 @@ sub run_job_master {
                         if ($should_retry) {
                             # Retry this target
                             $retry_counts{$job->{target}}++;
-                            print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code) - AUTO-RETRYING (attempt " . $retry_counts{$job->{target}} . ")\n";
+                            print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code) - AUTO-RETRYING ($retry_reason, attempt " . $retry_counts{$job->{target}} . ")\n";
 
                             # Clear from failed targets so it can be rebuilt
                             delete $failed_targets{$job->{target}};

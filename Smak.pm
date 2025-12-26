@@ -5988,6 +5988,8 @@ sub run_job_master {
                     @deps = @{$pseudo_deps{$key} || []};
                 }
 
+                print STDERR "DEBUG dispatch: Checking job '$target', deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+
                 # Check if any dependency has failed - if so, fail this job too
                 my $has_failed_dep = 0;
                 for my $dep (@deps) {
@@ -6032,6 +6034,11 @@ sub run_job_master {
                         # Check if dependency is completed or exists as file (relative to job dir)
                         my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$job->{dir}/$single_dep";
 
+                        print STDERR "DEBUG dispatch:   Checking dep '$single_dep' for target '$target'\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "DEBUG dispatch:     completed_targets: " . (exists $completed_targets{$single_dep} ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "DEBUG dispatch:     file exists (-e $dep_path): " . (-e $dep_path ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "DEBUG dispatch:     in_progress: " . (exists $in_progress{$single_dep} ? $in_progress{$single_dep} : "NO") . "\n" if $ENV{SMAK_DEBUG};
+
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
                         if ($completed_targets{$single_dep}) {
@@ -6068,8 +6075,10 @@ sub run_job_master {
                             # Pre-existing source file or already built, OK to proceed
                         } else {
                             # Dependency not completed and doesn't exist
+                            print STDERR "DEBUG dispatch:     Dep '$single_dep' not completed and doesn't exist\n" if $ENV{SMAK_DEBUG};
                             # Check if the dependency has failed dependencies (transitively)
                             my $failed_dep = has_failed_dependency($single_dep);
+                            print STDERR "DEBUG dispatch:     has_failed_dependency returned: " . (defined $failed_dep ? "'$failed_dep'" : "undef") . "\n" if $ENV{SMAK_DEBUG};
                             if (defined $failed_dep) {
                                 # Dependency cannot be built - fail this job too
                                 print STDERR "Job '$target' FAILED: dependency '$single_dep' cannot be built (depends on failed target '$failed_dep')\n";
@@ -6084,6 +6093,7 @@ sub run_job_master {
                                 # Dependency is still building or queued
                                 $deps_satisfied = 0;
                                 print STDERR "  Job '$target' waiting for dependency '$single_dep'\n";
+                                print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep'\n" if $ENV{SMAK_DEBUG};
                                 last;
                             }
                         }
@@ -6095,8 +6105,11 @@ sub run_job_master {
                 next if $has_unbuildable_dep;
 
                 if ($deps_satisfied) {
+                    print STDERR "DEBUG dispatch: Job '$target' has all dependencies satisfied, will dispatch\n" if $ENV{SMAK_DEBUG};
                     $job_index = $i;
                     last;
+                } else {
+                    print STDERR "DEBUG dispatch: Job '$target' dependencies NOT satisfied, skipping\n" if $ENV{SMAK_DEBUG};
                 }
             }
 

@@ -6068,6 +6068,12 @@ sub run_job_master {
                                 $stem = $1;
                                 @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
                                 print STDERR "DEBUG dispatch: Matched pattern '$pattern' for '$target', stem='$stem', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                                # Resolve dependencies through vpath (just like queue_target_recursive does)
+                                my @orig_deps = @deps;
+                                @deps = map { resolve_vpath($_, $job->{dir}) } @deps;
+                                if ($ENV{SMAK_DEBUG} && "@orig_deps" ne "@deps") {
+                                    print STDERR "DEBUG dispatch: After vpath resolution: [" . join(", ", @deps) . "]\n";
+                                }
                                 last;
                             }
                         }

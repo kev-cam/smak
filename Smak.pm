@@ -6068,12 +6068,9 @@ sub run_job_master {
                                 $stem = $1;
                                 @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
                                 print STDERR "DEBUG dispatch: Matched pattern '$pattern' for '$target', stem='$stem', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
-                                # Resolve dependencies through vpath (just like queue_target_recursive does)
-                                my @orig_deps = @deps;
-                                @deps = map { resolve_vpath($_, $job->{dir}) } @deps;
-                                if ($ENV{SMAK_DEBUG} && "@orig_deps" ne "@deps") {
-                                    print STDERR "DEBUG dispatch: After vpath resolution: [" . join(", ", @deps) . "]\n";
-                                }
+                                # NOTE: Don't resolve vpath here - dependency names must stay as-is
+                                # for hash lookups (completed_targets, failed_targets, in_progress).
+                                # Vpath resolution happens when checking if files exist.
                                 last;
                             }
                         }
@@ -6125,6 +6122,15 @@ sub run_job_master {
 
                         # Check if dependency is completed or exists as file (relative to job dir)
                         my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$job->{dir}/$single_dep";
+
+                        # If file doesn't exist, try vpath resolution
+                        if (!-e $dep_path) {
+                            my $resolved = resolve_vpath($single_dep, $job->{dir});
+                            if ($resolved ne $single_dep) {
+                                $dep_path = $resolved =~ m{^/} ? $resolved : "$job->{dir}/$resolved";
+                                print STDERR "DEBUG dispatch:     vpath resolved '$single_dep' to '$resolved'\n" if $ENV{SMAK_DEBUG};
+                            }
+                        }
 
                         print STDERR "DEBUG dispatch:   Checking dep '$single_dep' for target '$target'\n" if $ENV{SMAK_DEBUG};
                         print STDERR "DEBUG dispatch:     completed_targets: " . (exists $completed_targets{$single_dep} ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};

@@ -79,9 +79,9 @@ run_test() {
         return
     fi
 
-    # Check if test uses interactive debug mode (heredoc + -Kd)
+    # Check if test uses interactive debug mode (-Kd flag)
     local is_interactive=0
-    if grep -q "<<.*|.*-Kd" "$test_script" 2>/dev/null; then
+    if grep -q "\-Kd" "$test_script" 2>/dev/null; then
         is_interactive=1
     fi
 

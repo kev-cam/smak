@@ -6351,13 +6351,21 @@ sub run_job_master {
                                                                 cmake_check_build_system|help|list|
                                                                 package|preinstall|rebuild_cache|edit_cache)$/x;
 
+                            # Check if target is explicitly marked as phony in Makefile
+                            my $is_phony = $is_common_phony || exists $pseudo_deps{"$makefile\t$target"};
+
                             # Only verify file existence for targets that look like real files
-                            my $should_verify = $looks_like_file && !$is_common_phony;
+                            my $should_verify = $looks_like_file && !$is_phony;
 
                             if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
-                                $completed_targets{$job->{target}} = 1;
+                                # Only mark non-phony targets as complete
+                                # Phony targets should always run, never be cached
+                                if (!$is_phony) {
+                                    $completed_targets{$job->{target}} = 1;
+                                }
                                 $in_progress{$job->{target}} = "done";
-                                print STDERR "Task $task_id completed successfully: $job->{target}\n" if $ENV{SMAK_DEBUG};
+                                print STDERR "Task $task_id completed successfully: $job->{target}" .
+                                             ($is_phony ? " (phony, not cached)" : "") . "\n" if $ENV{SMAK_DEBUG};
                             } else {
                                 # File doesn't exist even after retries - treat as failure
                                 $in_progress{$job->{target}} = "failed";
@@ -6665,7 +6673,15 @@ sub run_job_master {
                     # Check if target is already complete AND no work was dispatched
                     # If so, send JOB_COMPLETE immediately so client doesn't hang
                     # Only do this if the target is truly done with no pending work
-                    my $target_complete = (exists $completed_targets{$target} ||
+
+                    # Check if target is phony (should never be cached as complete)
+                    my $is_common_phony = $target =~ /^(all|clean|install|test|check|depend|dist|
+                                                        distclean|maintainer-clean|mostlyclean|
+                                                        cmake_check_build_system|help|list|
+                                                        package|preinstall|rebuild_cache|edit_cache)$/x;
+                    my $is_phony = $is_common_phony || exists $pseudo_deps{"$makefile\t$target"};
+
+                    my $target_complete = !$is_phony && (exists $completed_targets{$target} ||
                                           (exists $in_progress{$target} && $in_progress{$target} eq "done"));
                     my $target_failed = (exists $failed_targets{$target} ||
                                         (exists $in_progress{$target} && $in_progress{$target} eq "failed"));

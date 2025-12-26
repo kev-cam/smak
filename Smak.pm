@@ -317,6 +317,8 @@ sub stop_job_server {
 }
 
 our %in_progress;
+our @auto_retry_patterns;  # Patterns for automatic retry (e.g., "*.cc", "*.hh")
+our %retry_counts;         # Track retry attempts per target
 
 sub submit_job {
     my ($target, $command, $dir) = @_;
@@ -3474,6 +3476,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'restart') {
         cmd_restart($words, $socket, $opts);
 
+    } elsif ($cmd eq 'auto-retry') {
+        cmd_auto_retry($words, $opts, $state);
+
     } elsif ($cmd eq 'eval') {
         # Evaluate Perl expression
         my $expr = "";
@@ -4316,6 +4321,39 @@ sub cmd_stop {
     my $response = <$socket>;
     chomp $response if $response;
     print "$response\n" if $response;
+}
+
+sub cmd_auto_retry {
+    my ($words, $opts, $state) = @_;
+
+    if (@$words == 0) {
+        # Show current patterns
+        if (@Smak::auto_retry_patterns) {
+            print "Auto-retry enabled for patterns:\n";
+            for my $pattern (@Smak::auto_retry_patterns) {
+                print "  $pattern\n";
+            }
+        } else {
+            print "No auto-retry patterns configured.\n";
+            print "Usage: auto-retry *.cc *.hh  - Enable auto-retry for matching files\n";
+            print "       auto-retry -clear      - Clear all patterns\n";
+        }
+        return;
+    }
+
+    if ($words->[0] eq '-clear') {
+        @Smak::auto_retry_patterns = ();
+        %Smak::retry_counts = ();
+        print "Cleared all auto-retry patterns.\n";
+        return;
+    }
+
+    # Add patterns
+    for my $pattern (@$words) {
+        push @Smak::auto_retry_patterns, $pattern unless grep { $_ eq $pattern } @Smak::auto_retry_patterns;
+    }
+    print "Auto-retry enabled for: " . join(", ", @$words) . "\n";
+    print "Matching files will be automatically retried once if they fail.\n";
 }
 
 sub cmd_kill {
@@ -7113,23 +7151,64 @@ sub run_job_master {
                             }
                         }
                     } else {
-                        if ($job->{target}) {
-                            $in_progress{$job->{target}} = "failed";
-                            $failed_targets{$job->{target}} = $exit_code;
-                        }
-                        print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
-
-                        # Check if this failed task is a dependency of any composite target
-                        for my $comp_target (keys %pending_composite) {
-                            my $comp = $pending_composite{$comp_target};
-                            # Check if this failed target is in the composite's dependencies
-                            if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
-                                print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
-                                $in_progress{$comp_target} = "failed";
-                                if ($comp->{master_socket}) {
-                                    print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                        # Check if we should auto-retry this target
+                        my $should_retry = 0;
+                        if ($job->{target} && @auto_retry_patterns) {
+                            my $retry_count = $retry_counts{$job->{target}} || 0;
+                            if ($retry_count < 1) {  # Max 1 retry
+                                # Check if target matches any auto-retry pattern
+                                for my $pattern (@auto_retry_patterns) {
+                                    # Convert glob pattern to regex
+                                    my $regex = $pattern;
+                                    $regex =~ s/\./\\./g;  # Escape dots
+                                    $regex =~ s/\*/[^\/]*/g;  # * matches non-slash chars
+                                    $regex =~ s/\?/./g;     # ? matches single char
+                                    if ($job->{target} =~ /^$regex$/ || $job->{target} =~ /$regex$/) {
+                                        $should_retry = 1;
+                                        last;
+                                    }
                                 }
-                                delete $pending_composite{$comp_target};
+                            }
+                        }
+
+                        if ($should_retry) {
+                            # Retry this target
+                            $retry_counts{$job->{target}}++;
+                            print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code) - AUTO-RETRYING (attempt " . $retry_counts{$job->{target}} . ")\n";
+
+                            # Clear from failed targets so it can be rebuilt
+                            delete $failed_targets{$job->{target}};
+                            delete $in_progress{$job->{target}};
+
+                            # Re-queue the target
+                            push @job_queue, {
+                                target => $job->{target},
+                                dir => $job->{dir},
+                                command => $job->{command},
+                            };
+
+                            # Try to dispatch immediately
+                            dispatch_jobs();
+                        } else {
+                            # Mark as failed (no retry or retry exhausted)
+                            if ($job->{target}) {
+                                $in_progress{$job->{target}} = "failed";
+                                $failed_targets{$job->{target}} = $exit_code;
+                            }
+                            print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
+
+                            # Check if this failed task is a dependency of any composite target
+                            for my $comp_target (keys %pending_composite) {
+                                my $comp = $pending_composite{$comp_target};
+                                # Check if this failed target is in the composite's dependencies
+                                if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
+                                    print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                                    $in_progress{$comp_target} = "failed";
+                                    if ($comp->{master_socket}) {
+                                        print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                                    }
+                                    delete $pending_composite{$comp_target};
+                                }
                             }
                         }
                     }

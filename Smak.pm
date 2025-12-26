@@ -7184,6 +7184,46 @@ sub run_job_master {
 
                     # Track successfully completed targets to avoid rebuilding
                     if ($exit_code == 0 && $job->{target}) {
+                        # If this is a clean-like target, detect rm commands and mark removed files as stale
+                        if ($job->{command} && $job->{command} =~ /\brm\b/) {
+                            # Extract rm commands and expand wildcards
+                            my $cmd = $job->{command};
+                            my $dir = $job->{dir} || '.';
+
+                            # Find all rm commands (handle both "rm file" and "rm -rf file")
+                            while ($cmd =~ /\brm\s+(?:-[a-z]+\s+)*([^\s;&|]+(?:\s+[^\s;&|]+)*)/g) {
+                                my $args = $1;
+                                # Split arguments and expand each one
+                                for my $arg (split /\s+/, $args) {
+                                    next if $arg =~ /^-/;  # Skip flags
+
+                                    # Expand wildcards using glob
+                                    my @expanded;
+                                    if ($arg =~ /[*?\[]/) {
+                                        # Has wildcards - expand them
+                                        my $full_pattern = $arg =~ m{^/} ? $arg : "$dir/$arg";
+                                        @expanded = glob($full_pattern);
+                                    } else {
+                                        # No wildcards - use as-is
+                                        @expanded = ($arg =~ m{^/} ? $arg : "$dir/$arg");
+                                    }
+
+                                    # Mark each expanded file as removed
+                                    for my $file (@expanded) {
+                                        # Extract just the filename for target matching
+                                        my $target_name = $file;
+                                        $target_name =~ s{^\Q$dir\E/}{};  # Remove dir prefix
+
+                                        if (exists $completed_targets{$target_name}) {
+                                            delete $completed_targets{$target_name};
+                                            $stale_targets_cache{$target_name} = time();
+                                            print STDERR "Detected rm of '$target_name' - marked as stale\n" if $ENV{SMAK_DEBUG};
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         # Check if this looks like a phony target (doesn't produce a file)
                         # Phony targets typically have no extension or are common make targets
                         my $target = $job->{target};

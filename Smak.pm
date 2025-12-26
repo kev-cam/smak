@@ -6362,10 +6362,14 @@ sub run_job_master {
                                 # Phony targets should always run, never be cached
                                 if (!$is_phony) {
                                     $completed_targets{$job->{target}} = 1;
+                                    $in_progress{$job->{target}} = "done";
+                                } else {
+                                    # For phony targets, remove from in_progress entirely
+                                    # This allows them to be queued again on next request
+                                    delete $in_progress{$job->{target}};
                                 }
-                                $in_progress{$job->{target}} = "done";
                                 print STDERR "Task $task_id completed successfully: $job->{target}" .
-                                             ($is_phony ? " (phony, not cached)" : "") . "\n" if $ENV{SMAK_DEBUG};
+                                             ($is_phony ? " (phony, removed from tracking)" : "") . "\n" if $ENV{SMAK_DEBUG};
                             } else {
                                 # File doesn't exist even after retries - treat as failure
                                 $in_progress{$job->{target}} = "failed";

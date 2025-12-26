@@ -319,6 +319,7 @@ sub stop_job_server {
 our %in_progress;
 our @auto_retry_patterns;  # Patterns for automatic retry (e.g., "*.cc", "*.hh")
 our %retry_counts;         # Track retry attempts per target
+our %assumed_targets;      # Targets marked as already built (even if they don't exist)
 
 sub submit_job {
     my ($target, $command, $dir) = @_;
@@ -3479,6 +3480,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'auto-retry') {
         cmd_auto_retry($words, $opts, $state);
 
+    } elsif ($cmd eq 'assume') {
+        cmd_assume($words, $socket);
+
     } elsif ($cmd eq 'eval') {
         # Evaluate Perl expression
         my $expr = "";
@@ -4057,6 +4061,38 @@ sub cmd_ignore {
     $Smak::ignored_files{$file} = 1;
     print "Ignoring '$file' for dependency checking\n";
     print "Targets depending on this file will not be rebuilt based on its timestamp\n";
+}
+
+sub cmd_assume {
+    my ($words, $socket) = @_;
+
+    # List assumed targets if no arguments
+    if (@$words == 0) {
+        if (keys %Smak::assumed_targets) {
+            print "Assumed targets (marked as already built):\n";
+            for my $target (sort keys %Smak::assumed_targets) {
+                print "  $target\n";
+            }
+            print "\n" . (scalar keys %Smak::assumed_targets) . " target(s) assumed\n";
+        } else {
+            print "No targets are currently assumed\n";
+        }
+        print "\nUsage: assume <target>  - Mark target as already built (skip building it)\n";
+        print "       assume -clear    - Clear all assumed targets\n";
+        return;
+    }
+
+    if ($words->[0] eq '-clear') {
+        %Smak::assumed_targets = ();
+        print "Cleared all assumed targets\n";
+        return;
+    }
+
+    # Mark target as assumed (already built)
+    my $target = $words->[0];
+    $Smak::assumed_targets{$target} = 1;
+    print "Assuming target '$target' is already built\n";
+    print "This target will be treated as satisfied even if it doesn't exist\n";
 }
 
 sub cmd_needs {
@@ -5438,6 +5474,14 @@ sub run_job_master {
 
         # Skip if already handled
         return if is_target_pending($target);
+
+        # Check if target is assumed (marked as already built)
+        if (exists $assumed_targets{$target}) {
+            $completed_targets{$target} = 1;
+            $in_progress{$target} = "done";
+            warn "Target '$target' is assumed (marked as already built), skipping\n" if $ENV{SMAK_DEBUG};
+            return;
+        }
 
 	$recurse_log[$depth] = "${dir}:$target";
 	

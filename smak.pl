@@ -465,6 +465,8 @@ sub execute_script_file {
                 Smak::cmd_auto_retry(\@words, {}, \%state);
             } elsif ($cmd eq 'ignore') {
                 Smak::cmd_ignore(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'assume') {
+                Smak::cmd_assume(\@words, $Smak::job_server_socket);
             } elsif ($cmd eq 'start') {
                 my %state = (socket => \$Smak::job_server_socket, server_pid => \$Smak::job_server_pid);
                 Smak::cmd_start(\@words, {}, \%state);

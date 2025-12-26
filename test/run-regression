@@ -83,14 +83,10 @@ run_test() {
     fi
 
     # Check if test uses interactive debug mode (-Kd flag)
+    # Note: smak -Kd opens /dev/tty directly, so heredocs don't work!
     local is_interactive=0
-    local has_heredoc=0
     if grep -q "\-Kd" "$test_script" 2>/dev/null; then
         is_interactive=1
-        # Check if test uses heredoc (cat <<EOF or similar)
-        if grep -q "<<" "$test_script" 2>/dev/null; then
-            has_heredoc=1
-        fi
     fi
 
     # Check if there's a script file for this test
@@ -100,12 +96,9 @@ run_test() {
         has_script=1
     fi
 
-    # Handle truly interactive tests (no heredoc, no script):
-    # - Tests with heredoc: can run normally
-    # - Tests with script file: use script runner
-    # - Tests with --tty: allow user input
-    # - Otherwise: skip
-    if [ $is_interactive -eq 1 ] && [ $has_heredoc -eq 0 ] && [ $has_script -eq 0 ] && [ $TTY_MODE -eq 0 ]; then
+    # Interactive tests (-Kd) need either script file or --tty mode
+    # (heredocs don't work because smak opens /dev/tty directly)
+    if [ $is_interactive -eq 1 ] && [ $has_script -eq 0 ] && [ $TTY_MODE -eq 0 ]; then
         echo -e "${YELLOW}SKIP${NC} (interactive, create $script_file or use --tty)"
         ((SKIPPED++))
         return
@@ -115,15 +108,15 @@ run_test() {
     local output_nocache output_cache
     local start_time=$(date +%s)
 
-    if [ $VERBOSE -eq 1 ]; then
+    # Verbose mode shows output but still uses proper handling
+    local show_output=$VERBOSE
+
+    if [ $show_output -eq 1 ]; then
         echo ""
-        echo "  [no-cache]"
-        SMAK_CACHE_DIR=off ./"$test_script"
-        local result_nocache=$?
-        echo "  [with-cache]"
-        SMAK_CACHE_DIR=default ./"$test_script"
-        local result_cache=$?
-    else
+    fi
+
+    # Determine how to run the test
+    if true; then
         # Handle interactive tests with script files using automated script runner
         if [ $is_interactive -eq 1 ] && [ $has_heredoc -eq 0 ] && [ $has_script -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
             # Run with script automation using run-with-script.pl (with timeout)

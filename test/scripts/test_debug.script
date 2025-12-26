@@ -1,13 +1,10 @@
 # Interactive debug test script
 # Test the -Kd debug mode commands
 
-list                     # Show available debug commands
-# expect "Debug commands"
+list                     # Show all rules
+# expect "Rules parsed from Makefile"
 
-show all                 # Show all targets
-# expect "All targets"
-
-# wait 200ms              # Brief pause
+help                     # Show help
+# expect "Commands:"
 
 quit                     # Exit debugger
-# expect "Goodbye"

@@ -4470,15 +4470,17 @@ sub cmd_restart {
 sub interactive_debug {
     my ($OUT,$input) = @_ ;
     my $term = Term::ReadLine->new('smak');
-    my $do1 = defined $OUT;
-    if (! $do1) {
+    my $have_input = defined $input;
+    my $exit_after_one = $have_input;  # Exit after one command if input was provided
+    if (! defined $OUT) {
 	$OUT = $term->OUT || \*STDOUT;
     }
-    
+
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
 
-    while ((1 == $do1++) ||
+    while ($have_input ||
 	   defined($input = $term->readline($echo ? $prompt : $prompt))) {
+        $have_input = 0;  # Only use provided input once
 
         chomp $input;
 
@@ -4778,7 +4780,7 @@ HELP
             print $OUT "Unknown command: $cmd (type 'help' for commands)\n";
         }
 
-	last if $do1;
+	last if $exit_after_one;
     }
 }
 

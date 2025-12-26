@@ -32,9 +32,10 @@ sub parse_script_file {
     while (my $line = <$fh>) {
         chomp $line;
 
+        # Skip blank lines
         next if $line =~ /^\s*$/;
-        next if $line =~ /^\s*#\s*$/ || $line =~ /^\s*#[^#]/;
 
+        # Check for directive comments first, then regular commands
         if ($line =~ /^\s*#\s*wait\s+(\d+)(ms|s)?\s*$/i) {
             my $duration = $1;
             my $unit = $2 || 'ms';
@@ -59,6 +60,10 @@ sub parse_script_file {
             push @actions, { type => 'waitfor', text => $text, timeout => $duration };
 
         } else {
+            # Skip non-directive comment lines
+            next if $line =~ /^\s*#/;
+
+            # Strip trailing comments from command lines
             $line =~ s/\s*#.*$//;
             next if $line =~ /^\s*$/;
             push @actions, { type => 'command', text => $line };

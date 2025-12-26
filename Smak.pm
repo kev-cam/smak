@@ -5975,8 +5975,10 @@ sub run_job_master {
 		}
 
 	        # If we've gone past the end of the queue, exit the for loop
-	        last if ($i > $#job_queue); 
-	       		
+	        last if ($i > $#job_queue);
+
+                print STDERR "\n=== DEBUG dispatch: Checking job [$i] '$target' ===\n" if $ENV{SMAK_DEBUG};
+
                 # Check if this job's dependencies are satisfied
                 my $key = "$makefile\t$target";
                 my @deps;

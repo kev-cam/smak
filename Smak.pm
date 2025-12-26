@@ -6662,18 +6662,30 @@ sub run_job_master {
                     # Try to dispatch
                     dispatch_jobs();
 
-                    # Check if target is already complete (no jobs queued)
+                    # Check if target is already complete AND no work was dispatched
                     # If so, send JOB_COMPLETE immediately so client doesn't hang
-                    if (exists $completed_targets{$target} ||
-                        (exists $in_progress{$target} && $in_progress{$target} eq "done")) {
+                    # Only do this if the target is truly done with no pending work
+                    my $target_complete = (exists $completed_targets{$target} ||
+                                          (exists $in_progress{$target} && $in_progress{$target} eq "done"));
+                    my $target_failed = (exists $failed_targets{$target} ||
+                                        (exists $in_progress{$target} && $in_progress{$target} eq "failed"));
+
+                    # Check if target or its dependencies are being built
+                    my $work_in_progress = (exists $in_progress{$target} &&
+                                           $in_progress{$target} ne "done" &&
+                                           $in_progress{$target} ne "failed") ||
+                                          (@job_queue > 0) ||
+                                          (keys %running_jobs > 0);
+
+                    if ($target_complete && !$work_in_progress) {
                         print $master_socket "JOB_COMPLETE $target 0\n";
                         print STDERR "Target '$target' already up-to-date, notified client\n" if $ENV{SMAK_DEBUG};
-                    } elsif (exists $failed_targets{$target} ||
-                             (exists $in_progress{$target} && $in_progress{$target} eq "failed")) {
+                    } elsif ($target_failed && !$work_in_progress) {
                         my $exit_code = $failed_targets{$target} || 1;
                         print $master_socket "JOB_COMPLETE $target $exit_code\n";
                         print STDERR "Target '$target' already failed, notified client (exit $exit_code)\n" if $ENV{SMAK_DEBUG};
                     }
+                    # Otherwise, work is in progress - JOB_COMPLETE will be sent when work finishes
 
                 } elsif ($line =~ /^COMMAND\s+(.*)/) {
 		    print STDERR "Command: $1\n";

@@ -6264,10 +6264,14 @@ sub run_job_master {
                             my $should_retry = 0;
                             my $retry_reason = "";
 
+                            print STDERR "DEBUG: Checking auto-retry for target '$job->{target}' (exit code $exit_code)\n";
+                            print STDERR "DEBUG: Auto-retry patterns: " . join(", ", @auto_retry_patterns) . "\n";
+
                             my $retry_count = $retry_counts{$job->{target}} || 0;
                             if ($job->{target} && $retry_count < 1) {  # Max 1 retry
                                 # Analyze captured output for retryable errors
                                 my @output = $job->{output} ? @{$job->{output}} : ();
+                                print STDERR "DEBUG: Captured output has " . scalar(@output) . " lines\n";
 
                                 for my $line (@output) {
                                     # Strip "ERROR: " prefix if present (we add this when capturing)

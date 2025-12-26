@@ -6386,7 +6386,7 @@ sub run_job_master {
                             }
                         }
                     }
-                    print $master_socket "Added $count worker(s). Workers will connect asynchronously.\n";
+                    print $master_socket "Added $count worker(s), total is ".1+$#workers.". Workers will connect asynchronously.\n";
 
                 } elsif ($line =~ /^REMOVE_WORKER (\d+)$/) {
                     my $count = $1;
@@ -6407,11 +6407,12 @@ sub run_job_master {
 
                     # Update workers array
                     @workers = grep { exists $worker_status{$_} } @workers;
+		    my $w_count = 1 + $#workers;
 
                     if ($removed < $count) {
-                        print $master_socket "Removed $removed worker(s) (only $removed idle workers available)\n";
+                        print $master_socket "Removed $removed, now have $w_count worker(s) (only $removed idle workers available)\n";
                     } else {
-                        print $master_socket "Removed $count worker(s)\n";
+                        print $master_socket "Removed $count worker(s), $w_count remain\n";
                     }
 
                 } elsif ($line =~ /^RESTART_WORKERS (\d+)$/) {

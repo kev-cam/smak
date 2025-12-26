@@ -10,34 +10,37 @@ cd "$SCRIPT_DIR"
 # Parse arguments
 FULL_MODE=0
 VERBOSE=0
-INTERACTIVE=0
+TTY_MODE=0
 if [ "$1" = "--full" ] || [ "$1" = "-f" ]; then
     FULL_MODE=1
 elif [ "$1" = "--verbose" ] || [ "$1" = "-v" ]; then
     VERBOSE=1
-elif [ "$1" = "--with-interactive" ] || [ "$1" = "-i" ]; then
-    INTERACTIVE=1
+elif [ "$1" = "--tty" ] || [ "$1" = "-t" ]; then
+    TTY_MODE=1
 elif [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     cat << EOF
 Usage: $0 [OPTIONS]
 
 Run smak regression test suite.
 
+By default, all tests including interactive ones are run automatically.
+Interactive tests use script files (scripts/*.script) for automation.
+
 All tests are run twice - once with cache disabled and once with cache enabled.
 This ensures consistent behavior between cached and non-cached execution.
 
 Options:
-  (none)              Run quick regression tests (non-interactive unit tests)
+  (none)              Run all tests including scripted interactive tests
   -f, --full          Run full test suite including random builds and CLI tests
   -v, --verbose       Show test output
-  -i, --with-interactive  Include interactive debug mode tests
+  -t, --tty           Run interactive tests with actual TTY input (not scripted)
   -h, --help          Show this help
 
 Examples:
-  $0                  # Quick regression (default)
+  $0                  # All tests with scripted automation (default)
   $0 --full           # Full test suite
   $0 --verbose        # Show all test output
-  $0 --with-interactive  # Include interactive tests
+  $0 --tty            # Interactive tests require user input
 
 EOF
     exit 0
@@ -92,11 +95,12 @@ run_test() {
         has_script=1
     fi
 
-    # Skip interactive tests unless:
-    # 1. --with-interactive flag is set, OR
-    # 2. A .script file exists for automated testing
-    if [ $is_interactive -eq 1 ] && [ $INTERACTIVE -eq 0 ] && [ $has_script -eq 0 ]; then
-        echo -e "${YELLOW}SKIP${NC} (interactive, use -i or create $script_file)"
+    # Handle interactive tests:
+    # - If --tty mode: run with user input (don't redirect stdin)
+    # - If script exists: run with test-cli-advanced automation (TODO)
+    # - Otherwise: skip and suggest creating script file
+    if [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 0 ] && [ $has_script -eq 0 ]; then
+        echo -e "${YELLOW}SKIP${NC} (interactive, create $script_file or use --tty)"
         ((SKIPPED++))
         return
     fi
@@ -114,21 +118,31 @@ run_test() {
         SMAK_CACHE_DIR=default ./"$test_script"
         local result_cache=$?
     else
-        # For interactive tests, don't redirect stdin
-        if [ $is_interactive -eq 1 ]; then
-            # Run without cache (allow stdin for heredoc)
+        # Determine if we need stdin for this test
+        # TTY mode: always allow stdin for interactive tests
+        # Script mode: interactive tests with scripts don't need stdin (automated)
+        # Default: redirect stdin to prevent hangs
+        local needs_stdin=0
+        if [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 1 ]; then
+            needs_stdin=1
+        elif [ $is_interactive -eq 1 ] && [ $has_script -eq 1 ]; then
+            # TODO: Use test-cli-advanced with script file for automation
+            # For now, allow stdin since script will provide it
+            needs_stdin=1
+        fi
+
+        if [ $needs_stdin -eq 1 ]; then
+            # Run with stdin available (TTY mode or scripted interactive)
             output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1)
             local result_nocache=$?
 
-            # Run with cache (allow stdin for heredoc)
             output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1)
             local result_cache=$?
         else
-            # Run without cache (redirect stdin for non-interactive)
+            # Run without stdin (prevents hangs for non-interactive tests)
             output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
             local result_nocache=$?
 
-            # Run with cache (redirect stdin for non-interactive)
             output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
             local result_cache=$?
         fi

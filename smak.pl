@@ -459,6 +459,26 @@ sub execute_script_file {
                 } else {
                     print "Job server not running. Use 'start' to enable.\n";
                 }
+            } elsif ($cmd eq 'auto-retry') {
+                # Create minimal state hash for cmd_auto_retry
+                my %state = (socket => \$Smak::job_server_socket);
+                Smak::cmd_auto_retry(\@words, {}, \%state);
+            } elsif ($cmd eq 'ignore') {
+                Smak::cmd_ignore(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'assume') {
+                Smak::cmd_assume(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'reset') {
+                Smak::cmd_reset(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'start') {
+                my %state = (socket => \$Smak::job_server_socket, server_pid => \$Smak::job_server_pid);
+                Smak::cmd_start(\@words, {}, \%state);
+            } elsif ($cmd eq 'stop') {
+                my %state = (socket => \$Smak::job_server_socket, server_pid => \$Smak::job_server_pid);
+                Smak::cmd_stop(\@words, {}, \%state);
+            } elsif ($cmd eq 'kill') {
+                Smak::cmd_kill($Smak::job_server_socket);
+            } elsif ($cmd eq 'restart') {
+                Smak::cmd_restart(\@words, $Smak::job_server_socket, {});
             } else {
                 print "[$script_file:$line_num] Unknown command: $cmd\n";
             }
@@ -502,6 +522,13 @@ $Smak::remote_cd = $remote_cd if $remote_cd;
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it
 parse_makefile($makefile);
+
+# Auto-load <makefile>.smak if it exists
+my $auto_script = "$makefile.smak";
+if (-f $auto_script) {
+    print "Auto-loading script: $auto_script\n" if $ENV{SMAK_DEBUG};
+    execute_script_file($auto_script);
+}
 
 # Start job server if parallel builds are requested
 # Skip in debug, dry-run, or CLI mode (CLI mode starts its own server in run_cli)

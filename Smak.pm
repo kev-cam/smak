@@ -319,6 +319,7 @@ sub stop_job_server {
 our %in_progress;
 our @auto_retry_patterns;  # Patterns for automatic retry (e.g., "*.cc", "*.hh")
 our %retry_counts;         # Track retry attempts per target
+our %assumed_targets;      # Targets marked as already built (even if they don't exist)
 
 sub submit_job {
     my ($target, $command, $dir) = @_;
@@ -3479,6 +3480,12 @@ sub dispatch_command {
     } elsif ($cmd eq 'auto-retry') {
         cmd_auto_retry($words, $opts, $state);
 
+    } elsif ($cmd eq 'assume') {
+        cmd_assume($words, $socket);
+
+    } elsif ($cmd eq 'reset') {
+        cmd_reset($words, $socket);
+
     } elsif ($cmd eq 'eval') {
         # Evaluate Perl expression
         my $expr = "";
@@ -4057,6 +4064,53 @@ sub cmd_ignore {
     $Smak::ignored_files{$file} = 1;
     print "Ignoring '$file' for dependency checking\n";
     print "Targets depending on this file will not be rebuilt based on its timestamp\n";
+}
+
+sub cmd_assume {
+    my ($words, $socket) = @_;
+
+    # List assumed targets if no arguments
+    if (@$words == 0) {
+        if (keys %Smak::assumed_targets) {
+            print "Assumed targets (marked as already built):\n";
+            for my $target (sort keys %Smak::assumed_targets) {
+                print "  $target\n";
+            }
+            print "\n" . (scalar keys %Smak::assumed_targets) . " target(s) assumed\n";
+        } else {
+            print "No targets are currently assumed\n";
+        }
+        print "\nUsage: assume <target>  - Mark target as already built (skip building it)\n";
+        print "       assume -clear    - Clear all assumed targets\n";
+        return;
+    }
+
+    if ($words->[0] eq '-clear') {
+        %Smak::assumed_targets = ();
+        print "Cleared all assumed targets\n";
+        return;
+    }
+
+    # Mark target as assumed (already built)
+    my $target = $words->[0];
+    $Smak::assumed_targets{$target} = 1;
+    print "Assuming target '$target' is already built\n";
+    print "This target will be treated as satisfied even if it doesn't exist\n";
+}
+
+sub cmd_reset {
+    my ($words, $socket) = @_;
+
+    if ($socket) {
+        # Job server running - send reset command
+        print "Resetting build state...\n";
+        print $socket "RESET\n";
+        my $response = <$socket>;
+        chomp $response if $response;
+        print "$response\n" if $response;
+    } else {
+        print "Job server not running. Build state cleared.\n";
+    }
 }
 
 sub cmd_needs {
@@ -5439,6 +5493,14 @@ sub run_job_master {
         # Skip if already handled
         return if is_target_pending($target);
 
+        # Check if target is assumed (marked as already built)
+        if (exists $assumed_targets{$target}) {
+            $completed_targets{$target} = 1;
+            $in_progress{$target} = "done";
+            warn "Target '$target' is assumed (marked as already built), skipping\n" if $ENV{SMAK_DEBUG};
+            return;
+        }
+
 	$recurse_log[$depth] = "${dir}:$target";
 	
         # Lookup dependencies
@@ -6039,6 +6101,7 @@ sub run_job_master {
                 dir => $job->{dir},
                 command => $job->{command},
                 started => 0,
+                output => [],  # Capture output for error analysis
             };
 	    
 	    $j++;
@@ -6493,6 +6556,19 @@ sub run_job_master {
                         }
                     }
                     print $master_socket "Restarting $new_count workers...\n";
+
+                } elsif ($line =~ /^RESET$/) {
+                    # Clear build state to allow rebuilding after clean
+                    print STDERR "Resetting build state...\n";
+                    %completed_targets = ();
+                    %failed_targets = ();
+                    %in_progress = ();
+                    %pending_composite = ();
+                    %retry_counts = ();
+                    @job_queue = ();
+                    %stale_targets_cache = ();
+                    print STDERR "Build state cleared: all targets will be re-evaluated\n";
+                    print $master_socket "Build state reset. All targets will be re-evaluated on next build.\n";
 
                 } elsif ($line =~ /^LIST_FILES$/) {
                     # List tracked file modifications
@@ -6984,6 +7060,13 @@ sub run_job_master {
 
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
+                    # Capture output for the task running on this worker
+                    if (exists $worker_status{$socket}{task_id}) {
+                        my $task_id = $worker_status{$socket}{task_id};
+                        if (exists $running_jobs{$task_id}) {
+                            push @{$running_jobs{$task_id}{output}}, $output;
+                        }
+                    }
                     # Always print to stdout (job master's stdout is inherited from parent)
                     print $stomp_prompt,"$output\n";
                     # Also forward to attached clients if any
@@ -6991,6 +7074,13 @@ sub run_job_master {
 
                 } elsif ($line =~ /^ERROR (.*)$/) {
                     my $error = $1;
+                    # Capture error for the task running on this worker
+                    if (exists $worker_status{$socket}{task_id}) {
+                        my $task_id = $worker_status{$socket}{task_id};
+                        if (exists $running_jobs{$task_id}) {
+                            push @{$running_jobs{$task_id}{output}}, "ERROR: $error";
+                        }
+                    }
                     # Always print to stderr (job master's stderr is inherited from parent)
                     print STDERR "ERROR: $error\n";
                     # Also forward to attached clients if any
@@ -7096,6 +7186,46 @@ sub run_job_master {
 
                     # Track successfully completed targets to avoid rebuilding
                     if ($exit_code == 0 && $job->{target}) {
+                        # If this is a clean-like target, detect rm commands and mark removed files as stale
+                        if ($job->{command} && $job->{command} =~ /\brm\b/) {
+                            # Extract rm commands and expand wildcards
+                            my $cmd = $job->{command};
+                            my $dir = $job->{dir} || '.';
+
+                            # Find all rm commands (handle both "rm file" and "rm -rf file")
+                            while ($cmd =~ /\brm\s+(?:-[a-z]+\s+)*([^\s;&|]+(?:\s+[^\s;&|]+)*)/g) {
+                                my $args = $1;
+                                # Split arguments and expand each one
+                                for my $arg (split /\s+/, $args) {
+                                    next if $arg =~ /^-/;  # Skip flags
+
+                                    # Expand wildcards using glob
+                                    my @expanded;
+                                    if ($arg =~ /[*?\[]/) {
+                                        # Has wildcards - expand them
+                                        my $full_pattern = $arg =~ m{^/} ? $arg : "$dir/$arg";
+                                        @expanded = glob($full_pattern);
+                                    } else {
+                                        # No wildcards - use as-is
+                                        @expanded = ($arg =~ m{^/} ? $arg : "$dir/$arg");
+                                    }
+
+                                    # Mark each expanded file as removed
+                                    for my $file (@expanded) {
+                                        # Extract just the filename for target matching
+                                        my $target_name = $file;
+                                        $target_name =~ s{^\Q$dir\E/}{};  # Remove dir prefix
+
+                                        if (exists $completed_targets{$target_name}) {
+                                            delete $completed_targets{$target_name};
+                                            $stale_targets_cache{$target_name} = time();
+                                            print STDERR "Detected rm of '$target_name' - marked as stale\n" if $ENV{SMAK_DEBUG};
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         # Check if this looks like a phony target (doesn't produce a file)
                         # Phony targets typically have no extension or are common make targets
                         my $target = $job->{target};
@@ -7153,10 +7283,35 @@ sub run_job_master {
                     } else {
                         # Check if we should auto-retry this target
                         my $should_retry = 0;
-                        if ($job->{target} && @auto_retry_patterns) {
-                            my $retry_count = $retry_counts{$job->{target}} || 0;
-                            if ($retry_count < 1) {  # Max 1 retry
-                                # Check if target matches any auto-retry pattern
+                        my $retry_reason = "";
+
+                        my $retry_count = $retry_counts{$job->{target}} || 0;
+                        if ($job->{target} && $retry_count < 1) {  # Max 1 retry
+                            # Analyze captured output for retryable errors
+                            my @output = $job->{output} ? @{$job->{output}} : ();
+
+                            for my $line (@output) {
+                                # Strip ANSI color codes that compilers often add
+                                my $clean_line = $line;
+                                $clean_line =~ s/\x1b\[[0-9;]*m//g;  # Remove ANSI escape sequences
+
+                                # Check for "No such file or directory" errors
+                                if ($clean_line =~ /(fatal error|error):\s+(.+?):\s+No such file or directory/i) {
+                                    my $missing_file = $2;
+                                    $missing_file =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+                                    # Check if file exists now (race condition resolved)
+                                    my $file_path = $missing_file =~ m{^/} ? $missing_file : "$job->{dir}/$missing_file";
+                                    if (-f $file_path) {
+                                        $should_retry = 1;
+                                        $retry_reason = "file '$missing_file' exists now (race condition)";
+                                        last;
+                                    }
+                                }
+                            }
+
+                            # If no intelligent retry detected, fall back to pattern matching
+                            if (!$should_retry && @auto_retry_patterns) {
                                 for my $pattern (@auto_retry_patterns) {
                                     # Convert glob pattern to regex
                                     my $regex = $pattern;
@@ -7165,6 +7320,7 @@ sub run_job_master {
                                     $regex =~ s/\?/./g;     # ? matches single char
                                     if ($job->{target} =~ /^$regex$/ || $job->{target} =~ /$regex$/) {
                                         $should_retry = 1;
+                                        $retry_reason = "matches pattern '$pattern'";
                                         last;
                                     }
                                 }
@@ -7174,7 +7330,7 @@ sub run_job_master {
                         if ($should_retry) {
                             # Retry this target
                             $retry_counts{$job->{target}}++;
-                            print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code) - AUTO-RETRYING (attempt " . $retry_counts{$job->{target}} . ")\n";
+                            print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code) - AUTO-RETRYING ($retry_reason, attempt " . $retry_counts{$job->{target}} . ")\n";
 
                             # Clear from failed targets so it can be rebuilt
                             delete $failed_targets{$job->{target}};

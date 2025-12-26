@@ -1,0 +1,18 @@
+Compiling src/main.cc -> main.o
+../dummy-command -in src/main.cc config.h -out main.o
+All 2 input file(s) verified
+Waiting 0.844656 seconds...
+Created output file: main.o
+Success: Processed 2 input(s), 1 output(s)
+Compiling src/helper.cc -> helper.o
+../dummy-command -in src/helper.cc config.h -out helper.o
+All 2 input file(s) verified
+Waiting 0.373448 seconds...
+Created output file: helper.o
+Success: Processed 2 input(s), 1 output(s)
+Linking program
+../dummy-command -in main.o helper.o -out program
+All 2 input file(s) verified
+Waiting 1.23358 seconds...
+Created output file: program
+Success: Processed 2 input(s), 1 output(s)

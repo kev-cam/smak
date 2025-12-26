@@ -10,10 +10,13 @@ cd "$SCRIPT_DIR"
 # Parse arguments
 FULL_MODE=0
 VERBOSE=0
+INTERACTIVE=0
 if [ "$1" = "--full" ] || [ "$1" = "-f" ]; then
     FULL_MODE=1
 elif [ "$1" = "--verbose" ] || [ "$1" = "-v" ]; then
     VERBOSE=1
+elif [ "$1" = "--with-interactive" ] || [ "$1" = "-i" ]; then
+    INTERACTIVE=1
 elif [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     cat << EOF
 Usage: $0 [OPTIONS]
@@ -24,15 +27,17 @@ All tests are run twice - once with cache disabled and once with cache enabled.
 This ensures consistent behavior between cached and non-cached execution.
 
 Options:
-  (none)        Run quick regression tests (non-interactive unit tests)
-  -f, --full    Run full test suite including random builds and CLI tests
-  -v, --verbose Show test output
-  -h, --help    Show this help
+  (none)              Run quick regression tests (non-interactive unit tests)
+  -f, --full          Run full test suite including random builds and CLI tests
+  -v, --verbose       Show test output
+  -i, --with-interactive  Include interactive debug mode tests
+  -h, --help          Show this help
 
 Examples:
-  $0            # Quick regression (default)
-  $0 --full     # Full test suite
-  $0 --verbose  # Show all test output
+  $0                  # Quick regression (default)
+  $0 --full           # Full test suite
+  $0 --verbose        # Show all test output
+  $0 --with-interactive  # Include interactive tests
 
 EOF
     exit 0
@@ -74,6 +79,19 @@ run_test() {
         return
     fi
 
+    # Check if test uses interactive debug mode (heredoc + -Kd)
+    local is_interactive=0
+    if grep -q "<<.*|.*-Kd" "$test_script" 2>/dev/null; then
+        is_interactive=1
+    fi
+
+    # Skip interactive tests unless --with-interactive flag is set
+    if [ $is_interactive -eq 1 ] && [ $INTERACTIVE -eq 0 ]; then
+        echo -e "${YELLOW}SKIP${NC} (interactive, use -i to include)"
+        ((SKIPPED++))
+        return
+    fi
+
     # Run test and capture output
     local output_nocache output_cache
     local start_time=$(date +%s)
@@ -87,13 +105,24 @@ run_test() {
         SMAK_CACHE_DIR=default ./"$test_script"
         local result_cache=$?
     else
-        # Run without cache
-        output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
-        local result_nocache=$?
+        # For interactive tests, don't redirect stdin
+        if [ $is_interactive -eq 1 ]; then
+            # Run without cache (allow stdin for heredoc)
+            output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1)
+            local result_nocache=$?
 
-        # Run with cache
-        output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
-        local result_cache=$?
+            # Run with cache (allow stdin for heredoc)
+            output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1)
+            local result_cache=$?
+        else
+            # Run without cache (redirect stdin for non-interactive)
+            output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
+            local result_nocache=$?
+
+            # Run with cache (redirect stdin for non-interactive)
+            output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
+            local result_cache=$?
+        fi
     fi
 
     local end_time=$(date +%s)

@@ -5422,21 +5422,35 @@ sub run_job_master {
         my ($target) = @_;
 
         # Check if already completed
-        return 1 if exists $completed_targets{$target};
+        if (exists $completed_targets{$target}) {
+            print STDERR "DEBUG is_target_pending: '$target' in completed_targets\n" if $ENV{SMAK_DEBUG};
+            return 1;
+        }
 
         # Check if in progress (includes queued, running, and pending composite targets)
-        return 1 if exists $in_progress{$target};
+        if (exists $in_progress{$target}) {
+            my $status = $in_progress{$target} // 'undef';
+            print STDERR "DEBUG is_target_pending: '$target' in in_progress (status='$status')\n" if $ENV{SMAK_DEBUG};
+            return 1;
+        }
 
         # Check if already in queue
         for my $job (@job_queue) {
-            return 1 if $job->{target} eq $target;
+            if ($job->{target} eq $target) {
+                print STDERR "DEBUG is_target_pending: '$target' in job_queue\n" if $ENV{SMAK_DEBUG};
+                return 1;
+            }
         }
 
         # Check if currently running
         for my $task_id (keys %running_jobs) {
-            return 1 if $running_jobs{$task_id}{target} eq $target;
+            if ($running_jobs{$task_id}{target} eq $target) {
+                print STDERR "DEBUG is_target_pending: '$target' in running_jobs\n" if $ENV{SMAK_DEBUG};
+                return 1;
+            }
         }
 
+        print STDERR "DEBUG is_target_pending: '$target' NOT pending\n" if $ENV{SMAK_DEBUG};
         return 0;
     }
 

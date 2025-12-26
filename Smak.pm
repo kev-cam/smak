@@ -3486,6 +3486,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'reset') {
         cmd_reset($words, $socket);
 
+    } elsif ($cmd eq 'rescan') {
+        cmd_rescan($words, $socket);
+
     } elsif ($cmd eq 'eval') {
         # Evaluate Perl expression
         my $expr = "";
@@ -4110,6 +4113,28 @@ sub cmd_reset {
         print "$response\n" if $response;
     } else {
         print "Job server not running. Build state cleared.\n";
+    }
+}
+
+sub cmd_rescan {
+    my ($words, $socket) = @_;
+
+    my $auto = 0;
+    if (@$words > 0 && $words->[0] eq '-auto') {
+        $auto = 1;
+        print "Auto-rescan enabled (will check timestamps periodically)\n";
+    }
+
+    if ($socket) {
+        # Job server running - send rescan command
+        print "Rescanning timestamps...\n" unless $auto;
+        my $cmd = $auto ? "RESCAN_AUTO\n" : "RESCAN\n";
+        print $socket $cmd;
+        my $response = <$socket>;
+        chomp $response if $response;
+        print "$response\n" if $response && !$auto;
+    } else {
+        print "Job server not running. Rescan requires active job server.\n";
     }
 }
 
@@ -5347,6 +5372,7 @@ sub run_job_master {
     our %pending_composite;  # composite targets waiting for dependencies
                             # target => {deps => [list], master_socket => socket}
     our $next_task_id = 1;
+    my $auto_rescan = 0;  # Flag for automatic periodic rescanning
 
     # Helper functions
     sub process_command {
@@ -6269,6 +6295,30 @@ sub run_job_master {
             }
 
 	    check_queue_state("intermittent check");
+
+            # Perform auto-rescan if enabled
+            if ($auto_rescan) {
+                my $stale_count = 0;
+                # Get makefile directory for relative path resolution
+                my $makefile_dir = $makefile;
+                $makefile_dir =~ s{/[^/]*$}{};  # Remove filename
+                $makefile_dir = '.' if $makefile_dir eq $makefile;  # No dir separator found
+
+                for my $target (keys %completed_targets) {
+                    my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
+                    next unless -e $target_path;
+                    if (needs_rebuild($target)) {
+                        delete $completed_targets{$target};
+                        $stale_targets_cache{$target} = time();
+                        $stale_count++;
+                        print STDERR "Auto-rescan: marked stale '$target'\n" if $ENV{SMAK_DEBUG};
+                    }
+                }
+                if ($stale_count > 0) {
+                    print STDERR "[auto-rescan] Found $stale_count stale target(s)\n";
+                    dispatch_jobs();  # Try to dispatch new jobs for stale targets
+                }
+            }
         }
 
         for my $socket (@ready) {
@@ -6567,6 +6617,41 @@ sub run_job_master {
                     %stale_targets_cache = ();
                     print STDERR "Build state cleared: all targets will be re-evaluated\n";
                     print $master_socket "Build state reset. All targets will be re-evaluated on next build.\n";
+
+                } elsif ($line =~ /^RESCAN(_AUTO)?$/) {
+                    # Rescan timestamps and mark stale targets
+                    my $auto = defined $1;
+                    my $stale_count = 0;
+
+                    print STDERR "Rescanning file timestamps...\n" if $ENV{SMAK_DEBUG};
+
+                    # Get makefile directory for relative path resolution
+                    my $makefile_dir = $makefile;
+                    $makefile_dir =~ s{/[^/]*$}{};  # Remove filename
+                    $makefile_dir = '.' if $makefile_dir eq $makefile;  # No dir separator found
+
+                    # Check all completed targets to see if they need rebuilding
+                    for my $target (keys %completed_targets) {
+                        # Skip if target doesn't exist anymore (was deleted)
+                        my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
+                        next unless -e $target_path;
+
+                        # Check if this target needs rebuilding
+                        if (needs_rebuild($target)) {
+                            delete $completed_targets{$target};
+                            $stale_targets_cache{$target} = time();
+                            $stale_count++;
+                            print STDERR "  Marked stale: $target\n" if $ENV{SMAK_DEBUG};
+                        }
+                    }
+
+                    if ($auto) {
+                        # Enable periodic rescanning in check_queue_state
+                        $auto_rescan = 1;
+                        print $master_socket "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                    } else {
+                        print $master_socket "Rescan complete. Marked $stale_count target(s) as stale.\n";
+                    }
 
                 } elsif ($line =~ /^LIST_FILES$/) {
                     # List tracked file modifications

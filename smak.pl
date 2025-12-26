@@ -459,6 +459,22 @@ sub execute_script_file {
                 } else {
                     print "Job server not running. Use 'start' to enable.\n";
                 }
+            } elsif ($cmd eq 'auto-retry') {
+                # Create minimal state hash for cmd_auto_retry
+                my %state = (socket => \$Smak::job_server_socket);
+                Smak::cmd_auto_retry(\@words, {}, \%state);
+            } elsif ($cmd eq 'ignore') {
+                Smak::cmd_ignore(\@words, $Smak::job_server_socket);
+            } elsif ($cmd eq 'start') {
+                my %state = (socket => \$Smak::job_server_socket, server_pid => \$Smak::job_server_pid);
+                Smak::cmd_start(\@words, {}, \%state);
+            } elsif ($cmd eq 'stop') {
+                my %state = (socket => \$Smak::job_server_socket, server_pid => \$Smak::job_server_pid);
+                Smak::cmd_stop(\@words, {}, \%state);
+            } elsif ($cmd eq 'kill') {
+                Smak::cmd_kill($Smak::job_server_socket);
+            } elsif ($cmd eq 'restart') {
+                Smak::cmd_restart(\@words, $Smak::job_server_socket, {});
             } else {
                 print "[$script_file:$line_num] Unknown command: $cmd\n";
             }

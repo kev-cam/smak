@@ -7377,20 +7377,25 @@ sub run_job_master {
                             my @output = $job->{output} ? @{$job->{output}} : ();
 
                             for my $line (@output) {
-                                # Strip ANSI color codes that compilers often add
+                                # Strip ANSI color codes and formatting (bold, underline, etc.)
                                 my $clean_line = $line;
-                                $clean_line =~ s/\x1b\[[0-9;]*m//g;  # Remove ANSI escape sequences
+                                # Remove all ANSI escape sequences: \x1b[...m or \033[...m
+                                $clean_line =~ s/\x1b\[[0-9;]*[a-zA-Z]//g;  # \x1b format
+                                $clean_line =~ s/\033\[[0-9;]*[a-zA-Z]//g;  # \033 format (octal)
 
                                 # Check for "No such file or directory" errors
                                 if ($clean_line =~ /(fatal error|error):\s+(.+?):\s+No such file or directory/i) {
                                     my $missing_file = $2;
                                     $missing_file =~ s/^\s+|\s+$//g;  # Trim whitespace
 
+                                    print STDERR "Auto-retry: detected missing file '$missing_file' for target '$job->{target}'\n" if $ENV{SMAK_DEBUG};
+
                                     # Check if file exists now (race condition resolved)
                                     my $file_path = $missing_file =~ m{^/} ? $missing_file : "$job->{dir}/$missing_file";
                                     if (-f $file_path) {
                                         $should_retry = 1;
                                         $retry_reason = "file '$missing_file' exists now (race condition)";
+                                        print STDERR "Auto-retry: will retry because $retry_reason\n" if $ENV{SMAK_DEBUG};
                                         last;
                                     }
 
@@ -7405,6 +7410,7 @@ sub run_job_master {
                                             if ($missing_file =~ /^$regex$/ || $missing_file =~ /$regex$/) {
                                                 $should_retry = 1;
                                                 $retry_reason = "missing file '$missing_file' matches pattern '$pattern'";
+                                                print STDERR "Auto-retry: will retry because $retry_reason\n" if $ENV{SMAK_DEBUG};
                                                 last;
                                             }
                                         }

@@ -7377,8 +7377,11 @@ sub run_job_master {
                             my @output = $job->{output} ? @{$job->{output}} : ();
 
                             for my $line (@output) {
-                                # Strip ANSI color codes and formatting (bold, underline, etc.)
+                                # Strip "ERROR: " prefix if present (we add this when capturing)
                                 my $clean_line = $line;
+                                $clean_line =~ s/^ERROR:\s*//;
+
+                                # Strip ANSI color codes and formatting (bold, underline, etc.)
                                 # Remove all ANSI escape sequences: \x1b[...m or \033[...m
                                 $clean_line =~ s/\x1b\[[0-9;]*[a-zA-Z]//g;  # \x1b format
                                 $clean_line =~ s/\033\[[0-9;]*[a-zA-Z]//g;  # \033 format (octal)

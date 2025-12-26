@@ -6323,6 +6323,9 @@ sub run_job_master {
         if ($now - $last_consistency_check >= 2) {
             $last_consistency_check = $now;
 
+            # Report queue state during periodic check
+            check_queue_state("periodic check");
+
             # Check all worker sockets for pending messages
             for my $worker (@workers) {
                 $worker->blocking(0);

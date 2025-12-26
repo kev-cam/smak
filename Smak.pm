@@ -6309,6 +6309,7 @@ sub run_job_master {
                     next unless -e $target_path;
                     if (needs_rebuild($target)) {
                         delete $completed_targets{$target};
+                        delete $in_progress{$target};  # Also clear from in_progress
                         $stale_targets_cache{$target} = time();
                         $stale_count++;
                         print STDERR "Auto-rescan: marked stale '$target'\n" if $ENV{SMAK_DEBUG};
@@ -6639,6 +6640,7 @@ sub run_job_master {
                         # Check if this target needs rebuilding
                         if (needs_rebuild($target)) {
                             delete $completed_targets{$target};
+                            delete $in_progress{$target};  # Also clear from in_progress
                             $stale_targets_cache{$target} = time();
                             $stale_count++;
                             print STDERR "  Marked stale: $target\n" if $ENV{SMAK_DEBUG};

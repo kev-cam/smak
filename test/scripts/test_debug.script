@@ -1,0 +1,13 @@
+# Interactive debug test script
+# Test the -Kd debug mode commands
+
+list                     # Show available debug commands
+# expect "Debug commands"
+
+show all                 # Show all targets
+# expect "All targets"
+
+# wait 200ms              # Brief pause
+
+quit                     # Exit debugger
+# expect "Goodbye"

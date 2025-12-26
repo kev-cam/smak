@@ -85,9 +85,18 @@ run_test() {
         is_interactive=1
     fi
 
-    # Skip interactive tests unless --with-interactive flag is set
-    if [ $is_interactive -eq 1 ] && [ $INTERACTIVE -eq 0 ]; then
-        echo -e "${YELLOW}SKIP${NC} (interactive, use -i to include)"
+    # Check if there's a script file for this test
+    local script_file="scripts/${test_name}.script"
+    local has_script=0
+    if [ -f "$script_file" ]; then
+        has_script=1
+    fi
+
+    # Skip interactive tests unless:
+    # 1. --with-interactive flag is set, OR
+    # 2. A .script file exists for automated testing
+    if [ $is_interactive -eq 1 ] && [ $INTERACTIVE -eq 0 ] && [ $has_script -eq 0 ]; then
+        echo -e "${YELLOW}SKIP${NC} (interactive, use -i or create $script_file)"
         ((SKIPPED++))
         return
     fi

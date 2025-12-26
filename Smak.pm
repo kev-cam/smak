@@ -7390,10 +7390,28 @@ sub run_job_master {
                                         $retry_reason = "file '$missing_file' exists now (race condition)";
                                         last;
                                     }
+
+                                    # Check if the missing file matches auto-retry patterns
+                                    if (!$should_retry && @auto_retry_patterns) {
+                                        for my $pattern (@auto_retry_patterns) {
+                                            # Convert glob pattern to regex
+                                            my $regex = $pattern;
+                                            $regex =~ s/\./\\./g;  # Escape dots
+                                            $regex =~ s/\*/[^\/]*/g;  # * matches non-slash chars
+                                            $regex =~ s/\?/./g;     # ? matches single char
+                                            if ($missing_file =~ /^$regex$/ || $missing_file =~ /$regex$/) {
+                                                $should_retry = 1;
+                                                $retry_reason = "missing file '$missing_file' matches pattern '$pattern'";
+                                                last;
+                                            }
+                                        }
+                                    }
+
+                                    last if $should_retry;  # Found a retryable error
                                 }
                             }
 
-                            # If no intelligent retry detected, fall back to pattern matching
+                            # If no intelligent retry detected, fall back to target pattern matching
                             if (!$should_retry && @auto_retry_patterns) {
                                 for my $pattern (@auto_retry_patterns) {
                                     # Convert glob pattern to regex

@@ -3486,6 +3486,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'reset') {
         cmd_reset($words, $socket);
 
+    } elsif ($cmd eq 'rescan') {
+        cmd_rescan($words, $socket);
+
     } elsif ($cmd eq 'eval') {
         # Evaluate Perl expression
         my $expr = "";
@@ -4110,6 +4113,28 @@ sub cmd_reset {
         print "$response\n" if $response;
     } else {
         print "Job server not running. Build state cleared.\n";
+    }
+}
+
+sub cmd_rescan {
+    my ($words, $socket) = @_;
+
+    my $auto = 0;
+    if (@$words > 0 && $words->[0] eq '-auto') {
+        $auto = 1;
+        print "Auto-rescan enabled (will check timestamps periodically)\n";
+    }
+
+    if ($socket) {
+        # Job server running - send rescan command
+        print "Rescanning timestamps...\n" unless $auto;
+        my $cmd = $auto ? "RESCAN_AUTO\n" : "RESCAN\n";
+        print $socket $cmd;
+        my $response = <$socket>;
+        chomp $response if $response;
+        print "$response\n" if $response && !$auto;
+    } else {
+        print "Job server not running. Rescan requires active job server.\n";
     }
 }
 
@@ -5347,6 +5372,7 @@ sub run_job_master {
     our %pending_composite;  # composite targets waiting for dependencies
                             # target => {deps => [list], master_socket => socket}
     our $next_task_id = 1;
+    my $auto_rescan = 0;  # Flag for automatic periodic rescanning
 
     # Helper functions
     sub process_command {
@@ -6235,23 +6261,116 @@ sub run_job_master {
                                 }
                             }
                         } else {
-                            if ($job->{target}) {
-                                $in_progress{$job->{target}} = "failed";
-                                $failed_targets{$job->{target}} = $exit_code;
-                            }
-                            print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
+                            # Check if we should auto-retry this target
+                            my $should_retry = 0;
+                            my $retry_reason = "";
 
-                            # Check if this failed task is a dependency of any composite target
-                            for my $comp_target (keys %pending_composite) {
-                                my $comp = $pending_composite{$comp_target};
-                                # Check if this failed target is in the composite's dependencies
-                                if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
-                                    print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
-                                    $in_progress{$comp_target} = "failed";
-                                    if ($comp->{master_socket}) {
-                                        print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                            my $retry_count = $retry_counts{$job->{target}} || 0;
+                            if ($job->{target} && $retry_count < 1) {  # Max 1 retry
+                                # Analyze captured output for retryable errors
+                                my @output = $job->{output} ? @{$job->{output}} : ();
+
+                                for my $line (@output) {
+                                    # Strip "ERROR: " prefix if present (we add this when capturing)
+                                    my $clean_line = $line;
+                                    $clean_line =~ s/^ERROR:\s*//;
+
+                                    # Strip ANSI color codes and formatting (bold, underline, etc.)
+                                    $clean_line =~ s/\x1b\[[0-9;]*[a-zA-Z]//g;  # \x1b format
+                                    $clean_line =~ s/\033\[[0-9;]*[a-zA-Z]//g;  # \033 format (octal)
+
+                                    # Check for "No such file or directory" errors
+                                    if ($clean_line =~ /(fatal error|error):\s+(.+?):\s+No such file or directory/i) {
+                                        my $missing_file = $2;
+                                        $missing_file =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+                                        print STDERR "Auto-retry: detected missing file '$missing_file' for target '$job->{target}'\n" if $ENV{SMAK_DEBUG};
+
+                                        # Check if file exists now (race condition resolved)
+                                        my $file_path = $missing_file =~ m{^/} ? $missing_file : "$job->{dir}/$missing_file";
+                                        if (-f $file_path) {
+                                            $should_retry = 1;
+                                            $retry_reason = "file '$missing_file' exists now (race condition)";
+                                            print STDERR "Auto-retry: will retry because $retry_reason\n" if $ENV{SMAK_DEBUG};
+                                            last;
+                                        }
+
+                                        # Check if the missing file matches auto-retry patterns
+                                        if (!$should_retry && @auto_retry_patterns) {
+                                            for my $pattern (@auto_retry_patterns) {
+                                                # Convert glob pattern to regex
+                                                my $regex = $pattern;
+                                                $regex =~ s/\./\\./g;  # Escape dots
+                                                $regex =~ s/\*/[^\/]*/g;  # * matches non-slash chars
+                                                $regex =~ s/\?/./g;     # ? matches single char
+                                                if ($missing_file =~ /^$regex$/ || $missing_file =~ /$regex$/) {
+                                                    $should_retry = 1;
+                                                    $retry_reason = "missing file '$missing_file' matches pattern '$pattern'";
+                                                    print STDERR "Auto-retry: will retry because $retry_reason\n" if $ENV{SMAK_DEBUG};
+                                                    last;
+                                                }
+                                            }
+                                        }
+
+                                        last if $should_retry;  # Found a retryable error
                                     }
-                                    delete $pending_composite{$comp_target};
+                                }
+
+                                # If no intelligent retry detected, fall back to target pattern matching
+                                if (!$should_retry && @auto_retry_patterns) {
+                                    for my $pattern (@auto_retry_patterns) {
+                                        # Convert glob pattern to regex
+                                        my $regex = $pattern;
+                                        $regex =~ s/\./\\./g;  # Escape dots
+                                        $regex =~ s/\*/[^\/]*/g;  # * matches non-slash chars
+                                        $regex =~ s/\?/./g;     # ? matches single char
+                                        if ($job->{target} =~ /^$regex$/ || $job->{target} =~ /$regex$/) {
+                                            $should_retry = 1;
+                                            $retry_reason = "matches pattern '$pattern'";
+                                            last;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if ($should_retry) {
+                                # Retry this target
+                                $retry_counts{$job->{target}}++;
+                                print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code) - AUTO-RETRYING ($retry_reason, attempt " . $retry_counts{$job->{target}} . ")\n";
+
+                                # Clear from failed targets so it can be rebuilt
+                                delete $failed_targets{$job->{target}};
+                                delete $in_progress{$job->{target}};
+
+                                # Re-queue the target
+                                push @job_queue, {
+                                    target => $job->{target},
+                                    dir => $job->{dir},
+                                    command => $job->{command},
+                                };
+
+                                # Try to dispatch immediately
+                                dispatch_jobs();
+                            } else {
+                                # No retry - mark as failed
+                                if ($job->{target}) {
+                                    $in_progress{$job->{target}} = "failed";
+                                    $failed_targets{$job->{target}} = $exit_code;
+                                }
+                                print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
+
+                                # Check if this failed task is a dependency of any composite target
+                                for my $comp_target (keys %pending_composite) {
+                                    my $comp = $pending_composite{$comp_target};
+                                    # Check if this failed target is in the composite's dependencies
+                                    if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
+                                        print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                                        $in_progress{$comp_target} = "failed";
+                                        if ($comp->{master_socket}) {
+                                            print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                                        }
+                                        delete $pending_composite{$comp_target};
+                                    }
                                 }
                             }
                         }
@@ -6270,6 +6389,31 @@ sub run_job_master {
             }
 
 	    check_queue_state("intermittent check");
+
+            # Perform auto-rescan if enabled
+            if ($auto_rescan) {
+                my $stale_count = 0;
+                # Get makefile directory for relative path resolution
+                my $makefile_dir = $makefile;
+                $makefile_dir =~ s{/[^/]*$}{};  # Remove filename
+                $makefile_dir = '.' if $makefile_dir eq $makefile;  # No dir separator found
+
+                for my $target (keys %completed_targets) {
+                    my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
+                    next unless -e $target_path;
+                    if (needs_rebuild($target)) {
+                        delete $completed_targets{$target};
+                        delete $in_progress{$target};  # Also clear from in_progress
+                        $stale_targets_cache{$target} = time();
+                        $stale_count++;
+                        print STDERR "Auto-rescan: marked stale '$target'\n" if $ENV{SMAK_DEBUG};
+                    }
+                }
+                if ($stale_count > 0) {
+                    print STDERR "[auto-rescan] Found $stale_count stale target(s)\n";
+                    dispatch_jobs();  # Try to dispatch new jobs for stale targets
+                }
+            }
         }
 
         for my $socket (@ready) {
@@ -6569,6 +6713,42 @@ sub run_job_master {
                     %stale_targets_cache = ();
                     print STDERR "Build state cleared: all targets will be re-evaluated\n";
                     print $master_socket "Build state reset. All targets will be re-evaluated on next build.\n";
+
+                } elsif ($line =~ /^RESCAN(_AUTO)?$/) {
+                    # Rescan timestamps and mark stale targets
+                    my $auto = defined $1;
+                    my $stale_count = 0;
+
+                    print STDERR "Rescanning file timestamps...\n" if $ENV{SMAK_DEBUG};
+
+                    # Get makefile directory for relative path resolution
+                    my $makefile_dir = $makefile;
+                    $makefile_dir =~ s{/[^/]*$}{};  # Remove filename
+                    $makefile_dir = '.' if $makefile_dir eq $makefile;  # No dir separator found
+
+                    # Check all completed targets to see if they need rebuilding
+                    for my $target (keys %completed_targets) {
+                        # Skip if target doesn't exist anymore (was deleted)
+                        my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
+                        next unless -e $target_path;
+
+                        # Check if this target needs rebuilding
+                        if (needs_rebuild($target)) {
+                            delete $completed_targets{$target};
+                            delete $in_progress{$target};  # Also clear from in_progress
+                            $stale_targets_cache{$target} = time();
+                            $stale_count++;
+                            print STDERR "  Marked stale: $target\n" if $ENV{SMAK_DEBUG};
+                        }
+                    }
+
+                    if ($auto) {
+                        # Enable periodic rescanning in check_queue_state
+                        $auto_rescan = 1;
+                        print $master_socket "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                    } else {
+                        print $master_socket "Rescan complete. Marked $stale_count target(s) as stale.\n";
+                    }
 
                 } elsif ($line =~ /^LIST_FILES$/) {
                     # List tracked file modifications
@@ -7218,6 +7398,7 @@ sub run_job_master {
 
                                         if (exists $completed_targets{$target_name}) {
                                             delete $completed_targets{$target_name};
+                                            delete $in_progress{$target_name};  # Also clear from in_progress
                                             $stale_targets_cache{$target_name} = time();
                                             print STDERR "Detected rm of '$target_name' - marked as stale\n" if $ENV{SMAK_DEBUG};
                                         }
@@ -7291,26 +7472,53 @@ sub run_job_master {
                             my @output = $job->{output} ? @{$job->{output}} : ();
 
                             for my $line (@output) {
-                                # Strip ANSI color codes that compilers often add
+                                # Strip "ERROR: " prefix if present (we add this when capturing)
                                 my $clean_line = $line;
-                                $clean_line =~ s/\x1b\[[0-9;]*m//g;  # Remove ANSI escape sequences
+                                $clean_line =~ s/^ERROR:\s*//;
+
+                                # Strip ANSI color codes and formatting (bold, underline, etc.)
+                                # Remove all ANSI escape sequences: \x1b[...m or \033[...m
+                                $clean_line =~ s/\x1b\[[0-9;]*[a-zA-Z]//g;  # \x1b format
+                                $clean_line =~ s/\033\[[0-9;]*[a-zA-Z]//g;  # \033 format (octal)
 
                                 # Check for "No such file or directory" errors
                                 if ($clean_line =~ /(fatal error|error):\s+(.+?):\s+No such file or directory/i) {
                                     my $missing_file = $2;
                                     $missing_file =~ s/^\s+|\s+$//g;  # Trim whitespace
 
+                                    print STDERR "Auto-retry: detected missing file '$missing_file' for target '$job->{target}'\n" if $ENV{SMAK_DEBUG};
+
                                     # Check if file exists now (race condition resolved)
                                     my $file_path = $missing_file =~ m{^/} ? $missing_file : "$job->{dir}/$missing_file";
                                     if (-f $file_path) {
                                         $should_retry = 1;
                                         $retry_reason = "file '$missing_file' exists now (race condition)";
+                                        print STDERR "Auto-retry: will retry because $retry_reason\n" if $ENV{SMAK_DEBUG};
                                         last;
                                     }
+
+                                    # Check if the missing file matches auto-retry patterns
+                                    if (!$should_retry && @auto_retry_patterns) {
+                                        for my $pattern (@auto_retry_patterns) {
+                                            # Convert glob pattern to regex
+                                            my $regex = $pattern;
+                                            $regex =~ s/\./\\./g;  # Escape dots
+                                            $regex =~ s/\*/[^\/]*/g;  # * matches non-slash chars
+                                            $regex =~ s/\?/./g;     # ? matches single char
+                                            if ($missing_file =~ /^$regex$/ || $missing_file =~ /$regex$/) {
+                                                $should_retry = 1;
+                                                $retry_reason = "missing file '$missing_file' matches pattern '$pattern'";
+                                                print STDERR "Auto-retry: will retry because $retry_reason\n" if $ENV{SMAK_DEBUG};
+                                                last;
+                                            }
+                                        }
+                                    }
+
+                                    last if $should_retry;  # Found a retryable error
                                 }
                             }
 
-                            # If no intelligent retry detected, fall back to pattern matching
+                            # If no intelligent retry detected, fall back to target pattern matching
                             if (!$should_retry && @auto_retry_patterns) {
                                 for my $pattern (@auto_retry_patterns) {
                                     # Convert glob pattern to regex

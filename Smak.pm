@@ -5872,9 +5872,19 @@ sub run_job_master {
         my ($target, $target_dir) = @_;
         $target_dir //= '.';
 
-        # Check if file exists
+        # Check if file exists in current directory or via vpath
         my $target_path = $target =~ m{^/} ? $target : "$target_dir/$target";
-        return 1 if -e $target_path;
+        if (-e $target_path) {
+            return 1;
+        }
+
+        # Check vpath directories
+        my $resolved = resolve_vpath($target, $target_dir);
+        if ($resolved ne $target) {
+            # vpath found the file
+            my $resolved_path = $resolved =~ m{^/} ? $resolved : "$target_dir/$resolved";
+            return 1 if -e $resolved_path;
+        }
 
         # Check if target has a fixed rule
         my $key = "$makefile\t$target";

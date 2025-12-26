@@ -1,12 +1,11 @@
 #!/usr/bin/env perl
-# Standalone script runner for automated interactive tests
+# Standalone script runner for automated interactive tests using PTY
 # Usage: run-with-script.pl <script-file> <test-command>
 
 use strict;
 use warnings;
-use IPC::Open3;
+use IO::Pty;
 use IO::Select;
-use Symbol 'gensym';
 use POSIX ":sys_wait_h";
 use Time::HiRes qw(sleep time);
 use Cwd 'abs_path';
@@ -70,40 +69,64 @@ sub parse_script_file {
     return \@actions;
 }
 
-# Run command with script
+# Run command with script using PTY
 my $actions = parse_script_file($script_file);
 my $cmd = join(' ', @test_cmd);
 
-vprint "Running with script: $cmd (script: $script_file)\n";
+vprint "Running with script (PTY): $cmd (script: $script_file)\n";
 
+# Create pseudo-terminal
+my $pty = IO::Pty->new();
+die "Cannot create PTY: $!\n" unless $pty;
+
+my $pid = fork();
+die "Fork failed: $!\n" unless defined $pid;
+
+if ($pid == 0) {
+    # Child process
+    $pty->make_slave_controlling_terminal();
+    my $slave = $pty->slave();
+
+    close($pty);
+
+    open(STDIN, "<&", $slave->fileno()) or die "Cannot dup stdin: $!";
+    open(STDOUT, ">&", $slave->fileno()) or die "Cannot dup stdout: $!";
+    open(STDERR, ">&", $slave->fileno()) or die "Cannot dup stderr: $!";
+
+    close($slave);
+
+    exec($cmd) or die "Exec failed: $!";
+}
+
+# Parent process
 my $output = '';
-my $err = gensym;
-my $pid = open3(my $in, my $out, $err, $cmd);
-
-my $sel = IO::Select->new($out, $err);
-my $start = time();
-my $action_index = 0;
-my $last_output_time = time();
 my $pending_output = '';
 my $test_failed = 0;
 my $failure_reason = '';
+my $start = time();
 my $timeout = 30;
+my $action_index = 0;
+my $last_output_time = time();
+
+my $sel = IO::Select->new($pty);
 
 while (time() - $start < $timeout) {
     my @ready = $sel->can_read(0.1);
+
     for my $fh (@ready) {
         my $data;
         my $n = sysread($fh, $data, 4096);
         if ($n) {
             $output .= $data;
             $pending_output .= $data;
-            print $data unless $VERBOSE;  # Always show output
+            print $data unless $VERBOSE;  # Show output
             $last_output_time = time();
         } else {
             $sel->remove($fh);
         }
     }
 
+    # Process next action
     if ($action_index < @$actions) {
         my $action = $actions->[$action_index];
 
@@ -116,7 +139,7 @@ while (time() - $start < $timeout) {
             vprint ">>> Sending $action->{display}\n";
             kill('INT', $pid) if $action->{display} eq '^C';
             kill('TSTP', $pid) if $action->{display} eq '^Z';
-            syswrite($in, "\x04") if $action->{display} eq '^D';
+            syswrite($pty, "\x04") if $action->{display} eq '^D';
             $action_index++;
 
         } elsif ($action->{type} eq 'expect') {
@@ -164,27 +187,31 @@ while (time() - $start < $timeout) {
             $action_index++;
 
         } elsif ($action->{type} eq 'command') {
+            # Wait for prompt before sending command
             if ($pending_output =~ /smak>|smak-attach>/) {
                 vprint ">>> Sending: $action->{text}\n";
-                print $in "$action->{text}\n";
+                syswrite($pty, "$action->{text}\n");
                 $pending_output = '';
                 $action_index++;
             }
         }
     }
 
+    # Check if process exited
     my $kid = waitpid($pid, WNOHANG);
     if ($kid > 0) {
         vprint "Process exited\n";
         last;
     }
 
+    # If we've processed all actions and no output for 2 seconds, we're done
     if ($action_index >= @$actions && time() - $last_output_time > 2) {
         vprint "All actions complete and idle, exiting\n";
         last;
     }
 }
 
+# Kill if still running
 if (kill(0, $pid)) {
     vprint "Killing process\n";
     kill('TERM', $pid);

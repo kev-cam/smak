@@ -3483,6 +3483,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'assume') {
         cmd_assume($words, $socket);
 
+    } elsif ($cmd eq 'reset') {
+        cmd_reset($words, $socket);
+
     } elsif ($cmd eq 'eval') {
         # Evaluate Perl expression
         my $expr = "";
@@ -4093,6 +4096,21 @@ sub cmd_assume {
     $Smak::assumed_targets{$target} = 1;
     print "Assuming target '$target' is already built\n";
     print "This target will be treated as satisfied even if it doesn't exist\n";
+}
+
+sub cmd_reset {
+    my ($words, $socket) = @_;
+
+    if ($socket) {
+        # Job server running - send reset command
+        print "Resetting build state...\n";
+        print $socket "RESET\n";
+        my $response = <$socket>;
+        chomp $response if $response;
+        print "$response\n" if $response;
+    } else {
+        print "Job server not running. Build state cleared.\n";
+    }
 }
 
 sub cmd_needs {
@@ -6536,6 +6554,19 @@ sub run_job_master {
                         }
                     }
                     print $master_socket "Restarting $new_count workers...\n";
+
+                } elsif ($line =~ /^RESET$/) {
+                    # Clear build state to allow rebuilding after clean
+                    print STDERR "Resetting build state...\n";
+                    %completed_targets = ();
+                    %failed_targets = ();
+                    %in_progress = ();
+                    %pending_composite = ();
+                    %retry_counts = ();
+                    @job_queue = ();
+                    %stale_targets_cache = ();
+                    print STDERR "Build state cleared: all targets will be re-evaluated\n";
+                    print $master_socket "Build state reset. All targets will be re-evaluated on next build.\n";
 
                 } elsif ($line =~ /^LIST_FILES$/) {
                     # List tracked file modifications

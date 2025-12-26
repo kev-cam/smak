@@ -6159,6 +6159,14 @@ sub run_job_master {
                                 last;
                             }
                             # Pre-existing source file or already built, OK to proceed
+                        } elsif (exists $in_progress{$single_dep} &&
+                                 $in_progress{$single_dep} ne "done" &&
+                                 $in_progress{$single_dep} ne "failed") {
+                            # Dependency is queued or currently building - wait for it
+                            $deps_satisfied = 0;
+                            print STDERR "  Job '$target' waiting for dependency '$single_dep' (queued/building)\n";
+                            print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep' in_progress\n" if $ENV{SMAK_DEBUG};
+                            last;
                         } else {
                             # Dependency not completed and doesn't exist
                             print STDERR "DEBUG dispatch:     Dep '$single_dep' not completed and doesn't exist\n" if $ENV{SMAK_DEBUG};

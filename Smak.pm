@@ -5867,6 +5867,34 @@ sub run_job_master {
 	# can abort here if things are bad
     }
 
+    # Check if a target can be built (has a rule or exists as a source file)
+    sub can_build_target {
+        my ($target, $target_dir) = @_;
+        $target_dir //= '.';
+
+        # Check if file exists
+        my $target_path = $target =~ m{^/} ? $target : "$target_dir/$target";
+        return 1 if -e $target_path;
+
+        # Check if target has a fixed rule
+        my $key = "$makefile\t$target";
+        return 1 if exists $fixed_rule{$key};
+        return 1 if exists $pattern_rule{$key};
+        return 1 if exists $pseudo_rule{$key};
+
+        # Check if target matches any pattern rule
+        for my $pkey (keys %pattern_rule) {
+            if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                my $pattern = $1;
+                my $pattern_re = $pattern;
+                $pattern_re =~ s/%/(.+)/g;
+                return 1 if $target =~ /^$pattern_re$/;
+            }
+        }
+
+        return 0;  # Cannot build this target
+    }
+
     # Check if a target has any failed dependencies (recursively)
     # Returns the failed dependency name if found, undef otherwise
     sub has_failed_dependency {
@@ -5879,10 +5907,36 @@ sub run_job_master {
         # Direct check - is this target itself failed?
         return $target if exists $failed_targets{$target};
 
-        # Get dependencies for this target
+        # Get dependencies for this target - use proper key format and check all dep types
+        my $key = "$makefile\t$target";
         my @deps;
-        if (exists $fixed_deps{$target}) {
-            @deps = @{$fixed_deps{$target}};
+        my $stem;  # For pattern expansion
+
+        if (exists $fixed_deps{$key}) {
+            @deps = @{$fixed_deps{$key}};
+        } elsif (exists $pattern_deps{$key}) {
+            @deps = @{$pattern_deps{$key}};
+        } elsif (exists $pseudo_deps{$key}) {
+            @deps = @{$pseudo_deps{$key}};
+        }
+
+        # If no deps found by exact match, try pattern matching (like dispatch_jobs does)
+        if (!@deps) {
+            for my $pkey (keys %pattern_rule) {
+                if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                    my $pattern = $1;
+                    my $pattern_re = $pattern;
+                    $pattern_re =~ s/%/(.+)/g;
+                    if ($target =~ /^$pattern_re$/) {
+                        @deps = @{$pattern_deps{$pkey} || []};
+                        # Expand % in dependencies using the stem
+                        $stem = $1;
+                        @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                        print STDERR "DEBUG has_failed_dependency: Matched pattern '$pattern' for '$target', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                        last;
+                    }
+                }
+            }
         }
 
         # Check each dependency recursively
@@ -6112,6 +6166,17 @@ sub run_job_master {
                                 $has_unbuildable_dep = 1;
                                 last;
                             } else {
+                                # Check if this dependency can actually be built
+                                if (!can_build_target($single_dep, $job->{dir})) {
+                                    # Dependency cannot be built - no rule exists and file doesn't exist
+                                    print STDERR "Job '$target' FAILED: dependency '$single_dep' cannot be built (no rule or source file found)\n";
+                                    $in_progress{$target} = "failed";
+                                    $failed_targets{$target} = 1;  # Generic failure code
+                                    splice(@job_queue, $i, 1);  # Remove from queue
+                                    fail_dependent_composite_targets($target, 1);
+                                    $has_unbuildable_dep = 1;
+                                    last;
+                                }
                                 # Dependency is still building or queued
                                 $deps_satisfied = 0;
                                 print STDERR "  Job '$target' waiting for dependency '$single_dep'\n";

@@ -7303,6 +7303,7 @@ sub run_job_master {
 
                                         if (exists $completed_targets{$target_name}) {
                                             delete $completed_targets{$target_name};
+                                            delete $in_progress{$target_name};  # Also clear from in_progress
                                             $stale_targets_cache{$target_name} = time();
                                             print STDERR "Detected rm of '$target_name' - marked as stale\n" if $ENV{SMAK_DEBUG};
                                         }

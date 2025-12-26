@@ -5980,12 +5980,32 @@ sub run_job_master {
                 # Check if this job's dependencies are satisfied
                 my $key = "$makefile\t$target";
                 my @deps;
+                my $stem;  # For pattern expansion
                 if (exists $fixed_deps{$key}) {
                     @deps = @{$fixed_deps{$key} || []};
                 } elsif (exists $pattern_deps{$key}) {
                     @deps = @{$pattern_deps{$key} || []};
                 } elsif (exists $pseudo_deps{$key}) {
                     @deps = @{$pseudo_deps{$key} || []};
+                }
+
+                # If no deps found by exact match, try pattern matching (like queue_target_recursive does)
+                if (!@deps) {
+                    for my $pkey (keys %pattern_rule) {
+                        if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                            my $pattern = $1;
+                            my $pattern_re = $pattern;
+                            $pattern_re =~ s/%/(.+)/g;
+                            if ($target =~ /^$pattern_re$/) {
+                                @deps = @{$pattern_deps{$pkey} || []};
+                                # Expand % in dependencies using the stem
+                                $stem = $1;
+                                @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                                print STDERR "DEBUG dispatch: Matched pattern '$pattern' for '$target', stem='$stem', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            }
+                        }
+                    }
                 }
 
                 print STDERR "DEBUG dispatch: Checking job '$target', deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};

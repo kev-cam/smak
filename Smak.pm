@@ -7289,8 +7289,12 @@ sub run_job_master {
                             my @output = $job->{output} ? @{$job->{output}} : ();
 
                             for my $line (@output) {
+                                # Strip ANSI color codes that compilers often add
+                                my $clean_line = $line;
+                                $clean_line =~ s/\x1b\[[0-9;]*m//g;  # Remove ANSI escape sequences
+
                                 # Check for "No such file or directory" errors
-                                if ($line =~ /(fatal error|error):\s+(.+?):\s+No such file or directory/i) {
+                                if ($clean_line =~ /(fatal error|error):\s+(.+?):\s+No such file or directory/i) {
                                     my $missing_file = $2;
                                     $missing_file =~ s/^\s+|\s+$//g;  # Trim whitespace
 

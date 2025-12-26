@@ -84,8 +84,13 @@ run_test() {
 
     # Check if test uses interactive debug mode (-Kd flag)
     local is_interactive=0
+    local has_heredoc=0
     if grep -q "\-Kd" "$test_script" 2>/dev/null; then
         is_interactive=1
+        # Check if test uses heredoc (cat <<EOF or similar)
+        if grep -q "<<" "$test_script" 2>/dev/null; then
+            has_heredoc=1
+        fi
     fi
 
     # Check if there's a script file for this test
@@ -95,11 +100,12 @@ run_test() {
         has_script=1
     fi
 
-    # Handle interactive tests:
-    # - If --tty mode: run with user input (don't redirect stdin)
-    # - If script exists: run with test-cli-advanced automation (TODO)
-    # - Otherwise: skip and suggest creating script file
-    if [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 0 ] && [ $has_script -eq 0 ]; then
+    # Handle truly interactive tests (no heredoc, no script):
+    # - Tests with heredoc: can run normally
+    # - Tests with script file: use script runner
+    # - Tests with --tty: allow user input
+    # - Otherwise: skip
+    if [ $is_interactive -eq 1 ] && [ $has_heredoc -eq 0 ] && [ $has_script -eq 0 ] && [ $TTY_MODE -eq 0 ]; then
         echo -e "${YELLOW}SKIP${NC} (interactive, create $script_file or use --tty)"
         ((SKIPPED++))
         return
@@ -119,29 +125,59 @@ run_test() {
         local result_cache=$?
     else
         # Handle interactive tests with script files using automated script runner
-        if [ $is_interactive -eq 1 ] && [ $has_script -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
-            # Run with script automation using run-with-script.pl
-            output_nocache=$(SMAK_CACHE_DIR=off ./run-with-script.pl "$script_file" ./"$test_script" 2>&1)
+        if [ $is_interactive -eq 1 ] && [ $has_heredoc -eq 0 ] && [ $has_script -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
+            # Run with script automation using run-with-script.pl (with timeout)
+            output_nocache=$(timeout 30 env SMAK_CACHE_DIR=off ./run-with-script.pl "$script_file" ./"$test_script" 2>&1)
             local result_nocache=$?
+            if [ $result_nocache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+                ((FAILED++))
+                return
+            fi
 
-            output_cache=$(SMAK_CACHE_DIR=default ./run-with-script.pl "$script_file" ./"$test_script" 2>&1)
+            output_cache=$(timeout 30 env SMAK_CACHE_DIR=default ./run-with-script.pl "$script_file" ./"$test_script" 2>&1)
             local result_cache=$?
+            if [ $result_cache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+                ((FAILED++))
+                return
+            fi
 
-        # TTY mode: allow user input for interactive tests
-        elif [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 1 ]; then
-            output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1)
+        # Interactive tests with heredoc OR TTY mode: allow stdin (with timeout)
+        elif [ $is_interactive -eq 1 ] && ([ $has_heredoc -eq 1 ] || [ $TTY_MODE -eq 1 ]); then
+            output_nocache=$(timeout 60 env SMAK_CACHE_DIR=off ./"$test_script" 2>&1)
             local result_nocache=$?
+            if [ $result_nocache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 60s)"
+                ((FAILED++))
+                return
+            fi
 
-            output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1)
+            output_cache=$(timeout 60 env SMAK_CACHE_DIR=default ./"$test_script" 2>&1)
             local result_cache=$?
+            if [ $result_cache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 60s)"
+                ((FAILED++))
+                return
+            fi
 
-        # Default: non-interactive tests, redirect stdin
+        # Default: non-interactive tests, redirect stdin (with timeout)
         else
-            output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
+            output_nocache=$(timeout 30 env SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
             local result_nocache=$?
+            if [ $result_nocache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+                ((FAILED++))
+                return
+            fi
 
-            output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
+            output_cache=$(timeout 30 env SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
             local result_cache=$?
+            if [ $result_cache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+                ((FAILED++))
+                return
+            fi
         fi
     fi
 

@@ -124,15 +124,45 @@ sub has_source_control_recursion {
 sub should_filter_dependency {
     my ($dep) = @_;
 
-    # Check for source control file extensions (,v)
+    # GENERAL RULE 1: Filter pattern dependencies that reference non-existent subdirectories
+    # This prevents infinite recursion from rules like "%: RCS/%,v" when RCS/ doesn't exist
+    # Also prevents wasted processing trying to build targets in directories that don't exist
+    if ($dep =~ /%/ && $dep =~ m{/}) {
+        # Extract the directory part before the % wildcard
+        # Examples: "RCS/%,v" -> "RCS", "SCCS/s.%" -> "SCCS", "build/%.o" -> "build"
+        if ($dep =~ m{^([^%/]+)/}) {
+            my $dir_part = $1;
+            # Check if this directory exists relative to current working directory
+            # (Makefiles are parsed in the context of their directory)
+            if (!-d $dir_part) {
+                warn "DEBUG: Filtering pattern dependency '$dep' - directory '$dir_part' does not exist\n" if $ENV{SMAK_DEBUG};
+                return 1;
+            }
+        }
+    }
+
+    # GENERAL RULE 2: Filter pattern dependencies with prefixes when no matching files exist
+    # This prevents infinite recursion from rules like "%: s.%" (SCCS) when no s.* files exist
+    if ($dep =~ /%/ && $dep =~ m{^([^%/]+)\.%}) {
+        # Pattern has prefix before wildcard: "s.%" -> "s", "RCS.%" -> "RCS"
+        my $prefix = $1;
+        # Check if any files with this prefix exist
+        my @matching_files = glob("${prefix}.*");
+        if (@matching_files == 0) {
+            warn "DEBUG: Filtering pattern dependency '$dep' - no files matching '${prefix}.*' exist\n" if $ENV{SMAK_DEBUG};
+            return 1;
+        }
+    }
+
+    # Check for source control file extensions (,v) in non-pattern deps
     for my $ext (keys %source_control_extensions) {
         return 1 if $dep =~ /\Q$ext\E/;
     }
 
-    # Check for source control directory recursion
+    # Check for source control directory recursion (RCS/RCS/, SCCS/SCCS/)
     return 1 if has_source_control_recursion($dep);
 
-    # Check for inactive patterns
+    # Check for inactive patterns (legacy fallback for edge cases)
     return 1 if is_inactive_pattern($dep);
 
     return 0;
@@ -5600,6 +5630,27 @@ sub run_job_master {
         my ($target, $dir, $msocket, $depth) = @_;
         $msocket ||= $master_socket;  # Use provided or fall back to global
 
+        # FIRST: Skip source control files entirely (prevents infinite recursion)
+        # Check for ,v suffix (RCS) or other source control patterns
+        for my $ext (keys %source_control_extensions) {
+            if ($target =~ /\Q$ext\E/) {
+                print STDERR "Skipping source control target: $target (contains $ext)\n" if $ENV{SMAK_DEBUG};
+                return;
+            }
+        }
+
+        # Check for source control directory recursion (RCS/RCS/, SCCS/SCCS/, s.s., etc.)
+        if (has_source_control_recursion($target)) {
+            print STDERR "Skipping recursive source control target: $target\n" if $ENV{SMAK_DEBUG};
+            return;
+        }
+
+        # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
+        if (is_inactive_pattern($target)) {
+            print STDERR "Skipping inactive pattern target: $target\n" if $ENV{SMAK_DEBUG};
+            return;
+        }
+
         # Skip if already handled
         return if is_target_pending($target);
 
@@ -6654,7 +6705,11 @@ sub run_job_master {
                     }
                 }
                 if ($stale_count > 0) {
-                    print STDERR "[auto-rescan] Found $stale_count stale target(s)\n";
+                    print STDERR "[auto-rescan] Found $stale_count stale target(s)\n" if $ENV{SMAK_DEBUG};
+                    # Send notification to CLI
+                    if ($master_socket) {
+                        print $master_socket "OUTPUT [auto-rescan] Found $stale_count stale target(s)\n";
+                    }
                     dispatch_jobs();  # Try to dispatch new jobs for stale targets
                 }
             }

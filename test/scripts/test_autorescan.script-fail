@@ -1,0 +1,25 @@
+# Auto-rescan test - verify auto-rescan detects deleted files
+
+# Build the target first
+build all
+# expect "Built test_auto.o"
+
+# Enable auto-rescan
+rescan -noauto
+# expect "Auto-rescan enabled"
+
+# Delete the built file
+! mv test_auto.o test_auto.o-old
+
+# Wait for auto-rescan to detect the deletion (runs every 2 seconds)
+# wait 3s
+# expect "[auto-rescan] Found 1 stale"
+
+# Build again - should rebuild test_auto.o
+build all
+# expect "Built test_auto.o"
+
+# Clean up
+! rm -f test_auto.o test_auto.c Makefile.autorescan
+
+quit

@@ -6632,13 +6632,24 @@ sub run_job_master {
 
                 for my $target (keys %completed_targets) {
                     my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
-                    next unless -e $target_path;
+
+                    # If target was deleted, mark as stale
+                    if (!-e $target_path) {
+                        delete $completed_targets{$target};
+                        delete $in_progress{$target};
+                        $stale_targets_cache{$target} = time();
+                        $stale_count++;
+                        print STDERR "Auto-rescan: marked stale (deleted) '$target'\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+
+                    # Check if existing target needs rebuilding
                     if (needs_rebuild($target)) {
                         delete $completed_targets{$target};
                         delete $in_progress{$target};  # Also clear from in_progress
                         $stale_targets_cache{$target} = time();
                         $stale_count++;
-                        print STDERR "Auto-rescan: marked stale '$target'\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Auto-rescan: marked stale (modified) '$target'\n" if $ENV{SMAK_DEBUG};
                     }
                 }
                 if ($stale_count > 0) {
@@ -6992,17 +7003,26 @@ sub run_job_master {
 
                     # Check all completed targets to see if they need rebuilding
                     for my $target (keys %completed_targets) {
-                        # Skip if target doesn't exist anymore (was deleted)
+                        # Get full path to target
                         my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
-                        next unless -e $target_path;
 
-                        # Check if this target needs rebuilding
+                        # If target was deleted, mark as stale
+                        if (!-e $target_path) {
+                            delete $completed_targets{$target};
+                            delete $in_progress{$target};
+                            $stale_targets_cache{$target} = time();
+                            $stale_count++;
+                            print STDERR "  Marked stale (deleted): $target\n" if $ENV{SMAK_DEBUG};
+                            next;
+                        }
+
+                        # Check if existing target needs rebuilding based on dependencies
                         if (needs_rebuild($target)) {
                             delete $completed_targets{$target};
                             delete $in_progress{$target};  # Also clear from in_progress
                             $stale_targets_cache{$target} = time();
                             $stale_count++;
-                            print STDERR "  Marked stale: $target\n" if $ENV{SMAK_DEBUG};
+                            print STDERR "  Marked stale (modified): $target\n" if $ENV{SMAK_DEBUG};
                         }
                     }
 

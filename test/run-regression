@@ -91,12 +91,14 @@ run_test() {
     fi
 
     # Check if there's a script file for this test
-    local script_file="scripts/${test_name}.script"
+    local script_file_path="scripts/${test_name}.script"
     local has_script=0
     local temp_script_file=""
+    unset script_file
 
-    if [ -f "$script_file" ]; then
+    if [ -f "$script_file_path" ]; then
         has_script=1
+	script_file=$script_file_path
     elif [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
         # For interactive tests without script file, extract commands from heredoc
         # Look for heredoc pattern: cat <<EOF | ../smak -Kd
@@ -106,7 +108,7 @@ run_test() {
             sed -n '/cat.*<<.*|.*smak.*-Kd/,/^EOF$/p' "$test_script" | \
                 sed '1d;$d' > "$temp_script_file"
             script_file="$temp_script_file"
-            has_script=1
+            has_script=2
         fi
     fi
 
@@ -127,7 +129,7 @@ run_test() {
     # Determine how to run the test
     if true; then
         # Handle interactive tests with script files using automated script runner
-        if [ $is_interactive -eq 1 ] && [ $has_script -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
+        if [ $is_interactive -eq 1 ] && [ $has_script -ne 0 ] && [ $TTY_MODE -eq 0 ]; then
             # Extract smak arguments from test script (e.g., -f Makefile.test)
             local smak_args=$(grep -oP '(?<=smak ).*(?=-Kd)' "$test_script" | head -1)
 
@@ -188,7 +190,7 @@ WRAPPER_EOF
 
         # Default: non-interactive tests, redirect stdin (with timeout)
         else
-            output_nocache=$(timeout 30 env SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
+            output_nocache=$(timeout 30 env SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < "${script_file:-/dev/null}" )
             local result_nocache=$?
             if [ $result_nocache -eq 124 ]; then
                 echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
@@ -196,7 +198,7 @@ WRAPPER_EOF
                 return
             fi
 
-            output_cache=$(timeout 30 env SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
+            output_cache=$(timeout 30 env SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < "${script_file:-/dev/null}")
             local result_cache=$?
             if [ $result_cache -eq 124 ]; then
                 echo -e "${RED}TIMEOUT${NC} (killed after 30s)"

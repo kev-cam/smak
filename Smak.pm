@@ -5600,6 +5600,27 @@ sub run_job_master {
         my ($target, $dir, $msocket, $depth) = @_;
         $msocket ||= $master_socket;  # Use provided or fall back to global
 
+        # FIRST: Skip source control files entirely (prevents infinite recursion)
+        # Check for ,v suffix (RCS) or other source control patterns
+        for my $ext (keys %source_control_extensions) {
+            if ($target =~ /\Q$ext\E/) {
+                print STDERR "Skipping source control target: $target (contains $ext)\n" if $ENV{SMAK_DEBUG};
+                return;
+            }
+        }
+
+        # Check for source control directory recursion (RCS/RCS/, SCCS/SCCS/, s.s., etc.)
+        if (has_source_control_recursion($target)) {
+            print STDERR "Skipping recursive source control target: $target\n" if $ENV{SMAK_DEBUG};
+            return;
+        }
+
+        # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
+        if (is_inactive_pattern($target)) {
+            print STDERR "Skipping inactive pattern target: $target\n" if $ENV{SMAK_DEBUG};
+            return;
+        }
+
         # Skip if already handled
         return if is_target_pending($target);
 

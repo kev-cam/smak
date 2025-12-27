@@ -3972,6 +3972,7 @@ sub cmd_status {
     while (my $response = <$socket>) {
         chomp $response;
         last if $response eq 'STATUS_END';
+        next if $response eq 'STATUS_START';  # Skip start marker
         print "$response\n";
     }
 }
@@ -7098,7 +7099,11 @@ sub run_job_master {
 			print $master_socket "$target\t$message\n";
 		    }
 		    print $master_socket "PROGRESS_END\n";
-		    
+
+                } elsif ($line =~ /^STATUS$/) {
+                    # Send status information
+                    send_status($master_socket);
+
                 } elsif ($line =~ /^LIST_TASKS$/) {
                     # Send task list to master
                     print $master_socket "Queued tasks: " . scalar(@job_queue) . "\n";

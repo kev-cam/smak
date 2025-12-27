@@ -3365,6 +3365,9 @@ sub unified_cli {
         $line =~ s/^\s+|\s+$//g;
         next if $line eq '';
 
+        # Handle comments (lines starting with #)
+        next if $line =~ /^#/;
+
         # Handle shell command escape (!)
         if ($line =~ /^!(.+)$/) {
             my $shell_cmd = $1;
@@ -3568,6 +3571,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'rescan') {
         cmd_rescan($words, $socket);
 
+    } elsif ($cmd eq 'expect') {
+        cmd_expect($words);
+
     } elsif ($cmd eq 'eval') {
         # Evaluate Perl expression
         my $expr = "";
@@ -3664,7 +3670,7 @@ sub show_unified_help {
     print <<'HELP';
 Available commands:
   build <target>      Build the specified target (or default if none given)
-  rebuild <target>    Rebuild only if tracked files changed (FUSE)
+  rebuild [-auto] <t> Rebuild only if stale (-auto rebuilds all matching pattern)
   watch, w            Monitor file changes from FUSE filesystem
   unwatch             Stop monitoring file changes
   tasks, t            List pending and active tasks
@@ -3678,6 +3684,7 @@ Available commands:
   ignore <file>       Ignore a file for dependency checking
   ignore -none        Clear all ignored files
   ignore              List ignored files and directories
+  expect <path>       Check if path exists (exit with error if not)
   needs <file>        Show which targets depend on a file
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
@@ -3705,12 +3712,15 @@ Behavior notes:
   - 'quit' always shuts down the job server (even when attached)
   - 'detach' disconnects from CLI but leaves job server running
   - Ctrl-C cancels running builds without exiting the CLI
+  - Lines starting with '#' are treated as comments and ignored
 
 Examples:
   build all           Build the 'all' target
   build               Build the default target
+  rebuild -auto *.o   Rebuild all stale .o files
   list task           List targets matching 'task'
   deps foo.o          Show dependencies for foo.o
+  expect build/out    Check if build/out exists (error if not)
   watch               Enable file change monitoring
   restart 8           Restart workers with 8 workers
 HELP
@@ -3815,22 +3825,68 @@ sub cmd_rebuild {
         return;
     }
 
-    if (@$words == 0) {
-        print "Usage: rebuild <target>\n";
+    # Check for -auto flag
+    my $auto = 0;
+    my @targets;
+    for my $word (@$words) {
+        if ($word eq '-auto') {
+            $auto = 1;
+        } else {
+            push @targets, $word;
+        }
+    }
+
+    if (@targets == 0) {
+        print "Usage: rebuild [-auto] <target|pattern>\n";
+        print "  -auto: Automatically rebuild stale targets matching pattern\n";
         return;
     }
 
-    # Check if target is stale first
-    my $target = $words->[0];
-    print $socket "IS_STALE:$target\n";
-    my $response = <$socket>;
-    if ($response && $response =~ /^STALE:yes/) {
-        print "Target '$target' is stale, rebuilding...\n";
-        cmd_build($words, $socket, $opts, {exit_requested => \0});
-    } elsif ($response && $response =~ /^STALE:no/) {
-        print "Target '$target' is up-to-date, skipping rebuild.\n";
+    if ($auto) {
+        # Auto mode: find and rebuild all stale targets matching the pattern
+        my $pattern = $targets[0];
+
+        # Expand glob pattern to find matching files
+        my @matching_files = glob($pattern);
+
+        if (@matching_files == 0) {
+            print "No files match pattern '$pattern'\n";
+            return;
+        }
+
+        # Check which ones are stale
+        my @stale_targets;
+        for my $file (@matching_files) {
+            print $socket "IS_STALE:$file\n";
+            my $response = <$socket>;
+            if ($response && $response =~ /^STALE:yes/) {
+                push @stale_targets, $file;
+            }
+        }
+
+        if (@stale_targets == 0) {
+            print "No stale targets found matching '$pattern'\n";
+            return;
+        }
+
+        print "Found " . scalar(@stale_targets) . " stale target(s), rebuilding...\n";
+        for my $target (@stale_targets) {
+            print "Rebuilding $target...\n";
+            cmd_build([$target], $socket, $opts, {exit_requested => \0});
+        }
     } else {
-        print "Could not determine if target is stale.\n";
+        # Normal mode: rebuild single target
+        my $target = $targets[0];
+        print $socket "IS_STALE:$target\n";
+        my $response = <$socket>;
+        if ($response && $response =~ /^STALE:yes/) {
+            print "Target '$target' is stale, rebuilding...\n";
+            cmd_build([$target], $socket, $opts, {exit_requested => \0});
+        } elsif ($response && $response =~ /^STALE:no/) {
+            print "Target '$target' is up-to-date, skipping rebuild.\n";
+        } else {
+            print "Could not determine if target is stale.\n";
+        }
     }
 }
 
@@ -4215,6 +4271,24 @@ sub cmd_rescan {
     } else {
         print "Job server not running. Rescan requires active job server.\n";
     }
+}
+
+sub cmd_expect {
+    my ($words) = @_;
+
+    if (@$words == 0) {
+        print "Usage: expect <path>\n";
+        print "  Checks if path exists. Exits with error code 1 if not found.\n";
+        return;
+    }
+
+    my $path = $words->[0];
+    unless (-e $path) {
+        print STDERR "ERROR: Expected path not found: $path\n";
+        exit(1);
+    }
+
+    print "Path exists: $path\n";
 }
 
 sub cmd_needs {
@@ -5343,8 +5417,10 @@ sub run_job_master {
     }
 
     my $fuse_mountpoint;
+    my $has_fuse = 0;
     if (my ($mountpoint, $fuse_port) = detect_fuse_monitor()) {
         $fuse_mountpoint = $mountpoint;
+        $has_fuse = 1;
         print STDERR "Detected FUSE filesystem at $mountpoint, port $fuse_port\n" if $ENV{SMAK_DEBUG};
         # Connect to FUSE monitor
         $fuse_socket = IO::Socket::INET->new(
@@ -5361,6 +5437,7 @@ sub run_job_master {
         }
     } else {
         print STDERR "No FUSE monitor detected\n" if $ENV{SMAK_DEBUG};
+        print STDERR "Auto-rescan will be enabled by default (no FUSE file notifications)\n" if $ENV{SMAK_DEBUG};
     }
 
     # Wait for initial master connection
@@ -5466,7 +5543,10 @@ sub run_job_master {
     our %pending_composite;  # composite targets waiting for dependencies
                             # target => {deps => [list], master_socket => socket}
     our $next_task_id = 1;
-    my $auto_rescan = 0;  # Flag for automatic periodic rescanning
+    # Auto-rescan: Enable by default when FUSE is NOT detected
+    # When FUSE is present, it provides file change notifications
+    # When FUSE is absent, we need periodic polling to detect changes
+    my $auto_rescan = $has_fuse ? 0 : 1;
 
     # Helper functions
     sub process_command {

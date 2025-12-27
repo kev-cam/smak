@@ -124,7 +124,17 @@ sub has_source_control_recursion {
 sub should_filter_dependency {
     my ($dep) = @_;
 
-    # Check for source control file extensions (,v)
+    # ALWAYS filter source control files with % wildcards to prevent recursion
+    # Pattern rules like "%: RCS/%,v" create infinite loops
+    if ($dep =~ /%/) {
+        # Check for RCS patterns with wildcards
+        return 1 if $dep =~ m{RCS/%};        # RCS/% pattern
+        return 1 if $dep =~ /,v$/;           # %,v pattern
+        return 1 if $dep =~ m{SCCS/%};       # SCCS/% pattern
+        return 1 if $dep =~ m{^s\.%};        # s.% pattern
+    }
+
+    # Check for source control file extensions (,v) in non-pattern deps
     for my $ext (keys %source_control_extensions) {
         return 1 if $dep =~ /\Q$ext\E/;
     }
@@ -6677,7 +6687,7 @@ sub run_job_master {
                     print STDERR "[auto-rescan] Found $stale_count stale target(s)\n" if $ENV{SMAK_DEBUG};
                     # Send notification to CLI
                     if ($master_socket) {
-                        print $master_socket "[auto-rescan] Found $stale_count stale target(s)\n";
+                        print $master_socket "OUTPUT [auto-rescan] Found $stale_count stale target(s)\n";
                     }
                     dispatch_jobs();  # Try to dispatch new jobs for stale targets
                 }

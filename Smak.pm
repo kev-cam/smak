@@ -2719,15 +2719,12 @@ sub build_target {
             # Check for missing intermediate dependencies
             if ($rebuild_missing_intermediates) {
                 # Default behavior (match make): rebuild missing intermediates even if target is up-to-date
-                use File::Basename;
-                my $target_dir = dirname($target);
                 for my $dep (@deps) {
                     next if $dep =~ /^\.PHONY$/;
                     next if $dep !~ /\S/;
 
-                    # Check if dependency file exists
-                    my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
-                    if (!-e $dep_path) {
+                    # Check if dependency file exists (relative to current working directory)
+                    if (!-e $dep) {
                         # Check if dependency has a rule (is an intermediate, not a source file)
                         my $dep_key = "$makefile\t$dep";
                         my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
@@ -2740,14 +2737,11 @@ sub build_target {
                 }
             } else {
                 # Optimized behavior: notify about missing intermediates but don't rebuild
-                use File::Basename;
-                my $target_dir = dirname($target);
                 for my $dep (@deps) {
                     next if $dep =~ /^\.PHONY$/;
                     next if $dep !~ /\S/;
 
-                    my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
-                    if (!-e $dep_path) {
+                    if (!-e $dep) {
                         my $dep_key = "$makefile\t$dep";
                         my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
 
@@ -5986,16 +5980,14 @@ sub run_job_master {
                         # Check for missing intermediate dependencies
                         if ($rebuild_missing_intermediates) {
                             # Default behavior (match make): rebuild missing intermediates even if target is up-to-date
-                            use File::Basename;
-                            my $target_dir = dirname($target_path);
                             my $has_missing_intermediates = 0;
 
                             for my $dep (@deps) {
                                 next if $dep =~ /^\.PHONY$/;
                                 next if $dep !~ /\S/;
 
-                                # Check if dependency file exists
-                                my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
+                                # Check if dependency file exists (relative to working directory)
+                                my $dep_path = $dep =~ m{^/} ? $dep : "$dir/$dep";
                                 if (!-e $dep_path) {
                                     # Check if dependency has a rule (is an intermediate, not a source file)
                                     my $dep_key = "$makefile\t$dep";
@@ -6017,14 +6009,11 @@ sub run_job_master {
                             }
                         } else {
                             # Optimized behavior: notify about missing intermediates but don't rebuild
-                            use File::Basename;
-                            my $target_dir = dirname($target_path);
-
                             for my $dep (@deps) {
                                 next if $dep =~ /^\.PHONY$/;
                                 next if $dep !~ /\S/;
 
-                                my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
+                                my $dep_path = $dep =~ m{^/} ? $dep : "$dir/$dep";
                                 if (!-e $dep_path) {
                                     my $dep_key = "$makefile\t$dep";
                                     my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};

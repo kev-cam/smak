@@ -2719,15 +2719,12 @@ sub build_target {
             # Check for missing intermediate dependencies
             if ($rebuild_missing_intermediates) {
                 # Default behavior (match make): rebuild missing intermediates even if target is up-to-date
-                use File::Basename;
-                my $target_dir = dirname($target);
                 for my $dep (@deps) {
                     next if $dep =~ /^\.PHONY$/;
                     next if $dep !~ /\S/;
 
-                    # Check if dependency file exists
-                    my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
-                    if (!-e $dep_path) {
+                    # Check if dependency file exists (relative to current working directory)
+                    if (!-e $dep) {
                         # Check if dependency has a rule (is an intermediate, not a source file)
                         my $dep_key = "$makefile\t$dep";
                         my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
@@ -2740,14 +2737,11 @@ sub build_target {
                 }
             } else {
                 # Optimized behavior: notify about missing intermediates but don't rebuild
-                use File::Basename;
-                my $target_dir = dirname($target);
                 for my $dep (@deps) {
                     next if $dep =~ /^\.PHONY$/;
                     next if $dep !~ /\S/;
 
-                    my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
-                    if (!-e $dep_path) {
+                    if (!-e $dep) {
                         my $dep_key = "$makefile\t$dep";
                         my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
 
@@ -3678,6 +3672,9 @@ Available commands:
   progress            Show detailed job progress
   files, f            List tracked file modifications (FUSE)
   stale               Show targets that need rebuilding (FUSE)
+  rescan              Rescan timestamps and mark stale targets
+  rescan -auto        Enable periodic auto-rescan (every 2s)
+  rescan -noauto      Disable auto-rescan
   dirty <file>        Mark a file as out-of-date (dirty)
   touch <file>        Update file timestamp and mark dirty
   rm <file>           Remove file (saves to .{file}.prev) and mark dirty
@@ -4255,19 +4252,23 @@ sub cmd_rescan {
     my ($words, $socket) = @_;
 
     my $auto = 0;
+    my $noauto = 0;
     if (@$words > 0 && $words->[0] eq '-auto') {
         $auto = 1;
         print "Auto-rescan enabled (will check timestamps periodically)\n";
+    } elsif (@$words > 0 && $words->[0] eq '-noauto') {
+        $noauto = 1;
+        print "Auto-rescan disabled\n";
     }
 
     if ($socket) {
         # Job server running - send rescan command
-        print "Rescanning timestamps...\n" unless $auto;
-        my $cmd = $auto ? "RESCAN_AUTO\n" : "RESCAN\n";
+        print "Rescanning timestamps...\n" unless ($auto || $noauto);
+        my $cmd = $auto ? "RESCAN_AUTO\n" : $noauto ? "RESCAN_NOAUTO\n" : "RESCAN\n";
         print $socket $cmd;
         my $response = <$socket>;
         chomp $response if $response;
-        print "$response\n" if $response && !$auto;
+        print "$response\n" if $response && !$auto && !$noauto;
     } else {
         print "Job server not running. Rescan requires active job server.\n";
     }
@@ -5979,16 +5980,14 @@ sub run_job_master {
                         # Check for missing intermediate dependencies
                         if ($rebuild_missing_intermediates) {
                             # Default behavior (match make): rebuild missing intermediates even if target is up-to-date
-                            use File::Basename;
-                            my $target_dir = dirname($target_path);
                             my $has_missing_intermediates = 0;
 
                             for my $dep (@deps) {
                                 next if $dep =~ /^\.PHONY$/;
                                 next if $dep !~ /\S/;
 
-                                # Check if dependency file exists
-                                my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
+                                # Check if dependency file exists (relative to working directory)
+                                my $dep_path = $dep =~ m{^/} ? $dep : "$dir/$dep";
                                 if (!-e $dep_path) {
                                     # Check if dependency has a rule (is an intermediate, not a source file)
                                     my $dep_key = "$makefile\t$dep";
@@ -6010,14 +6009,11 @@ sub run_job_master {
                             }
                         } else {
                             # Optimized behavior: notify about missing intermediates but don't rebuild
-                            use File::Basename;
-                            my $target_dir = dirname($target_path);
-
                             for my $dep (@deps) {
                                 next if $dep =~ /^\.PHONY$/;
                                 next if $dep !~ /\S/;
 
-                                my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
+                                my $dep_path = $dep =~ m{^/} ? $dep : "$dir/$dep";
                                 if (!-e $dep_path) {
                                     my $dep_key = "$makefile\t$dep";
                                     my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
@@ -7232,49 +7228,57 @@ sub run_job_master {
                     print STDERR "Build state cleared: all targets will be re-evaluated\n";
                     print $master_socket "Build state reset. All targets will be re-evaluated on next build.\n";
 
-                } elsif ($line =~ /^RESCAN(_AUTO)?$/) {
+                } elsif ($line =~ /^RESCAN(_AUTO|_NOAUTO)?$/) {
                     # Rescan timestamps and mark stale targets
-                    my $auto = defined $1;
+                    my $mode = $1 || '';
+                    my $auto = ($mode eq '_AUTO');
+                    my $noauto = ($mode eq '_NOAUTO');
                     my $stale_count = 0;
 
-                    print STDERR "Rescanning file timestamps...\n" if $ENV{SMAK_DEBUG};
-
-                    # Get makefile directory for relative path resolution
-                    my $makefile_dir = $makefile;
-                    $makefile_dir =~ s{/[^/]*$}{};  # Remove filename
-                    $makefile_dir = '.' if $makefile_dir eq $makefile;  # No dir separator found
-
-                    # Check all completed targets to see if they need rebuilding
-                    for my $target (keys %completed_targets) {
-                        # Get full path to target
-                        my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
-
-                        # If target was deleted, mark as stale
-                        if (!-e $target_path) {
-                            delete $completed_targets{$target};
-                            delete $in_progress{$target};
-                            $stale_targets_cache{$target} = time();
-                            $stale_count++;
-                            print STDERR "  Marked stale (deleted): $target\n" if $ENV{SMAK_DEBUG};
-                            next;
-                        }
-
-                        # Check if existing target needs rebuilding based on dependencies
-                        if (needs_rebuild($target)) {
-                            delete $completed_targets{$target};
-                            delete $in_progress{$target};  # Also clear from in_progress
-                            $stale_targets_cache{$target} = time();
-                            $stale_count++;
-                            print STDERR "  Marked stale (modified): $target\n" if $ENV{SMAK_DEBUG};
-                        }
-                    }
-
-                    if ($auto) {
-                        # Enable periodic rescanning in check_queue_state
-                        $auto_rescan = 1;
-                        print $master_socket "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                    if ($noauto) {
+                        # Disable auto-rescan
+                        $auto_rescan = 0;
+                        print $master_socket "Auto-rescan disabled.\n";
                     } else {
-                        print $master_socket "Rescan complete. Marked $stale_count target(s) as stale.\n";
+                        print STDERR "Rescanning file timestamps...\n" if $ENV{SMAK_DEBUG};
+
+                        # Get makefile directory for relative path resolution
+                        my $makefile_dir = $makefile;
+                        $makefile_dir =~ s{/[^/]*$}{};  # Remove filename
+                        $makefile_dir = '.' if $makefile_dir eq $makefile;  # No dir separator found
+
+                        # Check all completed targets to see if they need rebuilding
+                        for my $target (keys %completed_targets) {
+                            # Get full path to target
+                            my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
+
+                            # If target was deleted, mark as stale
+                            if (!-e $target_path) {
+                                delete $completed_targets{$target};
+                                delete $in_progress{$target};
+                                $stale_targets_cache{$target} = time();
+                                $stale_count++;
+                                print STDERR "  Marked stale (deleted): $target\n" if $ENV{SMAK_DEBUG};
+                                next;
+                            }
+
+                            # Check if existing target needs rebuilding based on dependencies
+                            if (needs_rebuild($target)) {
+                                delete $completed_targets{$target};
+                                delete $in_progress{$target};  # Also clear from in_progress
+                                $stale_targets_cache{$target} = time();
+                                $stale_count++;
+                                print STDERR "  Marked stale (modified): $target\n" if $ENV{SMAK_DEBUG};
+                            }
+                        }
+
+                        if ($auto) {
+                            # Enable periodic rescanning in check_queue_state
+                            $auto_rescan = 1;
+                            print $master_socket "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                        } else {
+                            print $master_socket "Rescan complete. Marked $stale_count target(s) as stale.\n";
+                        }
                     }
 
                 } elsif ($line =~ /^LIST_FILES$/) {

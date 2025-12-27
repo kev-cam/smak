@@ -26,6 +26,7 @@ echo "int main() { return 0; }" > test_auto.c
 SMAK_DEBUG=1 ../smak -f Makefile.autorescan -j2 -cli 
 
 if [ -f test_auto.o ] ; then
+    rm -f test_auto.c test_auto.o test_auto.o-old
     exit 0
 else
     exit 1

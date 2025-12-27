@@ -5434,14 +5434,14 @@ sub run_job_master {
     }
 
     sub is_phony_target {
-        my ($target, $makefile) = @_;
-        $makefile //= $main::makefile;
+        my ($target) = @_;
 
-        # Check if target is in .PHONY dependencies
-        my $phony_key = "$makefile\t.PHONY";
-        if (exists $pseudo_deps{$phony_key}) {
-            my @phony_targets = @{$pseudo_deps{$phony_key}};
-            return 1 if grep { $_ eq $target } @phony_targets;
+        # Check if target is in any .PHONY dependencies (check all makefiles)
+        for my $key (keys %pseudo_deps) {
+            if ($key =~ /\t\.PHONY$/) {
+                my @phony_targets = @{$pseudo_deps{$key}};
+                return 1 if grep { $_ eq $target } @phony_targets;
+            }
         }
 
         # Auto-detect common phony target names
@@ -5458,9 +5458,17 @@ sub run_job_master {
         # Phony targets should never be considered pending from cache
         # They must always run when requested
         if (is_phony_target($target)) {
-            # Still check if actively running/queued, but not completed_targets
+            # Check if actively running/queued
+            # If status is 'done', remove from in_progress so it can run again
             if (exists $in_progress{$target}) {
                 my $status = $in_progress{$target} // 'undef';
+                if ($status eq 'done') {
+                    # Phony target completed, allow it to be queued again
+                    delete $in_progress{$target};
+                    print STDERR "DEBUG is_target_pending: '$target' was done, removed from in_progress [PHONY]\n" if $ENV{SMAK_DEBUG};
+                    return 0;
+                }
+                # Still actively running or in another non-done state
                 print STDERR "DEBUG is_target_pending: '$target' in in_progress (status='$status') [PHONY]\n" if $ENV{SMAK_DEBUG};
                 return 1;
             }

@@ -5417,8 +5417,10 @@ sub run_job_master {
     }
 
     my $fuse_mountpoint;
+    my $has_fuse = 0;
     if (my ($mountpoint, $fuse_port) = detect_fuse_monitor()) {
         $fuse_mountpoint = $mountpoint;
+        $has_fuse = 1;
         print STDERR "Detected FUSE filesystem at $mountpoint, port $fuse_port\n" if $ENV{SMAK_DEBUG};
         # Connect to FUSE monitor
         $fuse_socket = IO::Socket::INET->new(
@@ -5435,6 +5437,7 @@ sub run_job_master {
         }
     } else {
         print STDERR "No FUSE monitor detected\n" if $ENV{SMAK_DEBUG};
+        print STDERR "Auto-rescan will be enabled by default (no FUSE file notifications)\n" if $ENV{SMAK_DEBUG};
     }
 
     # Wait for initial master connection
@@ -5540,7 +5543,10 @@ sub run_job_master {
     our %pending_composite;  # composite targets waiting for dependencies
                             # target => {deps => [list], master_socket => socket}
     our $next_task_id = 1;
-    my $auto_rescan = 0;  # Flag for automatic periodic rescanning
+    # Auto-rescan: Enable by default when FUSE is NOT detected
+    # When FUSE is present, it provides file change notifications
+    # When FUSE is absent, we need periodic polling to detect changes
+    my $auto_rescan = $has_fuse ? 0 : 1;
 
     # Helper functions
     sub process_command {

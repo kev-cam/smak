@@ -5558,6 +5558,9 @@ sub run_job_master {
     # When disabled (unwatch), FUSE events are collected but manual rescan is needed
     my $fuse_auto_clear = $has_fuse ? 1 : 0;
 
+    # Track last FUSE debug message to suppress consecutive duplicates
+    my $last_fuse_debug_msg = '';
+
     # Helper functions
     sub process_command {
         my ($cmd) = @_;
@@ -7788,7 +7791,15 @@ sub run_job_master {
                             push @{$file_modifications{$path}{workers}}, $pid
                                 unless grep { $_ == $pid } @{$file_modifications{$path}{workers}};
                             $file_modifications{$path}{last_op} = time();
-                            print STDERR "FUSE: $op $path by PID $pid\n" if $ENV{SMAK_DEBUG};
+
+                            # Print debug message only if different from last one (suppress consecutive duplicates)
+                            if ($ENV{SMAK_DEBUG}) {
+                                my $debug_msg = "FUSE: $op $path by PID $pid";
+                                if ($debug_msg ne $last_fuse_debug_msg) {
+                                    print STDERR "$debug_msg\n";
+                                    $last_fuse_debug_msg = $debug_msg;
+                                }
+                            }
 
                             # Send watch notification if client is watching AND file is build-relevant
                             if ($watch_client && is_build_relevant($path)) {

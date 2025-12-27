@@ -5550,6 +5550,11 @@ sub run_job_master {
     # When FUSE is absent, we need periodic polling to detect changes
     my $auto_rescan = $has_fuse ? 0 : 1;
 
+    # FUSE auto-clear: Enable by default when FUSE is detected
+    # When enabled, FUSE events automatically clear failed targets (like rescan -auto)
+    # When disabled (unwatch), FUSE events are collected but manual rescan is needed
+    my $fuse_auto_clear = $has_fuse ? 1 : 0;
+
     # Helper functions
     sub process_command {
         my ($cmd) = @_;
@@ -7620,8 +7625,9 @@ sub run_job_master {
                     # Enable watch mode - send file change notifications to this client
                     if ($fuse_socket) {
                         $watch_client = $master_socket;
+                        $fuse_auto_clear = 1;  # Enable auto-clear (like rescan -auto)
                         print $master_socket "WATCH_STARTED\n";
-                        print STDERR "Watch mode enabled for client\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Watch mode enabled (FUSE auto-clear active)\n" if $ENV{SMAK_DEBUG};
                     } else {
                         print $master_socket "WATCH_UNAVAILABLE (no FUSE)\n";
                     }
@@ -7630,8 +7636,9 @@ sub run_job_master {
                     # Disable watch mode
                     if ($watch_client && $watch_client == $master_socket) {
                         $watch_client = undef;
+                        $fuse_auto_clear = 0;  # Disable auto-clear, events still collected
                         print $master_socket "WATCH_STOPPED\n";
-                        print STDERR "Watch mode disabled\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Watch mode disabled (FUSE events saved for manual rescan)\n" if $ENV{SMAK_DEBUG};
                     } else {
                         print $master_socket "WATCH_NOT_ACTIVE\n";
                     }
@@ -7780,7 +7787,7 @@ sub run_job_master {
                                 print $watch_client "WATCH:$path\n";
                             }
 
-                            # For DELETE or WRITE operations, clear failed targets that are now rebuildable
+                            # For DELETE or WRITE operations, handle stale targets
                             if ($op eq 'DELETE' || $op eq 'WRITE') {
                                 # Get basename for matching
                                 my $basename = $path;
@@ -7795,24 +7802,28 @@ sub run_job_master {
                                     $stale_targets_cache{$basename} = time();
                                 }
 
-                                # Clear failed targets that now need rebuilding due to this file change
-                                for my $target (keys %failed_targets) {
-                                    # Check if target needs rebuilding (considers all dependencies recursively)
-                                    if (needs_rebuild($target)) {
-                                        delete $failed_targets{$target};
-                                        delete $in_progress{$target};
-                                        print STDERR "FUSE: Cleared failed target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
-                                    }
-                                }
-
-                                # Clear failed composite targets in in_progress
-                                for my $target (keys %in_progress) {
-                                    if ($in_progress{$target} eq 'failed') {
+                                # Only auto-clear failed targets if fuse_auto_clear is enabled
+                                # (disabled with 'unwatch', events still collected for manual rescan)
+                                if ($fuse_auto_clear) {
+                                    # Clear failed targets that now need rebuilding due to this file change
+                                    for my $target (keys %failed_targets) {
                                         # Check if target needs rebuilding (considers all dependencies recursively)
                                         if (needs_rebuild($target)) {
-                                            delete $in_progress{$target};
                                             delete $failed_targets{$target};
-                                            print STDERR "FUSE: Cleared failed composite target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
+                                            delete $in_progress{$target};
+                                            print STDERR "FUSE: Cleared failed target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
+                                        }
+                                    }
+
+                                    # Clear failed composite targets in in_progress
+                                    for my $target (keys %in_progress) {
+                                        if ($in_progress{$target} eq 'failed') {
+                                            # Check if target needs rebuilding (considers all dependencies recursively)
+                                            if (needs_rebuild($target)) {
+                                                delete $in_progress{$target};
+                                                delete $failed_targets{$target};
+                                                print STDERR "FUSE: Cleared failed composite target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
+                                            }
                                         }
                                     }
                                 }

@@ -6470,9 +6470,13 @@ sub run_job_master {
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
                         if ($completed_targets{$single_dep}) {
-                            # First check if file exists - fast path
-                            if (-e $dep_path) {
-                                # File exists, dependency satisfied
+                            # With auto-rescan or FUSE monitoring, we can trust completed_targets
+                            # because deleted files are automatically detected and removed
+                            if ($auto_rescan || $fuse_auto_clear) {
+                                # File monitoring active - trust completed_targets
+                                # (Files would have been removed if deleted)
+                            } elsif (-e $dep_path) {
+                                # No monitoring - verify file exists on disk
                             } elsif (exists $pending_composite{$single_dep}) {
                                 # Composite target (phony/aggregator), no file needed
                             } elsif (exists $pseudo_deps{"$makefile\t$single_dep"}) {

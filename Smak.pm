@@ -7272,6 +7272,46 @@ sub run_job_master {
                             }
                         }
 
+                        # Also check failed targets - if their dependencies are now stale, clear the failed status
+                        for my $target (keys %failed_targets) {
+                            if (needs_rebuild($target)) {
+                                delete $failed_targets{$target};
+                                delete $in_progress{$target};
+                                $stale_targets_cache{$target} = time();
+                                $stale_count++;
+                                print STDERR "  Cleared failed status (dependencies changed): $target\n" if $ENV{SMAK_DEBUG};
+                            }
+                        }
+
+                        # Clear failed composite targets if any of their dependencies became stale
+                        for my $target (keys %in_progress) {
+                            if ($in_progress{$target} eq 'failed') {
+                                # Check if this is a composite target (has dependencies)
+                                my $target_key = "$makefile\t$target";
+                                if (exists $fixed_deps{$target_key} || exists $pattern_deps{$target_key}) {
+                                    my @deps = exists $fixed_deps{$target_key} ? @{$fixed_deps{$target_key}} :
+                                               exists $pattern_deps{$target_key} ? @{$pattern_deps{$target_key}} : ();
+
+                                    # Check if any dependency is now stale
+                                    my $has_stale_dep = 0;
+                                    for my $dep (@deps) {
+                                        if (exists $stale_targets_cache{$dep} ||
+                                            !exists $completed_targets{$dep} && !exists $failed_targets{$dep}) {
+                                            $has_stale_dep = 1;
+                                            last;
+                                        }
+                                    }
+
+                                    if ($has_stale_dep) {
+                                        delete $in_progress{$target};
+                                        delete $failed_targets{$target};
+                                        print STDERR "  Cleared failed composite target (dependencies changed): $target\n" if $ENV{SMAK_DEBUG};
+                                        $stale_count++;
+                                    }
+                                }
+                            }
+                        }
+
                         if ($auto) {
                             # Enable periodic rescanning in check_queue_state
                             $auto_rescan = 1;

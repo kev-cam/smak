@@ -23,4 +23,10 @@ EOF
 echo "int main() { return 0; }" > test_auto.c
 
 # Run smak in interactive CLI mode with job server
-exec ../smak -f Makefile.autorescan -j5 --cli
+SMAK_DEBUG=1 ../smak -f Makefile.autorescan -j2 -cli 
+
+if [ -f test_auto.o ] ; then
+    exit 0
+else
+    exit 1
+fi

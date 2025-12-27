@@ -4476,10 +4476,23 @@ sub interactive_debug {
 	$OUT = $term->OUT || \*STDOUT;
     }
 
+    # Set interactive flag so Ctrl-C doesn't exit
+    local $interactive = 1;
+
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
 
-    while ($have_input ||
-	   defined($input = $term->readline($echo ? $prompt : $prompt))) {
+    while (1) {
+        if (!$have_input) {
+            $input = $term->readline($echo ? $prompt : $prompt);
+            unless (defined $input) {
+                # EOF (Ctrl-D) or Ctrl-C
+                if ($SmakCli::cancel_requested) {
+                    $SmakCli::cancel_requested = 0;  # Clear the flag
+                    next;  # Return to prompt, don't exit
+                }
+                last;  # Ctrl-D or other termination
+            }
+        }
         $have_input = 0;  # Only use provided input once
 
         chomp $input;
@@ -5420,8 +5433,55 @@ sub run_job_master {
         return $expanded;
     }
 
+    sub is_phony_target {
+        my ($target, $makefile) = @_;
+        $makefile //= $main::makefile;
+
+        # Check if target is in .PHONY dependencies
+        my $phony_key = "$makefile\t.PHONY";
+        if (exists $pseudo_deps{$phony_key}) {
+            my @phony_targets = @{$pseudo_deps{$phony_key}};
+            return 1 if grep { $_ eq $target } @phony_targets;
+        }
+
+        # Auto-detect common phony target names
+        if ($target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+            return 1;
+        }
+
+        return 0;
+    }
+
     sub is_target_pending {
         my ($target) = @_;
+
+        # Phony targets should never be considered pending from cache
+        # They must always run when requested
+        if (is_phony_target($target)) {
+            # Still check if actively running/queued, but not completed_targets
+            if (exists $in_progress{$target}) {
+                my $status = $in_progress{$target} // 'undef';
+                print STDERR "DEBUG is_target_pending: '$target' in in_progress (status='$status') [PHONY]\n" if $ENV{SMAK_DEBUG};
+                return 1;
+            }
+
+            for my $job (@job_queue) {
+                if ($job->{target} eq $target) {
+                    print STDERR "DEBUG is_target_pending: '$target' in job_queue [PHONY]\n" if $ENV{SMAK_DEBUG};
+                    return 1;
+                }
+            }
+
+            for my $task_id (keys %running_jobs) {
+                if ($running_jobs{$task_id}{target} eq $target) {
+                    print STDERR "DEBUG is_target_pending: '$target' in running_jobs [PHONY]\n" if $ENV{SMAK_DEBUG};
+                    return 1;
+                }
+            }
+
+            print STDERR "DEBUG is_target_pending: '$target' NOT pending [PHONY]\n" if $ENV{SMAK_DEBUG};
+            return 0;
+        }
 
         # Check if already completed
         if (exists $completed_targets{$target}) {

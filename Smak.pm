@@ -124,14 +124,21 @@ sub has_source_control_recursion {
 sub should_filter_dependency {
     my ($dep) = @_;
 
-    # ALWAYS filter source control files with % wildcards to prevent recursion
-    # Pattern rules like "%: RCS/%,v" create infinite loops
-    if ($dep =~ /%/) {
-        # Check for RCS patterns with wildcards
-        return 1 if $dep =~ m{RCS/%};        # RCS/% pattern
-        return 1 if $dep =~ /,v$/;           # %,v pattern
-        return 1 if $dep =~ m{SCCS/%};       # SCCS/% pattern
-        return 1 if $dep =~ m{^s\.%};        # s.% pattern
+    # GENERAL RULE: Filter pattern dependencies that reference non-existent subdirectories
+    # This prevents infinite recursion from rules like "%: RCS/%,v" when RCS/ doesn't exist
+    # Also prevents wasted processing trying to build targets in directories that don't exist
+    if ($dep =~ /%/ && $dep =~ m{/}) {
+        # Extract the directory part before the % wildcard
+        # Examples: "RCS/%,v" -> "RCS", "SCCS/s.%" -> "SCCS", "build/%.o" -> "build"
+        if ($dep =~ m{^([^%/]+)/}) {
+            my $dir_part = $1;
+            # Check if this directory exists relative to current working directory
+            # (Makefiles are parsed in the context of their directory)
+            if (!-d $dir_part) {
+                warn "DEBUG: Filtering pattern dependency '$dep' - directory '$dir_part' does not exist\n" if $ENV{SMAK_DEBUG};
+                return 1;
+            }
+        }
     }
 
     # Check for source control file extensions (,v) in non-pattern deps
@@ -139,10 +146,10 @@ sub should_filter_dependency {
         return 1 if $dep =~ /\Q$ext\E/;
     }
 
-    # Check for source control directory recursion
+    # Check for source control directory recursion (RCS/RCS/, SCCS/SCCS/)
     return 1 if has_source_control_recursion($dep);
 
-    # Check for inactive patterns
+    # Check for inactive patterns (legacy fallback for edge cases)
     return 1 if is_inactive_pattern($dep);
 
     return 0;

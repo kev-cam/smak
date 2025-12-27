@@ -1,0 +1,10 @@
+# Interactive debug test script
+# Test the -Kd debug mode commands
+
+list                     # Show all rules
+# expect "Rules parsed from Makefile"
+
+help                     # Show help
+# expect "Commands:"
+
+quit                     # Exit debugger

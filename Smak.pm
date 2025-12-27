@@ -1547,10 +1547,10 @@ sub get_cache_dir {
     my $cdir = $ENV{SMAK_CACHE_DIR};
     if (defined $cdir) {
         # Disable caching for "off" or "0"
-        return undef if ($cdir eq "off" || $cdir eq "0" || $cdir == 0);
+        return undef if ($cdir eq "off" || $cdir eq "0");
         # Use default location for "default" or "1"
         # (fall through to default calculation below)
-        unless ($cdir eq "default" || $cdir eq "1" || $cdir == 1) {
+        unless ($cdir eq "default" || $cdir eq "1") {
             # Use specified path
             return $cdir;
         }
@@ -4470,15 +4470,17 @@ sub cmd_restart {
 sub interactive_debug {
     my ($OUT,$input) = @_ ;
     my $term = Term::ReadLine->new('smak');
-    my $do1 = defined $OUT;
-    if (! $do1) {
+    my $have_input = defined $input;
+    my $exit_after_one = $have_input;  # Exit after one command if input was provided
+    if (! defined $OUT) {
 	$OUT = $term->OUT || \*STDOUT;
     }
-    
+
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
 
-    while ((1 == $do1++) ||
+    while ($have_input ||
 	   defined($input = $term->readline($echo ? $prompt : $prompt))) {
+        $have_input = 0;  # Only use provided input once
 
         chomp $input;
 
@@ -4778,7 +4780,7 @@ HELP
             print $OUT "Unknown command: $cmd (type 'help' for commands)\n";
         }
 
-	last if $do1;
+	last if $exit_after_one;
     }
 }
 
@@ -5422,21 +5424,35 @@ sub run_job_master {
         my ($target) = @_;
 
         # Check if already completed
-        return 1 if exists $completed_targets{$target};
+        if (exists $completed_targets{$target}) {
+            print STDERR "DEBUG is_target_pending: '$target' in completed_targets\n" if $ENV{SMAK_DEBUG};
+            return 1;
+        }
 
         # Check if in progress (includes queued, running, and pending composite targets)
-        return 1 if exists $in_progress{$target};
+        if (exists $in_progress{$target}) {
+            my $status = $in_progress{$target} // 'undef';
+            print STDERR "DEBUG is_target_pending: '$target' in in_progress (status='$status')\n" if $ENV{SMAK_DEBUG};
+            return 1;
+        }
 
         # Check if already in queue
         for my $job (@job_queue) {
-            return 1 if $job->{target} eq $target;
+            if ($job->{target} eq $target) {
+                print STDERR "DEBUG is_target_pending: '$target' in job_queue\n" if $ENV{SMAK_DEBUG};
+                return 1;
+            }
         }
 
         # Check if currently running
         for my $task_id (keys %running_jobs) {
-            return 1 if $running_jobs{$task_id}{target} eq $target;
+            if ($running_jobs{$task_id}{target} eq $target) {
+                print STDERR "DEBUG is_target_pending: '$target' in running_jobs\n" if $ENV{SMAK_DEBUG};
+                return 1;
+            }
         }
 
+        print STDERR "DEBUG is_target_pending: '$target' NOT pending\n" if $ENV{SMAK_DEBUG};
         return 0;
     }
 
@@ -5868,6 +5884,44 @@ sub run_job_master {
 	# can abort here if things are bad
     }
 
+    # Check if a target can be built (has a rule or exists as a source file)
+    sub can_build_target {
+        my ($target, $target_dir) = @_;
+        $target_dir //= '.';
+
+        # Check if file exists in current directory or via vpath
+        my $target_path = $target =~ m{^/} ? $target : "$target_dir/$target";
+        if (-e $target_path) {
+            return 1;
+        }
+
+        # Check vpath directories
+        my $resolved = resolve_vpath($target, $target_dir);
+        if ($resolved ne $target) {
+            # vpath found the file
+            my $resolved_path = $resolved =~ m{^/} ? $resolved : "$target_dir/$resolved";
+            return 1 if -e $resolved_path;
+        }
+
+        # Check if target has a fixed rule
+        my $key = "$makefile\t$target";
+        return 1 if exists $fixed_rule{$key};
+        return 1 if exists $pattern_rule{$key};
+        return 1 if exists $pseudo_rule{$key};
+
+        # Check if target matches any pattern rule
+        for my $pkey (keys %pattern_rule) {
+            if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                my $pattern = $1;
+                my $pattern_re = $pattern;
+                $pattern_re =~ s/%/(.+)/g;
+                return 1 if $target =~ /^$pattern_re$/;
+            }
+        }
+
+        return 0;  # Cannot build this target
+    }
+
     # Check if a target has any failed dependencies (recursively)
     # Returns the failed dependency name if found, undef otherwise
     sub has_failed_dependency {
@@ -5880,10 +5934,36 @@ sub run_job_master {
         # Direct check - is this target itself failed?
         return $target if exists $failed_targets{$target};
 
-        # Get dependencies for this target
+        # Get dependencies for this target - use proper key format and check all dep types
+        my $key = "$makefile\t$target";
         my @deps;
-        if (exists $fixed_deps{$target}) {
-            @deps = @{$fixed_deps{$target}};
+        my $stem;  # For pattern expansion
+
+        if (exists $fixed_deps{$key}) {
+            @deps = @{$fixed_deps{$key}};
+        } elsif (exists $pattern_deps{$key}) {
+            @deps = @{$pattern_deps{$key}};
+        } elsif (exists $pseudo_deps{$key}) {
+            @deps = @{$pseudo_deps{$key}};
+        }
+
+        # If no deps found by exact match, try pattern matching (like dispatch_jobs does)
+        if (!@deps) {
+            for my $pkey (keys %pattern_rule) {
+                if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                    my $pattern = $1;
+                    my $pattern_re = $pattern;
+                    $pattern_re =~ s/%/(.+)/g;
+                    if ($target =~ /^$pattern_re$/) {
+                        @deps = @{$pattern_deps{$pkey} || []};
+                        # Expand % in dependencies using the stem
+                        $stem = $1;
+                        @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                        print STDERR "DEBUG has_failed_dependency: Matched pattern '$pattern' for '$target', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                        last;
+                    }
+                }
+            }
         }
 
         # Check each dependency recursively
@@ -5976,11 +6056,14 @@ sub run_job_master {
 		}
 
 	        # If we've gone past the end of the queue, exit the for loop
-	        last if ($i > $#job_queue); 
-	       		
+	        last if ($i > $#job_queue);
+
+                print STDERR "\n=== DEBUG dispatch: Checking job [$i] '$target' ===\n" if $ENV{SMAK_DEBUG};
+
                 # Check if this job's dependencies are satisfied
                 my $key = "$makefile\t$target";
                 my @deps;
+                my $stem;  # For pattern expansion
                 if (exists $fixed_deps{$key}) {
                     @deps = @{$fixed_deps{$key} || []};
                 } elsif (exists $pattern_deps{$key}) {
@@ -5988,6 +6071,30 @@ sub run_job_master {
                 } elsif (exists $pseudo_deps{$key}) {
                     @deps = @{$pseudo_deps{$key} || []};
                 }
+
+                # If no deps found by exact match, try pattern matching (like queue_target_recursive does)
+                if (!@deps) {
+                    for my $pkey (keys %pattern_rule) {
+                        if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                            my $pattern = $1;
+                            my $pattern_re = $pattern;
+                            $pattern_re =~ s/%/(.+)/g;
+                            if ($target =~ /^$pattern_re$/) {
+                                @deps = @{$pattern_deps{$pkey} || []};
+                                # Expand % in dependencies using the stem
+                                $stem = $1;
+                                @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                                print STDERR "DEBUG dispatch: Matched pattern '$pattern' for '$target', stem='$stem', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                                # NOTE: Don't resolve vpath here - dependency names must stay as-is
+                                # for hash lookups (completed_targets, failed_targets, in_progress).
+                                # Vpath resolution happens when checking if files exist.
+                                last;
+                            }
+                        }
+                    }
+                }
+
+                print STDERR "DEBUG dispatch: Checking job '$target', deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
 
                 # Check if any dependency has failed - if so, fail this job too
                 my $has_failed_dep = 0;
@@ -6033,6 +6140,20 @@ sub run_job_master {
                         # Check if dependency is completed or exists as file (relative to job dir)
                         my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$job->{dir}/$single_dep";
 
+                        # If file doesn't exist, try vpath resolution
+                        if (!-e $dep_path) {
+                            my $resolved = resolve_vpath($single_dep, $job->{dir});
+                            if ($resolved ne $single_dep) {
+                                $dep_path = $resolved =~ m{^/} ? $resolved : "$job->{dir}/$resolved";
+                                print STDERR "DEBUG dispatch:     vpath resolved '$single_dep' to '$resolved'\n" if $ENV{SMAK_DEBUG};
+                            }
+                        }
+
+                        print STDERR "DEBUG dispatch:   Checking dep '$single_dep' for target '$target'\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "DEBUG dispatch:     completed_targets: " . (exists $completed_targets{$single_dep} ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "DEBUG dispatch:     file exists (-e $dep_path): " . (-e $dep_path ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "DEBUG dispatch:     in_progress: " . (exists $in_progress{$single_dep} ? $in_progress{$single_dep} : "NO") . "\n" if $ENV{SMAK_DEBUG};
+
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
                         if ($completed_targets{$single_dep}) {
@@ -6067,10 +6188,20 @@ sub run_job_master {
                                 last;
                             }
                             # Pre-existing source file or already built, OK to proceed
+                        } elsif (exists $in_progress{$single_dep} &&
+                                 $in_progress{$single_dep} ne "done" &&
+                                 $in_progress{$single_dep} ne "failed") {
+                            # Dependency is queued or currently building - wait for it
+                            $deps_satisfied = 0;
+                            print STDERR "  Job '$target' waiting for dependency '$single_dep' (queued/building)\n";
+                            print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep' in_progress\n" if $ENV{SMAK_DEBUG};
+                            last;
                         } else {
                             # Dependency not completed and doesn't exist
+                            print STDERR "DEBUG dispatch:     Dep '$single_dep' not completed and doesn't exist\n" if $ENV{SMAK_DEBUG};
                             # Check if the dependency has failed dependencies (transitively)
                             my $failed_dep = has_failed_dependency($single_dep);
+                            print STDERR "DEBUG dispatch:     has_failed_dependency returned: " . (defined $failed_dep ? "'$failed_dep'" : "undef") . "\n" if $ENV{SMAK_DEBUG};
                             if (defined $failed_dep) {
                                 # Dependency cannot be built - fail this job too
                                 print STDERR "Job '$target' FAILED: dependency '$single_dep' cannot be built (depends on failed target '$failed_dep')\n";
@@ -6082,9 +6213,21 @@ sub run_job_master {
                                 $has_unbuildable_dep = 1;
                                 last;
                             } else {
+                                # Check if this dependency can actually be built
+                                if (!can_build_target($single_dep, $job->{dir})) {
+                                    # Dependency cannot be built - no rule exists and file doesn't exist
+                                    print STDERR "Job '$target' FAILED: dependency '$single_dep' cannot be built (no rule or source file found)\n";
+                                    $in_progress{$target} = "failed";
+                                    $failed_targets{$target} = 1;  # Generic failure code
+                                    splice(@job_queue, $i, 1);  # Remove from queue
+                                    fail_dependent_composite_targets($target, 1);
+                                    $has_unbuildable_dep = 1;
+                                    last;
+                                }
                                 # Dependency is still building or queued
                                 $deps_satisfied = 0;
                                 print STDERR "  Job '$target' waiting for dependency '$single_dep'\n";
+                                print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep'\n" if $ENV{SMAK_DEBUG};
                                 last;
                             }
                         }
@@ -6096,8 +6239,11 @@ sub run_job_master {
                 next if $has_unbuildable_dep;
 
                 if ($deps_satisfied) {
+                    print STDERR "DEBUG dispatch: Job '$target' has all dependencies satisfied, will dispatch\n" if $ENV{SMAK_DEBUG};
                     $job_index = $i;
                     last;
+                } else {
+                    print STDERR "DEBUG dispatch: Job '$target' dependencies NOT satisfied, skipping\n" if $ENV{SMAK_DEBUG};
                 }
             }
 
@@ -6180,6 +6326,9 @@ sub run_job_master {
         if ($now - $last_consistency_check >= 2) {
             $last_consistency_check = $now;
 
+            # Report queue state during periodic check
+            check_queue_state("periodic check");
+
             # Check all worker sockets for pending messages
             for my $worker (@workers) {
                 $worker->blocking(0);
@@ -6222,13 +6371,25 @@ sub run_job_master {
                                                                 cmake_check_build_system|help|list|
                                                                 package|preinstall|rebuild_cache|edit_cache)$/x;
 
+                            # Check if target is explicitly marked as phony in Makefile
+                            my $is_phony = $is_common_phony || exists $pseudo_deps{"$makefile\t$target"};
+
                             # Only verify file existence for targets that look like real files
-                            my $should_verify = $looks_like_file && !$is_common_phony;
+                            my $should_verify = $looks_like_file && !$is_phony;
 
                             if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
-                                $completed_targets{$job->{target}} = 1;
-                                $in_progress{$job->{target}} = "done";
-                                print STDERR "Task $task_id completed successfully: $job->{target}\n" if $ENV{SMAK_DEBUG};
+                                # Only mark non-phony targets as complete
+                                # Phony targets should always run, never be cached
+                                if (!$is_phony) {
+                                    $completed_targets{$job->{target}} = 1;
+                                    $in_progress{$job->{target}} = "done";
+                                } else {
+                                    # For phony targets, remove from in_progress entirely
+                                    # This allows them to be queued again on next request
+                                    delete $in_progress{$job->{target}};
+                                }
+                                print STDERR "Task $task_id completed successfully: $job->{target}" .
+                                             ($is_phony ? " (phony, removed from tracking)" : "") . "\n" if $ENV{SMAK_DEBUG};
                             } else {
                                 # File doesn't exist even after retries - treat as failure
                                 $in_progress{$job->{target}} = "failed";
@@ -6265,10 +6426,14 @@ sub run_job_master {
                             my $should_retry = 0;
                             my $retry_reason = "";
 
+                            print STDERR "DEBUG: Checking auto-retry for target '$job->{target}' (exit code $exit_code)\n";
+                            print STDERR "DEBUG: Auto-retry patterns: " . join(", ", @auto_retry_patterns) . "\n";
+
                             my $retry_count = $retry_counts{$job->{target}} || 0;
                             if ($job->{target} && $retry_count < 1) {  # Max 1 retry
                                 # Analyze captured output for retryable errors
                                 my @output = $job->{output} ? @{$job->{output}} : ();
+                                print STDERR "DEBUG: Captured output has " . scalar(@output) . " lines\n";
 
                                 for my $line (@output) {
                                     # Strip "ERROR: " prefix if present (we add this when capturing)
@@ -6528,6 +6693,39 @@ sub run_job_master {
 
                     # Try to dispatch
                     dispatch_jobs();
+
+                    # Check if target is already complete AND no work was dispatched
+                    # If so, send JOB_COMPLETE immediately so client doesn't hang
+                    # Only do this if the target is truly done with no pending work
+
+                    # Check if target is phony (should never be cached as complete)
+                    my $is_common_phony = $target =~ /^(all|clean|install|test|check|depend|dist|
+                                                        distclean|maintainer-clean|mostlyclean|
+                                                        cmake_check_build_system|help|list|
+                                                        package|preinstall|rebuild_cache|edit_cache)$/x;
+                    my $is_phony = $is_common_phony || exists $pseudo_deps{"$makefile\t$target"};
+
+                    my $target_complete = !$is_phony && (exists $completed_targets{$target} ||
+                                          (exists $in_progress{$target} && $in_progress{$target} eq "done"));
+                    my $target_failed = (exists $failed_targets{$target} ||
+                                        (exists $in_progress{$target} && $in_progress{$target} eq "failed"));
+
+                    # Check if target or its dependencies are being built
+                    my $work_in_progress = (exists $in_progress{$target} &&
+                                           $in_progress{$target} ne "done" &&
+                                           $in_progress{$target} ne "failed") ||
+                                          (@job_queue > 0) ||
+                                          (keys %running_jobs > 0);
+
+                    if ($target_complete && !$work_in_progress) {
+                        print $master_socket "JOB_COMPLETE $target 0\n";
+                        print STDERR "Target '$target' already up-to-date, notified client\n" if $ENV{SMAK_DEBUG};
+                    } elsif ($target_failed && !$work_in_progress) {
+                        my $exit_code = $failed_targets{$target} || 1;
+                        print $master_socket "JOB_COMPLETE $target $exit_code\n";
+                        print STDERR "Target '$target' already failed, notified client (exit $exit_code)\n" if $ENV{SMAK_DEBUG};
+                    }
+                    # Otherwise, work is in progress - JOB_COMPLETE will be sent when work finishes
 
                 } elsif ($line =~ /^COMMAND\s+(.*)/) {
 		    print STDERR "Command: $1\n";

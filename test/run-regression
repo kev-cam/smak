@@ -10,29 +10,37 @@ cd "$SCRIPT_DIR"
 # Parse arguments
 FULL_MODE=0
 VERBOSE=0
+TTY_MODE=0
 if [ "$1" = "--full" ] || [ "$1" = "-f" ]; then
     FULL_MODE=1
 elif [ "$1" = "--verbose" ] || [ "$1" = "-v" ]; then
     VERBOSE=1
+elif [ "$1" = "--tty" ] || [ "$1" = "-t" ]; then
+    TTY_MODE=1
 elif [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     cat << EOF
 Usage: $0 [OPTIONS]
 
 Run smak regression test suite.
 
+By default, all tests including interactive ones are run automatically.
+Interactive tests use script files (scripts/*.script) for automation.
+
 All tests are run twice - once with cache disabled and once with cache enabled.
 This ensures consistent behavior between cached and non-cached execution.
 
 Options:
-  (none)        Run quick regression tests (non-interactive unit tests)
-  -f, --full    Run full test suite including random builds and CLI tests
-  -v, --verbose Show test output
-  -h, --help    Show this help
+  (none)              Run all tests including scripted interactive tests
+  -f, --full          Run full test suite including random builds and CLI tests
+  -v, --verbose       Show test output
+  -t, --tty           Run interactive tests with actual TTY input (not scripted)
+  -h, --help          Show this help
 
 Examples:
-  $0            # Quick regression (default)
-  $0 --full     # Full test suite
-  $0 --verbose  # Show all test output
+  $0                  # All tests with scripted automation (default)
+  $0 --full           # Full test suite
+  $0 --verbose        # Show all test output
+  $0 --tty            # Interactive tests require user input
 
 EOF
     exit 0
@@ -74,30 +82,141 @@ run_test() {
         return
     fi
 
+    # Check if test uses interactive debug mode (-Kd flag)
+    # Note: smak -Kd opens /dev/tty directly, so heredocs don't work!
+    local is_interactive=0
+    if grep -q "\-Kd" "$test_script" 2>/dev/null; then
+        is_interactive=1
+    fi
+
+    # Check if there's a script file for this test
+    local script_file="scripts/${test_name}.script"
+    local has_script=0
+    local temp_script_file=""
+
+    if [ -f "$script_file" ]; then
+        has_script=1
+    elif [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
+        # For interactive tests without script file, extract commands from heredoc
+        # Look for heredoc pattern: cat <<EOF | ../smak -Kd
+        if grep -q "cat.*<<.*|.*smak.*-Kd" "$test_script" 2>/dev/null; then
+            # Extract commands from heredoc (between <<EOF and EOF)
+            temp_script_file="/tmp/smak-script-${test_name}-$$.script"
+            sed -n '/cat.*<<.*|.*smak.*-Kd/,/^EOF$/p' "$test_script" | \
+                sed '1d;$d' > "$temp_script_file"
+            script_file="$temp_script_file"
+            has_script=1
+        fi
+    fi
+
+    # Interactive tests in --tty mode will run with user input
+    # Otherwise use script runner for automation
+
     # Run test and capture output
     local output_nocache output_cache
     local start_time=$(date +%s)
 
-    if [ $VERBOSE -eq 1 ]; then
-        echo ""
-        echo "  [no-cache]"
-        SMAK_CACHE_DIR=off ./"$test_script"
-        local result_nocache=$?
-        echo "  [with-cache]"
-        SMAK_CACHE_DIR=default ./"$test_script"
-        local result_cache=$?
-    else
-        # Run without cache
-        output_nocache=$(SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
-        local result_nocache=$?
+    # Verbose mode shows output but still uses proper handling
+    local show_output=$VERBOSE
 
-        # Run with cache
-        output_cache=$(SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
-        local result_cache=$?
+    if [ $show_output -eq 1 ]; then
+        echo ""
+    fi
+
+    # Determine how to run the test
+    if true; then
+        # Handle interactive tests with script files using automated script runner
+        if [ $is_interactive -eq 1 ] && [ $has_script -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
+            # Extract smak arguments from test script (e.g., -f Makefile.test)
+            local smak_args=$(grep -oP '(?<=smak ).*(?=-Kd)' "$test_script" | head -1)
+
+            # Create wrapper script that execs smak directly
+            local wrapper_script="/tmp/smak-wrapper-${test_name}-$$.sh"
+            cat > "$wrapper_script" << WRAPPER_EOF
+#!/bin/bash
+cd "\$(dirname "$0")"
+exec ../smak $smak_args -Kd
+WRAPPER_EOF
+            chmod +x "$wrapper_script"
+
+            # Run with script automation using run-with-script.pl (with timeout)
+            output_nocache=$(timeout 30 env SMAK_CACHE_DIR=off ./run-with-script.pl "$script_file" "$wrapper_script" 2>&1)
+            local result_nocache=$?
+            rm -f "$wrapper_script"
+            if [ $result_nocache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+                ((FAILED++))
+                [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+                return
+            fi
+
+            # Create wrapper script again for cache run
+            cat > "$wrapper_script" << WRAPPER_EOF
+#!/bin/bash
+cd "\$(dirname "$0")"
+exec ../smak $smak_args -Kd
+WRAPPER_EOF
+            chmod +x "$wrapper_script"
+
+            output_cache=$(timeout 30 env SMAK_CACHE_DIR=default ./run-with-script.pl "$script_file" "$wrapper_script" 2>&1)
+            local result_cache=$?
+            rm -f "$wrapper_script" "$temp_script_file"
+            if [ $result_cache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+                ((FAILED++))
+                return
+            fi
+
+        # Interactive tests in TTY mode: allow stdin (with timeout)
+        elif [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 1 ]; then
+            output_nocache=$(timeout 60 env SMAK_CACHE_DIR=off ./"$test_script" 2>&1)
+            local result_nocache=$?
+            if [ $result_nocache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 60s)"
+                ((FAILED++))
+                return
+            fi
+
+            output_cache=$(timeout 60 env SMAK_CACHE_DIR=default ./"$test_script" 2>&1)
+            local result_cache=$?
+            if [ $result_cache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 60s)"
+                ((FAILED++))
+                return
+            fi
+
+        # Default: non-interactive tests, redirect stdin (with timeout)
+        else
+            output_nocache=$(timeout 30 env SMAK_CACHE_DIR=off ./"$test_script" 2>&1 < /dev/null)
+            local result_nocache=$?
+            if [ $result_nocache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+                ((FAILED++))
+                return
+            fi
+
+            output_cache=$(timeout 30 env SMAK_CACHE_DIR=default ./"$test_script" 2>&1 < /dev/null)
+            local result_cache=$?
+            if [ $result_cache -eq 124 ]; then
+                echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+                ((FAILED++))
+                return
+            fi
+        fi
     fi
 
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
+
+    # Display output in verbose mode
+    if [ $show_output -eq 1 ]; then
+        echo "=== NO CACHE OUTPUT ==="
+        echo "$output_nocache"
+        echo ""
+        echo "=== WITH CACHE OUTPUT ==="
+        echo "$output_cache"
+        echo ""
+    fi
 
     # Check if both runs passed
     if [ $result_nocache -eq 0 ] && [ $result_cache -eq 0 ]; then

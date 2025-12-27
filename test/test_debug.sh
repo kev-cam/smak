@@ -4,11 +4,9 @@
 echo "Testing interactive debug mode..."
 echo ""
 
-cat <<EOF | ../smak -Kd
-list
-show program
-rule clean
-deps main.o
-all
-quit
-EOF
+cd "$(dirname "$0")"
+
+# Run smak in debug mode
+# Note: heredocs don't work because smak reads from stdin directly
+# Use script automation (scripts/test_debug.script) for automated testing
+exec ../smak -Kd

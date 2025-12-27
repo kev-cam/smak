@@ -5422,6 +5422,7 @@ sub run_job_master {
         $fuse_mountpoint = $mountpoint;
         $has_fuse = 1;
         print STDERR "Detected FUSE filesystem at $mountpoint, port $fuse_port\n" if $ENV{SMAK_DEBUG};
+        print STDERR "Auto-rescan disabled (FUSE provides file notifications). Use 'rescan -auto' to enable if needed.\n";
         # Connect to FUSE monitor
         $fuse_socket = IO::Socket::INET->new(
             PeerHost => '127.0.0.1',
@@ -5437,7 +5438,7 @@ sub run_job_master {
         }
     } else {
         print STDERR "No FUSE monitor detected\n" if $ENV{SMAK_DEBUG};
-        print STDERR "Auto-rescan will be enabled by default (no FUSE file notifications)\n" if $ENV{SMAK_DEBUG};
+        print STDERR "Auto-rescan enabled by default (no FUSE file notifications)\n" if $ENV{SMAK_DEBUG};
     }
 
     # Wait for initial master connection

@@ -5434,14 +5434,14 @@ sub run_job_master {
     }
 
     sub is_phony_target {
-        my ($target, $makefile) = @_;
-        $makefile //= $main::makefile;
+        my ($target) = @_;
 
-        # Check if target is in .PHONY dependencies
-        my $phony_key = "$makefile\t.PHONY";
-        if (exists $pseudo_deps{$phony_key}) {
-            my @phony_targets = @{$pseudo_deps{$phony_key}};
-            return 1 if grep { $_ eq $target } @phony_targets;
+        # Check if target is in any .PHONY dependencies (check all makefiles)
+        for my $key (keys %pseudo_deps) {
+            if ($key =~ /\t\.PHONY$/) {
+                my @phony_targets = @{$pseudo_deps{$key}};
+                return 1 if grep { $_ eq $target } @phony_targets;
+            }
         }
 
         # Auto-detect common phony target names
@@ -5458,9 +5458,17 @@ sub run_job_master {
         # Phony targets should never be considered pending from cache
         # They must always run when requested
         if (is_phony_target($target)) {
-            # Still check if actively running/queued, but not completed_targets
+            # Check if actively running/queued
+            # If status is 'done', remove from in_progress so it can run again
             if (exists $in_progress{$target}) {
                 my $status = $in_progress{$target} // 'undef';
+                if ($status eq 'done') {
+                    # Phony target completed, allow it to be queued again
+                    delete $in_progress{$target};
+                    print STDERR "DEBUG is_target_pending: '$target' was done, removed from in_progress [PHONY]\n" if $ENV{SMAK_DEBUG};
+                    return 0;
+                }
+                # Still actively running or in another non-done state
                 print STDERR "DEBUG is_target_pending: '$target' in in_progress (status='$status') [PHONY]\n" if $ENV{SMAK_DEBUG};
                 return 1;
             }
@@ -6625,13 +6633,24 @@ sub run_job_master {
 
                 for my $target (keys %completed_targets) {
                     my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
-                    next unless -e $target_path;
+
+                    # If target was deleted, mark as stale
+                    if (!-e $target_path) {
+                        delete $completed_targets{$target};
+                        delete $in_progress{$target};
+                        $stale_targets_cache{$target} = time();
+                        $stale_count++;
+                        print STDERR "Auto-rescan: marked stale (deleted) '$target'\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+
+                    # Check if existing target needs rebuilding
                     if (needs_rebuild($target)) {
                         delete $completed_targets{$target};
                         delete $in_progress{$target};  # Also clear from in_progress
                         $stale_targets_cache{$target} = time();
                         $stale_count++;
-                        print STDERR "Auto-rescan: marked stale '$target'\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Auto-rescan: marked stale (modified) '$target'\n" if $ENV{SMAK_DEBUG};
                     }
                 }
                 if ($stale_count > 0) {
@@ -6986,17 +7005,26 @@ sub run_job_master {
 
                     # Check all completed targets to see if they need rebuilding
                     for my $target (keys %completed_targets) {
-                        # Skip if target doesn't exist anymore (was deleted)
+                        # Get full path to target
                         my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
-                        next unless -e $target_path;
 
-                        # Check if this target needs rebuilding
+                        # If target was deleted, mark as stale
+                        if (!-e $target_path) {
+                            delete $completed_targets{$target};
+                            delete $in_progress{$target};
+                            $stale_targets_cache{$target} = time();
+                            $stale_count++;
+                            print STDERR "  Marked stale (deleted): $target\n" if $ENV{SMAK_DEBUG};
+                            next;
+                        }
+
+                        # Check if existing target needs rebuilding based on dependencies
                         if (needs_rebuild($target)) {
                             delete $completed_targets{$target};
                             delete $in_progress{$target};  # Also clear from in_progress
                             $stale_targets_cache{$target} = time();
                             $stale_count++;
-                            print STDERR "  Marked stale: $target\n" if $ENV{SMAK_DEBUG};
+                            print STDERR "  Marked stale (modified): $target\n" if $ENV{SMAK_DEBUG};
                         }
                     }
 

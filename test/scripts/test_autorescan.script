@@ -9,7 +9,7 @@ rescan -auto
 # expect "Auto-rescan enabled"
 
 # Delete the built file
-! rm -f test_auto.o
+! mv test_auto.o test_auto.o-old
 
 # Wait for auto-rescan to detect the deletion (runs every 2 seconds)
 # wait 3s

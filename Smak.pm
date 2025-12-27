@@ -6653,7 +6653,11 @@ sub run_job_master {
                     }
                 }
                 if ($stale_count > 0) {
-                    print STDERR "[auto-rescan] Found $stale_count stale target(s)\n";
+                    print STDERR "[auto-rescan] Found $stale_count stale target(s)\n" if $ENV{SMAK_DEBUG};
+                    # Send notification to CLI
+                    if ($master_socket) {
+                        print $master_socket "[auto-rescan] Found $stale_count stale target(s)\n";
+                    }
                     dispatch_jobs();  # Try to dispatch new jobs for stale targets
                 }
             }

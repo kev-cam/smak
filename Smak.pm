@@ -7779,6 +7779,44 @@ sub run_job_master {
                             if ($watch_client && is_build_relevant($path)) {
                                 print $watch_client "WATCH:$path\n";
                             }
+
+                            # For DELETE or WRITE operations, clear failed targets that are now rebuildable
+                            if ($op eq 'DELETE' || $op eq 'WRITE') {
+                                # Get basename for matching
+                                my $basename = $path;
+                                $basename =~ s{^.*/}{};  # Get just the filename
+
+                                # Clear the file from completed targets if it was deleted
+                                if ($op eq 'DELETE') {
+                                    delete $completed_targets{$basename};
+                                    delete $completed_targets{$path};
+                                    delete $in_progress{$basename};
+                                    delete $in_progress{$path};
+                                    $stale_targets_cache{$basename} = time();
+                                }
+
+                                # Clear failed targets that now need rebuilding due to this file change
+                                for my $target (keys %failed_targets) {
+                                    # Check if target needs rebuilding (considers all dependencies recursively)
+                                    if (needs_rebuild($target)) {
+                                        delete $failed_targets{$target};
+                                        delete $in_progress{$target};
+                                        print STDERR "FUSE: Cleared failed target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
+                                    }
+                                }
+
+                                # Clear failed composite targets in in_progress
+                                for my $target (keys %in_progress) {
+                                    if ($in_progress{$target} eq 'failed') {
+                                        # Check if target needs rebuilding (considers all dependencies recursively)
+                                        if (needs_rebuild($target)) {
+                                            delete $in_progress{$target};
+                                            delete $failed_targets{$target};
+                                            print STDERR "FUSE: Cleared failed composite target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -6642,6 +6642,17 @@ sub run_job_master {
             # Report queue state during periodic check
             check_queue_state("periodic check");
 
+            # Try to dispatch queued jobs if workers are available
+            if (@job_queue > 0) {
+                my $ready_workers = 0;
+                for my $w (@workers) {
+                    $ready_workers++ if $worker_status{$w}{ready};
+                }
+                if ($ready_workers > 0) {
+                    dispatch_jobs();
+                }
+            }
+
             # Check all worker sockets for pending messages
             for my $worker (@workers) {
                 $worker->blocking(0);

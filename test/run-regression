@@ -83,9 +83,10 @@ run_test() {
     fi
 
     # Check if test uses interactive debug mode (-Kd flag)
-    # Note: smak -Kd opens /dev/tty directly, so heredocs don't work!
+    # Only treat as interactive if -Kd is the primary mode (heredoc or exec)
     local is_interactive=0
-    if grep -q "\-Kd" "$test_script" 2>/dev/null; then
+    if grep -q "cat.*<<.*|.*smak.*-Kd" "$test_script" 2>/dev/null || \
+       grep -q "exec.*smak.*-Kd" "$test_script" 2>/dev/null; then
         is_interactive=1
     fi
 

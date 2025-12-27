@@ -124,7 +124,7 @@ sub has_source_control_recursion {
 sub should_filter_dependency {
     my ($dep) = @_;
 
-    # GENERAL RULE: Filter pattern dependencies that reference non-existent subdirectories
+    # GENERAL RULE 1: Filter pattern dependencies that reference non-existent subdirectories
     # This prevents infinite recursion from rules like "%: RCS/%,v" when RCS/ doesn't exist
     # Also prevents wasted processing trying to build targets in directories that don't exist
     if ($dep =~ /%/ && $dep =~ m{/}) {
@@ -138,6 +138,19 @@ sub should_filter_dependency {
                 warn "DEBUG: Filtering pattern dependency '$dep' - directory '$dir_part' does not exist\n" if $ENV{SMAK_DEBUG};
                 return 1;
             }
+        }
+    }
+
+    # GENERAL RULE 2: Filter pattern dependencies with prefixes when no matching files exist
+    # This prevents infinite recursion from rules like "%: s.%" (SCCS) when no s.* files exist
+    if ($dep =~ /%/ && $dep =~ m{^([^%/]+)\.%}) {
+        # Pattern has prefix before wildcard: "s.%" -> "s", "RCS.%" -> "RCS"
+        my $prefix = $1;
+        # Check if any files with this prefix exist
+        my @matching_files = glob("${prefix}.*");
+        if (@matching_files == 0) {
+            warn "DEBUG: Filtering pattern dependency '$dep' - no files matching '${prefix}.*' exist\n" if $ENV{SMAK_DEBUG};
+            return 1;
         }
     }
 

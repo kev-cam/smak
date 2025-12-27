@@ -4260,10 +4260,8 @@ sub cmd_rescan {
     my $noauto = 0;
     if (@$words > 0 && $words->[0] eq '-auto') {
         $auto = 1;
-        print "Auto-rescan enabled (will check timestamps periodically)\n";
     } elsif (@$words > 0 && $words->[0] eq '-noauto') {
         $noauto = 1;
-        print "Auto-rescan disabled\n";
     }
 
     if ($socket) {
@@ -4273,7 +4271,7 @@ sub cmd_rescan {
         print $socket $cmd;
         my $response = <$socket>;
         chomp $response if $response;
-        print "$response\n" if $response && !$auto && !$noauto;
+        print "$response\n" if $response;
     } else {
         print "Job server not running. Rescan requires active job server.\n";
     }
@@ -7323,9 +7321,14 @@ sub run_job_master {
                         }
 
                         if ($auto) {
-                            # Enable periodic rescanning in check_queue_state
-                            $auto_rescan = 1;
-                            print $master_socket "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                            # Check if FUSE watch mode is active
+                            if ($fuse_auto_clear) {
+                                print $master_socket "rescan -auto can't be activated unless you do 'unwatch' first.\n";
+                            } else {
+                                # Enable periodic rescanning in check_queue_state
+                                $auto_rescan = 1;
+                                print $master_socket "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                            }
                         } else {
                             print $master_socket "Rescan complete. Marked $stale_count target(s) as stale.\n";
                         }

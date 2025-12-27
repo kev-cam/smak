@@ -6,6 +6,7 @@ use Exporter qw(import);
 use POSIX ":sys_wait_h";
 use Term::ReadLine;
 use SmakCli qw(:all);
+use Time::HiRes qw(time);
 
 use Carp 'verbose'; # for debug trace
 	            # print STDERR Carp::confess( @_ ) if $ENV{SMAK_DEBUG};
@@ -3752,6 +3753,7 @@ sub cmd_build {
         # Job server mode - submit jobs and wait for results
         my $exit_req = ${$state->{exit_requested}};
         for my $target (@targets) {
+            my $build_start_time = time();
             print $socket "SUBMIT_JOB\n";
             print $socket "$target\n";
             print $socket ".\n";
@@ -3776,10 +3778,11 @@ sub cmd_build {
                         reprompt();
                     } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                         my ($completed_target, $exit_code) = ($1, $2);
+                        my $elapsed = time() - $build_start_time;
                         if ($exit_code == 0) {
-                            print "✓ Build succeeded: $completed_target\n";
+                            printf "✓ Build succeeded: $completed_target (%.2fs)\n", $elapsed;
                         } else {
-                            print "✗ Build failed: $completed_target (exit code $exit_code)\n";
+                            printf "✗ Build failed: $completed_target (exit code $exit_code, %.2fs)\n", $elapsed;
                         }
                         $job_done = 1;
 			reprompt();
@@ -3793,16 +3796,18 @@ sub cmd_build {
         # No job server - build sequentially
         print "(Building in sequential mode - use 'start' for parallel builds)\n";
         for my $target (@targets) {
+            my $build_start_time = time();
             eval {
                 build_target($target);
             };
+            my $elapsed = time() - $build_start_time;
             if ($@) {
-                print "✗ Build failed: $target\n";
+                printf "✗ Build failed: $target (%.2fs)\n", $elapsed;
                 print STDERR $@;
                 reprompt();
                 last;
             } else {
-                print "✓ Build succeeded: $target\n";
+                printf "✓ Build succeeded: $target (%.2fs)\n", $elapsed;
                 reprompt();
             }
         }

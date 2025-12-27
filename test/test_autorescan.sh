@@ -16,7 +16,7 @@ test_auto.o: test_auto.c
 	@echo "Built test_auto.o"
 
 clean:
-	rm -f test_auto.o
+	mv test_auto.o  test_auto.o-old ; exit 0
 EOF
 
 # Create source file

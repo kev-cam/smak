@@ -1,0 +1,5 @@
+b
+b clean
+! sleep 2
+b
+exit

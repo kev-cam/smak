@@ -211,6 +211,12 @@ our $log_fh;
 our $dry_run_mode = 0;
 our $silent_mode = 0;
 
+# Rebuild behavior
+# When true (default), rebuild missing intermediate files even if final target is up-to-date (matches make)
+# When false, skip rebuilding missing intermediates if final target is up-to-date and sources unchanged
+# Can be controlled via SMAK_REBUILD_INTERMEDIATES environment variable (0/1)
+our $rebuild_missing_intermediates = $ENV{SMAK_REBUILD_INTERMEDIATES} // 1;  # Default: true (match make behavior)
+
 # Job server state
 our $jobs = 1;  # Number of parallel jobs
 our $ssh_host = '';  # SSH host for remote workers
@@ -2704,11 +2710,54 @@ sub build_target {
         warn "smak: Warning: phony target '$target' exists as a file and will be ignored\n";
     }
 
-    # If not .PHONY and target is up-to-date, skip building
+    # If not .PHONY and target is up-to-date, handle based on rebuild_missing_intermediates setting
     unless ($is_phony) {
         warn "DEBUG[" . __LINE__ . "]:   Checking if target exists and is up-to-date...\n" if $ENV{SMAK_DEBUG};
         if (-e $target && !needs_rebuild($target)) {
             warn "DEBUG:   Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
+
+            # Check for missing intermediate dependencies
+            if ($rebuild_missing_intermediates) {
+                # Default behavior (match make): rebuild missing intermediates even if target is up-to-date
+                use File::Basename;
+                my $target_dir = dirname($target);
+                for my $dep (@deps) {
+                    next if $dep =~ /^\.PHONY$/;
+                    next if $dep !~ /\S/;
+
+                    # Check if dependency file exists
+                    my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
+                    if (!-e $dep_path) {
+                        # Check if dependency has a rule (is an intermediate, not a source file)
+                        my $dep_key = "$makefile\t$dep";
+                        my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
+
+                        if ($has_rule) {
+                            warn "smak: Rebuilding missing intermediate '$dep' (even though '$target' is up-to-date)\n";
+                            build_target($dep, $visited, $depth + 1);
+                        }
+                    }
+                }
+            } else {
+                # Optimized behavior: notify about missing intermediates but don't rebuild
+                use File::Basename;
+                my $target_dir = dirname($target);
+                for my $dep (@deps) {
+                    next if $dep =~ /^\.PHONY$/;
+                    next if $dep !~ /\S/;
+
+                    my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
+                    if (!-e $dep_path) {
+                        my $dep_key = "$makefile\t$dep";
+                        my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
+
+                        if ($has_rule) {
+                            warn "smak: Note: intermediate '$dep' is missing but not rebuilt (target '$target' up-to-date, sources unchanged)\n";
+                        }
+                    }
+                }
+            }
+
             # Remove from stale cache if it was there
             delete $stale_targets_cache{$target};
             return;
@@ -5844,6 +5893,62 @@ sub run_job_master {
                         warn "Target '$target' needs rebuilding\n" if $ENV{SMAK_DEBUG};
                     } else {
                         # Target is up-to-date
+                        warn "Target '$target' is up-to-date, checking for missing intermediates...\n" if $ENV{SMAK_DEBUG};
+
+                        # Check for missing intermediate dependencies
+                        if ($rebuild_missing_intermediates) {
+                            # Default behavior (match make): rebuild missing intermediates even if target is up-to-date
+                            use File::Basename;
+                            my $target_dir = dirname($target_path);
+                            my $has_missing_intermediates = 0;
+
+                            for my $dep (@deps) {
+                                next if $dep =~ /^\.PHONY$/;
+                                next if $dep !~ /\S/;
+
+                                # Check if dependency file exists
+                                my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
+                                if (!-e $dep_path) {
+                                    # Check if dependency has a rule (is an intermediate, not a source file)
+                                    my $dep_key = "$makefile\t$dep";
+                                    my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
+
+                                    if ($has_rule) {
+                                        warn "smak: Rebuilding missing intermediate '$dep' (even though '$target' is up-to-date)\n";
+                                        $has_missing_intermediates = 1;
+                                        # Queue the missing intermediate for building
+                                        queue_target_recursive($dep, $dir, $msocket, $depth + 1);
+                                    }
+                                }
+                            }
+
+                            # If we queued missing intermediates, don't mark target as complete yet
+                            if ($has_missing_intermediates) {
+                                $in_progress{$target} = "pending";
+                                return;
+                            }
+                        } else {
+                            # Optimized behavior: notify about missing intermediates but don't rebuild
+                            use File::Basename;
+                            my $target_dir = dirname($target_path);
+
+                            for my $dep (@deps) {
+                                next if $dep =~ /^\.PHONY$/;
+                                next if $dep !~ /\S/;
+
+                                my $dep_path = $dep =~ m{^/} ? $dep : "$target_dir/$dep";
+                                if (!-e $dep_path) {
+                                    my $dep_key = "$makefile\t$dep";
+                                    my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
+
+                                    if ($has_rule) {
+                                        warn "smak: Note: intermediate '$dep' is missing but not rebuilt (target '$target' up-to-date, sources unchanged)\n";
+                                    }
+                                }
+                            }
+                        }
+
+                        # Mark target as complete and done
                         $completed_targets{$target} = 1;
                         $in_progress{$target} = "done";
                         warn "Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};

@@ -5552,12 +5552,12 @@ sub run_job_master {
     # Auto-rescan: Enable by default when FUSE is NOT detected
     # When FUSE is present, it provides file change notifications
     # When FUSE is absent, we need periodic polling to detect changes
-    my $auto_rescan = $has_fuse ? 0 : 1;
+    our $auto_rescan = $has_fuse ? 0 : 1;
 
     # FUSE auto-clear: Enable by default when FUSE is detected
     # When enabled, FUSE events automatically clear failed targets (like rescan -auto)
     # When disabled (unwatch), FUSE events are collected but manual rescan is needed
-    my $fuse_auto_clear = $has_fuse ? 1 : 0;
+    our $fuse_auto_clear = $has_fuse ? 1 : 0;
 
     # Track last FUSE debug message to suppress consecutive duplicates
     my $last_fuse_debug_msg = '';
@@ -6462,9 +6462,17 @@ sub run_job_master {
                             }
                         }
 
-                        print STDERR "DEBUG dispatch:   Checking dep '$single_dep' for target '$target'\n" if $ENV{SMAK_DEBUG};
-                        print STDERR "DEBUG dispatch:     completed_targets: " . (exists $completed_targets{$single_dep} ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};
-                        print STDERR "DEBUG dispatch:     in_progress: " . (exists $in_progress{$single_dep} ? $in_progress{$single_dep} : "NO") . "\n" if $ENV{SMAK_DEBUG};
+                        # Only print debug for non-trivial cases (skip satisfied dependencies to reduce noise)
+                        my $is_satisfied = exists $completed_targets{$single_dep} &&
+                                          (!exists $in_progress{$single_dep} ||
+                                           $in_progress{$single_dep} eq 'done' ||
+                                           !$in_progress{$single_dep});
+
+                        if (!$is_satisfied && $ENV{SMAK_DEBUG}) {
+                            print STDERR "DEBUG dispatch:   Checking dep '$single_dep' for target '$target'\n";
+                            print STDERR "DEBUG dispatch:     completed_targets: " . (exists $completed_targets{$single_dep} ? "YES" : "NO") . "\n";
+                            print STDERR "DEBUG dispatch:     in_progress: " . (exists $in_progress{$single_dep} ? $in_progress{$single_dep} : "NO") . "\n";
+                        }
 
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
@@ -6500,7 +6508,7 @@ sub run_job_master {
                                 $in_progress{$single_dep} ne "failed") {
                                 # Dependency is being rebuilt - wait for it
                                 $deps_satisfied = 0;
-                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (being rebuilt)\n";
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (being rebuilt)\n" if $ENV{SMAK_DEBUG};
                                 last;
                             }
                             # Pre-existing source file or already built, OK to proceed
@@ -6509,7 +6517,7 @@ sub run_job_master {
                                  $in_progress{$single_dep} ne "failed") {
                             # Dependency is queued or currently building - wait for it
                             $deps_satisfied = 0;
-                            print STDERR "  Job '$target' waiting for dependency '$single_dep' (queued/building)\n";
+                            print STDERR "  Job '$target' waiting for dependency '$single_dep' (queued/building)\n" if $ENV{SMAK_DEBUG};
                             print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep' in_progress\n" if $ENV{SMAK_DEBUG};
                             last;
                         } else {
@@ -6542,7 +6550,7 @@ sub run_job_master {
                                 }
                                 # Dependency is still building or queued
                                 $deps_satisfied = 0;
-                                print STDERR "  Job '$target' waiting for dependency '$single_dep'\n";
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep'\n" if $ENV{SMAK_DEBUG};
                                 print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep'\n" if $ENV{SMAK_DEBUG};
                                 last;
                             }
@@ -6565,14 +6573,16 @@ sub run_job_master {
 
             # No job with satisfied dependencies found
             if ($job_index < 0) {
-                print STDERR "No jobs with satisfied dependencies (stuck!)\n";
-                print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
-                my $max_show = @job_queue < 10 ? $#job_queue : 9;
-                for my $i (0 .. $max_show) {
-                    my $job = $job_queue[$i];
-                    print STDERR "  [$i] $job->{target}\n";
+                if ($ENV{SMAK_DEBUG}) {
+                    print STDERR "No jobs with satisfied dependencies (stuck!)\n";
+                    print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
+                    my $max_show = @job_queue < 10 ? $#job_queue : 9;
+                    for my $i (0 .. $max_show) {
+                        my $job = $job_queue[$i];
+                        print STDERR "  [$i] $job->{target}\n";
+                    }
+                    print STDERR "  ...\n" if @job_queue > 10;
                 }
-                print STDERR "  ...\n" if @job_queue > 10;
                 last;
             }
 

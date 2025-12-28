@@ -6465,7 +6465,6 @@ sub run_job_master {
 
                         print STDERR "DEBUG dispatch:   Checking dep '$single_dep' for target '$target'\n" if $ENV{SMAK_DEBUG};
                         print STDERR "DEBUG dispatch:     completed_targets: " . (exists $completed_targets{$single_dep} ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};
-                        print STDERR "DEBUG dispatch:     file exists (-e $dep_path): " . (-e $dep_path ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};
                         print STDERR "DEBUG dispatch:     in_progress: " . (exists $in_progress{$single_dep} ? $in_progress{$single_dep} : "NO") . "\n" if $ENV{SMAK_DEBUG};
 
                         # If the dependency was recently completed, verify it actually exists on disk

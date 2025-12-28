@@ -74,8 +74,36 @@ echo "============================"
 echo "Commit:  $(git log -1 --oneline "$COMMIT")"
 echo "Result:  $TEST_RESULT"
 echo ""
-echo "Test directory preserved at: $TEST_DIR"
+echo "Test directory: $TEST_DIR"
 echo "============================"
 echo ""
 
+# Drop into shell with smak in PATH
+echo "Dropping into shell with smak directory in PATH"
+echo "smak command will run from: $TEST_DIR"
+echo "Type 'exit' to return and cleanup"
+echo ""
+
+# Add smak directory to PATH and start interactive shell
+cd "$TEST_DIR"
+export PATH="$TEST_DIR:$PATH"
+export PS1="[smak-test-${COMMIT_SHORT}] \w\$ "
+
+# Start bash in interactive mode
+bash --norc --noprofile -i
+
+# After shell exits, prompt for cleanup
+echo ""
+echo -n "Remove test directory $TEST_DIR? (y/N): "
+read -r cleanup
+
+if [ "$cleanup" = "y" ] || [ "$cleanup" = "Y" ]; then
+    echo "Removing $TEST_DIR..."
+    rm -rf "$TEST_DIR"
+    echo "Cleanup complete."
+else
+    echo "Test directory preserved at: $TEST_DIR"
+fi
+
+echo ""
 exit $TEST_EXIT

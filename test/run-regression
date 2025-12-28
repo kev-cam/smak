@@ -66,10 +66,11 @@ echo "======================================"
 echo "SMAK REGRESSION TEST SUITE"
 echo "======================================"
 echo ""
-echo "Test modes: [Seq/NoCache] [Seq/Cache] [Par/NoCache] [Par/Cache] [Fail-test]"
-echo "Results shown as: PPPPp (all pass + fail test works)"
-echo "              or: PPPPx (all pass, no fail test)"
-echo "              or: PPFPp (3rd mode failed, fail test works), etc."
+echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail] [Par/NoCache+fail] [Par/Cache+fail]"
+echo "Results shown as: PpPpPpPp (all pass + fail tests work in all modes)"
+echo "              or: PxPxPxPx (all pass, no fail test)"
+echo "              or: PpFpPpPp (2nd mode failed, fail tests work), etc."
+echo "  P/F = mode passed/failed, p = fail test failed (correct), x = no fail test"
 echo ""
 
 # Function to run a test script
@@ -184,9 +185,17 @@ WRAPPER_EOF
     local out_par_nc="/tmp/smak-test-${test_name}-par-nc-$$.log"
     local out_par_c="/tmp/smak-test-${test_name}-par-c-$$.log"
 
-    # Run all 4 modes
+    # Check if fail test exists
+    local fail_test="${test_script%.sh}-fail.sh"
+    local has_fail_test=0
+    if [ -f "$fail_test" ] && [ -x "$fail_test" ]; then
+        has_fail_test=1
+    fi
+
+    # Run all 4 modes (and -fail tests if they exist)
     run_single_mode "off" "" "$out_seq_nc"
     result_seq_nocache=$?
+    local result_seq_nocache_fail=0
     if [ $result_seq_nocache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
@@ -194,9 +203,16 @@ WRAPPER_EOF
         rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
         return
     fi
+    if [ $has_fail_test -eq 1 ]; then
+        local fail_out="/tmp/smak-test-${test_name}-seq-nc-fail-$$.log"
+        timeout 30 env SMAK_CACHE_DIR=off ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null
+        result_seq_nocache_fail=$?
+        rm -f "$fail_out"
+    fi
 
     run_single_mode "default" "" "$out_seq_c"
     result_seq_cache=$?
+    local result_seq_cache_fail=0
     if [ $result_seq_cache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
@@ -204,9 +220,16 @@ WRAPPER_EOF
         rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
         return
     fi
+    if [ $has_fail_test -eq 1 ]; then
+        local fail_out="/tmp/smak-test-${test_name}-seq-c-fail-$$.log"
+        timeout 30 env SMAK_CACHE_DIR=default ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null
+        result_seq_cache_fail=$?
+        rm -f "$fail_out"
+    fi
 
     run_single_mode "off" "-j4" "$out_par_nc"
     result_par_nocache=$?
+    local result_par_nocache_fail=0
     if [ $result_par_nocache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
@@ -214,15 +237,28 @@ WRAPPER_EOF
         rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
         return
     fi
+    if [ $has_fail_test -eq 1 ]; then
+        local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
+        timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(smak[^-]*\)/\1 -j4 /' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
+        result_par_nocache_fail=$?
+        rm -f "$fail_out"
+    fi
 
     run_single_mode "default" "-j4" "$out_par_c"
     result_par_cache=$?
+    local result_par_cache_fail=0
     if [ $result_par_cache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
         [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
         rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
         return
+    fi
+    if [ $has_fail_test -eq 1 ]; then
+        local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
+        timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(smak[^-]*\)/\1 -j4 /' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
+        result_par_cache_fail=$?
+        rm -f "$fail_out"
     fi
 
     # Clean up temp script file
@@ -247,7 +283,7 @@ WRAPPER_EOF
         echo ""
     fi
 
-    # Build result string (PPPP or PPFP etc.)
+    # Build result string (PpPpPpPp or PxPxPxPx etc.)
     local result_str=""
     local all_passed=1
 
@@ -258,6 +294,16 @@ WRAPPER_EOF
         result_str="${result_str}F"
         all_passed=0
     fi
+    if [ $has_fail_test -eq 1 ]; then
+        if [ $result_seq_nocache_fail -ne 0 ] && [ $result_seq_nocache_fail -ne 124 ]; then
+            result_str="${result_str}p"
+        else
+            result_str="${result_str}F"
+            all_passed=0
+        fi
+    else
+        result_str="${result_str}x"
+    fi
 
     # Mode 2: Sequential + Cache
     if [ $result_seq_cache -eq 0 ]; then
@@ -265,6 +311,16 @@ WRAPPER_EOF
     else
         result_str="${result_str}F"
         all_passed=0
+    fi
+    if [ $has_fail_test -eq 1 ]; then
+        if [ $result_seq_cache_fail -ne 0 ] && [ $result_seq_cache_fail -ne 124 ]; then
+            result_str="${result_str}p"
+        else
+            result_str="${result_str}F"
+            all_passed=0
+        fi
+    else
+        result_str="${result_str}x"
     fi
 
     # Mode 3: Parallel + NoCache
@@ -274,6 +330,16 @@ WRAPPER_EOF
         result_str="${result_str}F"
         all_passed=0
     fi
+    if [ $has_fail_test -eq 1 ]; then
+        if [ $result_par_nocache_fail -ne 0 ] && [ $result_par_nocache_fail -ne 124 ]; then
+            result_str="${result_str}p"
+        else
+            result_str="${result_str}F"
+            all_passed=0
+        fi
+    else
+        result_str="${result_str}x"
+    fi
 
     # Mode 4: Parallel + Cache
     if [ $result_par_cache -eq 0 ]; then
@@ -282,26 +348,14 @@ WRAPPER_EOF
         result_str="${result_str}F"
         all_passed=0
     fi
-
-    # Check for -fail test
-    local fail_test="${test_script%.sh}-fail.sh"
-    if [ -f "$fail_test" ] && [ -x "$fail_test" ]; then
-        # Run the fail test (just sequential/no-cache)
-        local fail_output="/tmp/smak-test-${test_name}-fail-$$.log"
-        timeout 30 env SMAK_CACHE_DIR=off ./"$(basename "$fail_test")" >"$fail_output" 2>&1 < /dev/null
-        local fail_result=$?
-
-        # The fail test should fail (non-zero exit code)
-        if [ $fail_result -ne 0 ] && [ $fail_result -ne 124 ]; then
+    if [ $has_fail_test -eq 1 ]; then
+        if [ $result_par_cache_fail -ne 0 ] && [ $result_par_cache_fail -ne 124 ]; then
             result_str="${result_str}p"
         else
-            # Fail test passed when it should have failed, or timed out
             result_str="${result_str}F"
             all_passed=0
         fi
-        rm -f "$fail_output"
     else
-        # No fail test exists
         result_str="${result_str}x"
     fi
 
@@ -322,6 +376,9 @@ WRAPPER_EOF
             {
                 echo "Test: $test_name"
                 echo "Results: Seq/NoCache=$result_seq_nocache Seq/Cache=$result_seq_cache Par/NoCache=$result_par_nocache Par/Cache=$result_par_cache"
+                if [ $has_fail_test -eq 1 ]; then
+                    echo "Fail test results: Seq/NoCache=$result_seq_nocache_fail Seq/Cache=$result_seq_cache_fail Par/NoCache=$result_par_nocache_fail Par/Cache=$result_par_cache_fail"
+                fi
                 echo "Result string: $result_str"
                 echo ""
                 echo "=== Sequential/NoCache Output ==="

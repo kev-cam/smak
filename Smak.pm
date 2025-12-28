@@ -5140,6 +5140,12 @@ sub get_fuse_remote_info {
     my $fs_line = $lines[1];  # First line is header
     my ($filesystem) = split(/\s+/, $fs_line);
 
+    # Exclude Windows/WSL drive letters (C:\, Y:\, etc.)
+    # These are WSL mounts, not FUSE filesystems
+    if ($filesystem =~ /^[A-Za-z]:\\/) {
+        return (undef, undef);
+    }
+
     # Check if it matches FUSE/sshfs format: [user@]host:path
     if ($filesystem =~ /^(.+?):(.+)$/) {
         my ($server, $remote_path) = ($1, $2);

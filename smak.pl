@@ -4,6 +4,8 @@ use warnings;
 use Getopt::Long qw(:config);
 use FindBin qw($RealBin);
 use File::Path qw(make_path);
+use File::Spec;
+use Cwd qw(abs_path);
 use POSIX qw(strftime);
 use lib $RealBin;
 use Smak qw(:all);
@@ -33,9 +35,44 @@ my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
 my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
 my $remote_cd = '';  # Remote directory for SSH workers
+my $norc = 0;  # Skip reading .smak.rc files
 
-# Read ~/.smak.rc if it exists (before any other configuration)
-my $smakrc = $ENV{HOME} ? "$ENV{HOME}/.smak.rc" : '';
+# Check for -norc early (before reading .smak.rc)
+for my $arg (@ARGV) {
+    if ($arg eq '-norc' || $arg eq '--norc') {
+        $norc = 1;
+        last;
+    }
+}
+
+# Read .smak.rc if it exists (before any other configuration)
+# Search upward from current directory for .smak.rc, fall back to ~/.smak.rc
+my $smakrc = '';
+if (!$norc) {
+    # Search upward from current directory for .smak.rc
+    my $dir = abs_path('.');
+    while (1) {
+        my $rc = File::Spec->catfile($dir, '.smak.rc');
+        if (-f $rc) {
+            $smakrc = $rc;
+            last;
+        }
+
+        # Move to parent directory
+        my $parent = File::Spec->catdir($dir, File::Spec->updir());
+        $parent = abs_path($parent);
+
+        # Stop if we've reached the root
+        last if $parent eq $dir;
+        $dir = $parent;
+    }
+
+    # Fall back to ~/.smak.rc if no .smak.rc found in directory tree
+    if (!$smakrc && $ENV{HOME} && -f "$ENV{HOME}/.smak.rc") {
+        $smakrc = "$ENV{HOME}/.smak.rc";
+    }
+}
+
 my $reconnect = 0;
 my $kill_old_js = 0;
 
@@ -70,7 +107,7 @@ if ($smakrc && -f $smakrc) {
 
                 # Check if variable is allowed
                 unless (exists $allowed_vars{$name}) {
-                    warn "~/.smak.rc:$line_num: Unknown variable '$name' (not in whitelist)\n";
+                    warn "$smakrc:$line_num: Unknown variable '$name' (not in whitelist)\n";
                     next;
                 }
 
@@ -78,14 +115,14 @@ if ($smakrc && -f $smakrc) {
                 my $perl_code = "\$$name = $value";
                 eval $perl_code;
                 if ($@) {
-                    warn "~/.smak.rc:$line_num: $@";
+                    warn "$smakrc:$line_num: $@";
                 }
                 next;
             }
 
             # Otherwise execute as Perl code
             eval $line;
-            warn "~/.smak.rc:$line_num: $@" if $@;
+            warn "$smakrc:$line_num: $@" if $@;
         }
         close($rc_fh);
     } else {
@@ -184,6 +221,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'v|verbose' => \$verbose,
         'ssh=s' => \$ssh_host,
         'cd=s' => \$remote_cd,
+        'norc' => \$norc,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -205,6 +243,7 @@ GetOptions(
     'v|verbose' => \$verbose,
     'ssh=s' => \$ssh_host,
     'cd=s' => \$remote_cd,
+    'norc' => \$norc,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)

@@ -14,6 +14,7 @@ sub new {
 
     my $self = {
         prompt => $opts{prompt} || '> ',
+        get_prompt => $opts{get_prompt},  # Optional callback for dynamic prompt
         history_file => $opts{history_file} || '.smak_history',
         socket => $opts{socket},  # For async notifications
         check_notifications => $opts{check_notifications},
@@ -27,6 +28,15 @@ sub new {
     bless $self, $class;
     $self->load_history();
     return $self;
+}
+
+# Get current prompt (either from callback or fixed string)
+sub get_current_prompt {
+    my ($self) = @_;
+    if ($self->{get_prompt}) {
+        return $self->{get_prompt}->();
+    }
+    return $self->{prompt};
 }
 
 # Set terminal to raw mode
@@ -114,10 +124,11 @@ sub redraw_line {
 
     # Move to start of line, clear it, print prompt and buffer
     print "\r\033[K";  # CR + clear to end of line
-    print $self->{prompt}, $buffer;
+    my $prompt = $self->get_current_prompt();
+    print $prompt, $buffer;
 
     # Move cursor to correct position
-    my $cursor_pos = length($self->{prompt}) + $pos;
+    my $cursor_pos = length($prompt) + $pos;
     print "\r\033[", $cursor_pos + 1, "G";  # Move to column (1-based)
     STDOUT->flush();
 }
@@ -161,7 +172,7 @@ sub readline {
     $self->set_raw_mode();
 
     # Print initial prompt
-    print $self->{prompt};
+    print $self->get_current_prompt();
     STDOUT->flush();
 
     # Set up SIGWINCH handler for reprompt
@@ -182,7 +193,7 @@ sub readline {
             # Update globals for reprompt()
             $current_buffer = $buffer;
             $current_pos = $pos;
-            $current_prompt = $self->{prompt};
+            $current_prompt = $self->get_current_prompt();
 
             # Check for async notifications
             if ($self->{check_notifications}) {
@@ -294,25 +305,29 @@ sub readline {
                     elsif ($code == 67) {  # Right arrow
                         if ($pos < length($buffer)) {
                             $pos++;
-                            my $cursor_pos = length($self->{prompt}) + $pos;
+                            my $prompt_len = length($self->get_current_prompt());
+                            my $cursor_pos = $prompt_len + $pos;
                             print "\033[", $cursor_pos + 1, "G";
                         }
                     }
                     elsif ($code == 68) {  # Left arrow
                         if ($pos > 0) {
                             $pos--;
-                            my $cursor_pos = length($self->{prompt}) + $pos;
+                            my $prompt_len = length($self->get_current_prompt());
+                            my $cursor_pos = $prompt_len + $pos;
                             print "\033[", $cursor_pos + 1, "G";
                         }
                     }
                     elsif ($code == 72) {  # Home
                         $pos = 0;
-                        my $cursor_pos = length($self->{prompt});
+                        my $prompt_len = length($self->get_current_prompt());
+                        my $cursor_pos = $prompt_len;
                         print "\033[", $cursor_pos + 1, "G";
                     }
                     elsif ($code == 70) {  # End
                         $pos = length($buffer);
-                        my $cursor_pos = length($self->{prompt}) + $pos;
+                        my $prompt_len = length($self->get_current_prompt());
+                        my $cursor_pos = $prompt_len + $pos;
                         print "\033[", $cursor_pos + 1, "G";
                     }
                 }

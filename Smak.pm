@@ -6,6 +6,7 @@ use Exporter qw(import);
 use POSIX ":sys_wait_h";
 use Term::ReadLine;
 use SmakCli qw(:all);
+use Time::HiRes qw(time);
 
 use Carp 'verbose'; # for debug trace
 	            # print STDERR Carp::confess( @_ ) if $ENV{SMAK_DEBUG};
@@ -3336,6 +3337,7 @@ sub unified_cli {
     # Create SmakCli handler with tab completion and async notification support
     my $cli = SmakCli->new(
         prompt => $prompt,
+        get_prompt => sub { $busy ? "[busy]" : $prompt },
         socket => $socket,
         check_notifications => $check_notifications,
     );
@@ -3752,6 +3754,7 @@ sub cmd_build {
         # Job server mode - submit jobs and wait for results
         my $exit_req = ${$state->{exit_requested}};
         for my $target (@targets) {
+            my $build_start_time = time();
             print $socket "SUBMIT_JOB\n";
             print $socket "$target\n";
             print $socket ".\n";
@@ -3776,10 +3779,11 @@ sub cmd_build {
                         reprompt();
                     } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                         my ($completed_target, $exit_code) = ($1, $2);
+                        my $elapsed = time() - $build_start_time;
                         if ($exit_code == 0) {
-                            print "✓ Build succeeded: $completed_target\n";
+                            printf "✓ Build succeeded: $completed_target (%.2fs)\n", $elapsed;
                         } else {
-                            print "✗ Build failed: $completed_target (exit code $exit_code)\n";
+                            printf "✗ Build failed: $completed_target (exit code $exit_code, %.2fs)\n", $elapsed;
                         }
                         $job_done = 1;
 			reprompt();
@@ -3793,16 +3797,18 @@ sub cmd_build {
         # No job server - build sequentially
         print "(Building in sequential mode - use 'start' for parallel builds)\n";
         for my $target (@targets) {
+            my $build_start_time = time();
             eval {
                 build_target($target);
             };
+            my $elapsed = time() - $build_start_time;
             if ($@) {
-                print "✗ Build failed: $target\n";
+                printf "✗ Build failed: $target (%.2fs)\n", $elapsed;
                 print STDERR $@;
                 reprompt();
                 last;
             } else {
-                print "✓ Build succeeded: $target\n";
+                printf "✓ Build succeeded: $target (%.2fs)\n", $elapsed;
                 reprompt();
             }
         }
@@ -3967,6 +3973,7 @@ sub cmd_status {
     while (my $response = <$socket>) {
         chomp $response;
         last if $response eq 'STATUS_END';
+        next if $response eq 'STATUS_START';  # Skip start marker
         print "$response\n";
     }
 }
@@ -4255,10 +4262,8 @@ sub cmd_rescan {
     my $noauto = 0;
     if (@$words > 0 && $words->[0] eq '-auto') {
         $auto = 1;
-        print "Auto-rescan enabled (will check timestamps periodically)\n";
     } elsif (@$words > 0 && $words->[0] eq '-noauto') {
         $noauto = 1;
-        print "Auto-rescan disabled\n";
     }
 
     if ($socket) {
@@ -4268,7 +4273,7 @@ sub cmd_rescan {
         print $socket $cmd;
         my $response = <$socket>;
         chomp $response if $response;
-        print "$response\n" if $response && !$auto && !$noauto;
+        print "$response\n" if $response;
     } else {
         print "Job server not running. Rescan requires active job server.\n";
     }
@@ -5550,6 +5555,14 @@ sub run_job_master {
     # When FUSE is absent, we need periodic polling to detect changes
     my $auto_rescan = $has_fuse ? 0 : 1;
 
+    # FUSE auto-clear: Enable by default when FUSE is detected
+    # When enabled, FUSE events automatically clear failed targets (like rescan -auto)
+    # When disabled (unwatch), FUSE events are collected but manual rescan is needed
+    my $fuse_auto_clear = $has_fuse ? 1 : 0;
+
+    # Track last FUSE debug message to suppress consecutive duplicates
+    my $last_fuse_debug_msg = '';
+
     # Helper functions
     sub process_command {
         my ($cmd) = @_;
@@ -6458,9 +6471,13 @@ sub run_job_master {
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
                         if ($completed_targets{$single_dep}) {
-                            # First check if file exists - fast path
-                            if (-e $dep_path) {
-                                # File exists, dependency satisfied
+                            # With auto-rescan or FUSE monitoring, we can trust completed_targets
+                            # because deleted files are automatically detected and removed
+                            if ($auto_rescan || $fuse_auto_clear) {
+                                # File monitoring active - trust completed_targets
+                                # (Files would have been removed if deleted)
+                            } elsif (-e $dep_path) {
+                                # No monitoring - verify file exists on disk
                             } elsif (exists $pending_composite{$single_dep}) {
                                 # Composite target (phony/aggregator), no file needed
                             } elsif (exists $pseudo_deps{"$makefile\t$single_dep"}) {
@@ -6629,6 +6646,17 @@ sub run_job_master {
 
             # Report queue state during periodic check
             check_queue_state("periodic check");
+
+            # Try to dispatch queued jobs if workers are available
+            if (@job_queue > 0) {
+                my $ready_workers = 0;
+                for my $w (@workers) {
+                    $ready_workers++ if $worker_status{$w}{ready};
+                }
+                if ($ready_workers > 0) {
+                    dispatch_jobs();
+                }
+            }
 
             # Check all worker sockets for pending messages
             for my $worker (@workers) {
@@ -7087,7 +7115,11 @@ sub run_job_master {
 			print $master_socket "$target\t$message\n";
 		    }
 		    print $master_socket "PROGRESS_END\n";
-		    
+
+                } elsif ($line =~ /^STATUS$/) {
+                    # Send status information
+                    send_status($master_socket);
+
                 } elsif ($line =~ /^LIST_TASKS$/) {
                     # Send task list to master
                     print $master_socket "Queued tasks: " . scalar(@job_queue) . "\n";
@@ -7272,10 +7304,55 @@ sub run_job_master {
                             }
                         }
 
+                        # Also check failed targets - if their dependencies are now stale, clear the failed status
+                        for my $target (keys %failed_targets) {
+                            if (needs_rebuild($target)) {
+                                delete $failed_targets{$target};
+                                delete $in_progress{$target};
+                                $stale_targets_cache{$target} = time();
+                                $stale_count++;
+                                print STDERR "  Cleared failed status (dependencies changed): $target\n" if $ENV{SMAK_DEBUG};
+                            }
+                        }
+
+                        # Clear failed composite targets if any of their dependencies became stale
+                        for my $target (keys %in_progress) {
+                            if ($in_progress{$target} eq 'failed') {
+                                # Check if this is a composite target (has dependencies)
+                                my $target_key = "$makefile\t$target";
+                                if (exists $fixed_deps{$target_key} || exists $pattern_deps{$target_key}) {
+                                    my @deps = exists $fixed_deps{$target_key} ? @{$fixed_deps{$target_key}} :
+                                               exists $pattern_deps{$target_key} ? @{$pattern_deps{$target_key}} : ();
+
+                                    # Check if any dependency is now stale
+                                    my $has_stale_dep = 0;
+                                    for my $dep (@deps) {
+                                        if (exists $stale_targets_cache{$dep} ||
+                                            !exists $completed_targets{$dep} && !exists $failed_targets{$dep}) {
+                                            $has_stale_dep = 1;
+                                            last;
+                                        }
+                                    }
+
+                                    if ($has_stale_dep) {
+                                        delete $in_progress{$target};
+                                        delete $failed_targets{$target};
+                                        print STDERR "  Cleared failed composite target (dependencies changed): $target\n" if $ENV{SMAK_DEBUG};
+                                        $stale_count++;
+                                    }
+                                }
+                            }
+                        }
+
                         if ($auto) {
-                            # Enable periodic rescanning in check_queue_state
-                            $auto_rescan = 1;
-                            print $master_socket "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                            # Check if FUSE watch mode is active
+                            if ($fuse_auto_clear) {
+                                print $master_socket "rescan -auto can't be activated unless you do 'unwatch' first.\n";
+                            } else {
+                                # Enable periodic rescanning in check_queue_state
+                                $auto_rescan = 1;
+                                print $master_socket "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                            }
                         } else {
                             print $master_socket "Rescan complete. Marked $stale_count target(s) as stale.\n";
                         }
@@ -7580,8 +7657,9 @@ sub run_job_master {
                     # Enable watch mode - send file change notifications to this client
                     if ($fuse_socket) {
                         $watch_client = $master_socket;
+                        $fuse_auto_clear = 1;  # Enable auto-clear (like rescan -auto)
                         print $master_socket "WATCH_STARTED\n";
-                        print STDERR "Watch mode enabled for client\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Watch mode enabled (FUSE auto-clear active)\n" if $ENV{SMAK_DEBUG};
                     } else {
                         print $master_socket "WATCH_UNAVAILABLE (no FUSE)\n";
                     }
@@ -7590,8 +7668,9 @@ sub run_job_master {
                     # Disable watch mode
                     if ($watch_client && $watch_client == $master_socket) {
                         $watch_client = undef;
+                        $fuse_auto_clear = 0;  # Disable auto-clear, events still collected
                         print $master_socket "WATCH_STOPPED\n";
-                        print STDERR "Watch mode disabled\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Watch mode disabled (FUSE events saved for manual rescan)\n" if $ENV{SMAK_DEBUG};
                     } else {
                         print $master_socket "WATCH_NOT_ACTIVE\n";
                     }
@@ -7733,11 +7812,61 @@ sub run_job_master {
                             push @{$file_modifications{$path}{workers}}, $pid
                                 unless grep { $_ == $pid } @{$file_modifications{$path}{workers}};
                             $file_modifications{$path}{last_op} = time();
-                            print STDERR "FUSE: $op $path by PID $pid\n" if $ENV{SMAK_DEBUG};
+
+                            # Print debug message only if different from last one (suppress consecutive duplicates)
+                            if ($ENV{SMAK_DEBUG}) {
+                                my $debug_msg = "FUSE: $op $path by PID $pid";
+                                if ($debug_msg ne $last_fuse_debug_msg) {
+                                    print STDERR "$debug_msg\n";
+                                    $last_fuse_debug_msg = $debug_msg;
+                                }
+                            }
 
                             # Send watch notification if client is watching AND file is build-relevant
                             if ($watch_client && is_build_relevant($path)) {
                                 print $watch_client "WATCH:$path\n";
+                            }
+
+                            # For DELETE or WRITE operations, handle stale targets
+                            if ($op eq 'DELETE' || $op eq 'WRITE') {
+                                # Get basename for matching
+                                my $basename = $path;
+                                $basename =~ s{^.*/}{};  # Get just the filename
+
+                                # Clear the file from completed targets if it was deleted
+                                if ($op eq 'DELETE') {
+                                    delete $completed_targets{$basename};
+                                    delete $completed_targets{$path};
+                                    delete $in_progress{$basename};
+                                    delete $in_progress{$path};
+                                    $stale_targets_cache{$basename} = time();
+                                }
+
+                                # Only auto-clear failed targets if fuse_auto_clear is enabled
+                                # (disabled with 'unwatch', events still collected for manual rescan)
+                                if ($fuse_auto_clear) {
+                                    # Clear failed targets that now need rebuilding due to this file change
+                                    for my $target (keys %failed_targets) {
+                                        # Check if target needs rebuilding (considers all dependencies recursively)
+                                        if (needs_rebuild($target)) {
+                                            delete $failed_targets{$target};
+                                            delete $in_progress{$target};
+                                            print STDERR "FUSE: Cleared failed target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
+                                        }
+                                    }
+
+                                    # Clear failed composite targets in in_progress
+                                    for my $target (keys %in_progress) {
+                                        if ($in_progress{$target} eq 'failed') {
+                                            # Check if target needs rebuilding (considers all dependencies recursively)
+                                            if (needs_rebuild($target)) {
+                                                delete $in_progress{$target};
+                                                delete $failed_targets{$target};
+                                                print STDERR "FUSE: Cleared failed composite target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

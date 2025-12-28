@@ -6944,7 +6944,15 @@ sub run_job_master {
                 $makefile_dir =~ s{/[^/]*$}{};  # Remove filename
                 $makefile_dir = '.' if $makefile_dir eq $makefile;  # No dir separator found
 
+                # Get list of phony targets to skip (they don't create files)
+                my $phony_key = "$makefile\t.PHONY";
+                my @phony_list = exists $pseudo_deps{$phony_key} ? @{$pseudo_deps{$phony_key}} : ();
+                my %is_phony = map { $_ => 1 } @phony_list;
+
                 for my $target (keys %completed_targets) {
+                    # Skip phony targets - they don't create files so shouldn't be checked
+                    next if exists $is_phony{$target};
+
                     my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
 
                     # If target was deleted, mark as stale

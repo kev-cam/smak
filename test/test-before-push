@@ -1,0 +1,103 @@
+#!/bin/bash
+# Run tests before pushing changes and log results
+# Usage: ./test-before-push [--quick]
+#        --quick: Skip full test suite, just run a quick smoke test
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+QUICK_MODE=0
+if [ "$1" = "--quick" ]; then
+    QUICK_MODE=1
+fi
+
+# Create test logs directory if it doesn't exist
+LOG_DIR="test/logs"
+mkdir -p "$LOG_DIR"
+
+# Generate log filename with timestamp and commit
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+COMMIT_SHORT=$(git rev-parse --short HEAD)
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+LOG_FILE="$LOG_DIR/test-${BRANCH}-${COMMIT_SHORT}-${TIMESTAMP}.log"
+
+# Print header
+echo "Running tests before push..." | tee "$LOG_FILE"
+echo "=============================" | tee -a "$LOG_FILE"
+echo "Branch:  $BRANCH" | tee -a "$LOG_FILE"
+echo "Commit:  $(git log -1 --oneline)" | tee -a "$LOG_FILE"
+echo "Time:    $(date)" | tee -a "$LOG_FILE"
+echo "" | tee -a "$LOG_FILE"
+
+# Check for uncommitted changes
+if ! git diff-index --quiet HEAD --; then
+    echo "WARNING: You have uncommitted changes" | tee -a "$LOG_FILE"
+    echo "" | tee -a "$LOG_FILE"
+fi
+
+# Run tests
+cd test
+echo "Running regression tests..." | tee -a "../$LOG_FILE"
+echo "===========================" | tee -a "../$LOG_FILE"
+echo "" | tee -a "../$LOG_FILE"
+
+if [ $QUICK_MODE -eq 1 ]; then
+    # Quick mode: just run a few fast tests
+    echo "Quick mode: running smoke tests only" | tee -a "../$LOG_FILE"
+    TEST_RESULT=0
+    for test in test_phony_repeat.sh test_echo.sh test_dryrun.sh; do
+        if [ -f "$test" ]; then
+            echo "Running $test..." | tee -a "../$LOG_FILE"
+            if ./"$test" >> "../$LOG_FILE" 2>&1; then
+                echo "  PASS" | tee -a "../$LOG_FILE"
+            else
+                echo "  FAIL" | tee -a "../$LOG_FILE"
+                TEST_RESULT=1
+            fi
+        fi
+    done
+else
+    # Full test suite
+    if ./run-regression >> "../$LOG_FILE" 2>&1; then
+        TEST_RESULT=0
+    else
+        TEST_RESULT=1
+    fi
+fi
+
+cd ..
+
+# Print summary
+echo "" | tee -a "$LOG_FILE"
+echo "=============================" | tee -a "$LOG_FILE"
+echo "Test Summary" | tee -a "$LOG_FILE"
+echo "=============================" | tee -a "$LOG_FILE"
+
+if [ $TEST_RESULT -eq 0 ]; then
+    echo "Result:  ✓ PASSED" | tee -a "$LOG_FILE"
+    echo "" | tee -a "$LOG_FILE"
+    echo "Safe to push!" | tee -a "$LOG_FILE"
+else
+    echo "Result:  ✗ FAILED" | tee -a "$LOG_FILE"
+    echo "" | tee -a "$LOG_FILE"
+    echo "DO NOT PUSH - tests failed!" | tee -a "$LOG_FILE"
+    echo "" | tee -a "$LOG_FILE"
+    echo "Check failure logs in test/logs/" | tee -a "$LOG_FILE"
+
+    # Copy failed test logs
+    if [ -d "/tmp" ]; then
+        FAIL_LOGS=$(ls /tmp/smak-test-fail-*.log 2>/dev/null || true)
+        if [ -n "$FAIL_LOGS" ]; then
+            FAIL_DIR="$LOG_DIR/failures-${COMMIT_SHORT}-${TIMESTAMP}"
+            mkdir -p "$FAIL_DIR"
+            cp /tmp/smak-test-fail-*.log "$FAIL_DIR/" 2>/dev/null || true
+            echo "Failure details copied to: $FAIL_DIR/" | tee -a "$LOG_FILE"
+        fi
+    fi
+fi
+
+echo "" | tee -a "$LOG_FILE"
+echo "Log saved to: $LOG_FILE" | tee -a "$LOG_FILE"
+
+exit $TEST_RESULT

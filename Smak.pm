@@ -6508,7 +6508,7 @@ sub run_job_master {
                                 $in_progress{$single_dep} ne "failed") {
                                 # Dependency is being rebuilt - wait for it
                                 $deps_satisfied = 0;
-                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (being rebuilt)\n";
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (being rebuilt)\n" if $ENV{SMAK_DEBUG};
                                 last;
                             }
                             # Pre-existing source file or already built, OK to proceed
@@ -6517,7 +6517,7 @@ sub run_job_master {
                                  $in_progress{$single_dep} ne "failed") {
                             # Dependency is queued or currently building - wait for it
                             $deps_satisfied = 0;
-                            print STDERR "  Job '$target' waiting for dependency '$single_dep' (queued/building)\n";
+                            print STDERR "  Job '$target' waiting for dependency '$single_dep' (queued/building)\n" if $ENV{SMAK_DEBUG};
                             print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep' in_progress\n" if $ENV{SMAK_DEBUG};
                             last;
                         } else {
@@ -6550,7 +6550,7 @@ sub run_job_master {
                                 }
                                 # Dependency is still building or queued
                                 $deps_satisfied = 0;
-                                print STDERR "  Job '$target' waiting for dependency '$single_dep'\n";
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep'\n" if $ENV{SMAK_DEBUG};
                                 print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep'\n" if $ENV{SMAK_DEBUG};
                                 last;
                             }
@@ -6573,14 +6573,16 @@ sub run_job_master {
 
             # No job with satisfied dependencies found
             if ($job_index < 0) {
-                print STDERR "No jobs with satisfied dependencies (stuck!)\n";
-                print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
-                my $max_show = @job_queue < 10 ? $#job_queue : 9;
-                for my $i (0 .. $max_show) {
-                    my $job = $job_queue[$i];
-                    print STDERR "  [$i] $job->{target}\n";
+                if ($ENV{SMAK_DEBUG}) {
+                    print STDERR "No jobs with satisfied dependencies (stuck!)\n";
+                    print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
+                    my $max_show = @job_queue < 10 ? $#job_queue : 9;
+                    for my $i (0 .. $max_show) {
+                        my $job = $job_queue[$i];
+                        print STDERR "  [$i] $job->{target}\n";
+                    }
+                    print STDERR "  ...\n" if @job_queue > 10;
                 }
-                print STDERR "  ...\n" if @job_queue > 10;
                 last;
             }
 

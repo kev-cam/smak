@@ -11,14 +11,32 @@ cd "$SCRIPT_DIR"
 FULL_MODE=0
 VERBOSE=0
 TTY_MODE=0
-if [ "$1" = "--full" ] || [ "$1" = "-f" ]; then
-    FULL_MODE=1
-elif [ "$1" = "--verbose" ] || [ "$1" = "-v" ]; then
-    VERBOSE=1
-elif [ "$1" = "--tty" ] || [ "$1" = "-t" ]; then
-    TTY_MODE=1
-elif [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-    cat << EOF
+CLONE_MODE=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -f|--full)
+            FULL_MODE=1
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=1
+            shift
+            ;;
+        -t|--tty)
+            TTY_MODE=1
+            shift
+            ;;
+        -clone|--clone)
+            CLONE_MODE="$2"
+            if [ "$CLONE_MODE" != "local" ] && [ "$CLONE_MODE" != "query" ]; then
+                echo "Error: -clone requires 'local' or 'query' argument"
+                exit 1
+            fi
+            shift 2
+            ;;
+        -h|--help)
+            cat << EOF
 Usage: $0 [OPTIONS]
 
 Run smak regression test suite.
@@ -26,14 +44,16 @@ Run smak regression test suite.
 By default, all tests including interactive ones are run automatically.
 Interactive tests use script files (scripts/*.script) for automation.
 
-All tests are run twice - once with cache disabled and once with cache enabled.
-This ensures consistent behavior between cached and non-cached execution.
+All tests are run in 4 modes: sequential/parallel × cache/no-cache
+Each test's -fail variant is also run in all 4 modes to verify error handling.
 
 Options:
   (none)              Run all tests including scripted interactive tests
   -f, --full          Run full test suite including random builds and CLI tests
   -v, --verbose       Show test output
   -t, --tty           Run interactive tests with actual TTY input (not scripted)
+  -clone local        Clone from local repository to /tmp/smak/test-<tag>/ and run tests there
+  -clone query        Clone from remote, prompting for branch selection
   -h, --help          Show this help
 
 Examples:
@@ -41,9 +61,94 @@ Examples:
   $0 --full           # Full test suite
   $0 --verbose        # Show all test output
   $0 --tty            # Interactive tests require user input
+  $0 -clone local     # Test in clean clone of local repo
+  $0 -clone query     # Test in clone, choose branch interactively
 
 EOF
-    exit 0
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# Handle clone mode
+if [ -n "$CLONE_MODE" ]; then
+    # Generate tag from current timestamp
+    TAG=$(date +%Y%m%d-%H%M%S)
+    TEST_DIR="/tmp/smak/test-${TAG}"
+
+    echo "======================================"
+    echo "CLONE MODE: Setting up test environment"
+    echo "======================================"
+    echo "Test directory: $TEST_DIR"
+    echo ""
+
+    # Create test directory
+    mkdir -p "$TEST_DIR"
+
+    if [ "$CLONE_MODE" = "local" ]; then
+        echo "Cloning from local repository..."
+        # Get the repository root (parent of test directory)
+        REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+        git clone "$REPO_ROOT" "$TEST_DIR" || {
+            echo "Error: Failed to clone repository"
+            exit 1
+        }
+    elif [ "$CLONE_MODE" = "query" ]; then
+        echo "Available branches:"
+        echo "  1) Current branch: $(git -C "$SCRIPT_DIR/.." branch --show-current)"
+        echo "  2) main"
+        echo ""
+        read -p "Select branch (1 or 2): " choice
+
+        REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+        if [ "$choice" = "1" ]; then
+            BRANCH=$(git -C "$REPO_ROOT" branch --show-current)
+            echo "Cloning branch: $BRANCH"
+            git clone -b "$BRANCH" "$REPO_ROOT" "$TEST_DIR" || {
+                echo "Error: Failed to clone repository"
+                exit 1
+            }
+        elif [ "$choice" = "2" ]; then
+            echo "Cloning branch: main"
+            git clone -b main "$REPO_ROOT" "$TEST_DIR" || {
+                echo "Error: Failed to clone repository"
+                exit 1
+            }
+        else
+            echo "Invalid choice"
+            exit 1
+        fi
+    fi
+
+    echo ""
+    echo "Clone complete. Running tests in $TEST_DIR/test"
+    echo ""
+
+    # Change to test directory and re-run this script without clone option
+    cd "$TEST_DIR/test"
+
+    # Build the command to run, preserving other options
+    CMD="./run-regression"
+    [ $FULL_MODE -eq 1 ] && CMD="$CMD --full"
+    [ $VERBOSE -eq 1 ] && CMD="$CMD --verbose"
+    [ $TTY_MODE -eq 1 ] && CMD="$CMD --tty"
+
+    # Run the tests
+    $CMD
+    EXIT_CODE=$?
+
+    echo ""
+    echo "======================================"
+    echo "Test directory preserved at: $TEST_DIR"
+    echo "======================================"
+
+    exit $EXIT_CODE
 fi
 
 # Colors for output

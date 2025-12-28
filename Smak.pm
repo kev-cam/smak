@@ -3196,6 +3196,8 @@ sub save_modifications {
 }
 
 our $interactive = 0;
+our $busy = 0; # more to do, not just waiting.
+our $rp_pending = 0;
 
 # Unified CLI - handles both standalone and attached modes
 sub unified_cli {
@@ -3447,9 +3449,6 @@ sub unified_cli {
 
     return $ret;
 }
-
-our $busy = 0; # more to do, not just waiting.
-our $rp_pending = 0;
 
 sub reprompt()
 {

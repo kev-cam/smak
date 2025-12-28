@@ -5267,6 +5267,10 @@ sub run_job_master {
     use POSIX qw(:sys_wait_h);
     use Cwd 'abs_path';
 
+    # Job-master should ignore SIGINT (Ctrl-C)
+    # The CLI process handles cancellation - job-master should keep running
+    $SIG{INT} = 'IGNORE';
+
     # Job-master has access to all parsed Makefile data:
     # Bring package-level variables into scope
     our %fixed_deps;
@@ -5768,9 +5772,14 @@ sub run_job_master {
         # First quick check
         return 1 if -e $target_path;
 
+        # FUSE filesystems may have significant caching delays
+        # Use longer retries and delays for FUSE
+        my $max_attempts = $has_fuse ? 10 : 3;
+        my $delay_multiplier = $has_fuse ? 0.05 : 0.01;  # 50ms vs 10ms per attempt
+
         # If not found, try syncing the directory and retry
         # This handles cases where the file is buffered but not yet visible
-        for my $attempt (1..3) {
+        for my $attempt (1..$max_attempts) {
             # Sync the directory to flush filesystem buffers
             if ($dir && -d $dir) {
                 # Open and sync the directory
@@ -5781,12 +5790,14 @@ sub run_job_master {
                 }
             }
 
-            # Small delay to allow filesystem to catch up
-            select(undef, undef, undef, 0.01 * $attempt);  # 10ms, 20ms, 30ms
+            # Delay to allow filesystem to catch up
+            # FUSE: 50ms, 100ms, 150ms, ... up to 500ms (total 2.75s)
+            # Local: 10ms, 20ms, 30ms (total 60ms)
+            select(undef, undef, undef, $delay_multiplier * $attempt);
 
             return 1 if -e $target_path;
 
-            vprint "Warning: Target '$target' not found at '$target_path', retry $attempt/3\n";
+            vprint "Warning: Target '$target' not found at '$target_path', retry $attempt/$max_attempts\n";
         }
 
         # Final check

@@ -5122,31 +5122,69 @@ sub get_variable {
     return '';
 }
 
+sub detect_fuse_monitor {
+    my ($path) = @_;
+    # Check if we're in a FUSE filesystem
+
+    my $mountpoint;
+    my $port;
+    my $server;
+    my $remote_path;
+    
+    # Use df to get the mountpoint for current directory
+    my $df_output = `df $path 2>/dev/null | tail -1`;
+    if ($df_output =~ /\s+(\/\S+)$/) {
+	$mountpoint = $1;
+	vprint "Mount point for current directory: $mountpoint\n";
+    } else {
+	return ();
+    }
+    
+    # Read /proc/mounts to verify it's a FUSE filesystem
+    open(my $mounts, '<', '/proc/mounts') or return ();
+    my $is_fuse = 0;
+    my $fstype;
+    while (my $line = <$mounts>) {
+	# Look for fuse.sshfs or similar at our mountpoint
+	if ($line =~ /^(\S+)\s+\Q$mountpoint\E\s+fuse\.(\S+)/) {
+	    my $remote = $1;
+	    $fstype = $2;
+	    $remote =~ /((.*)@)(.*):(.*)/;
+	    $remote_path = $4;
+	    $server = $3;
+	    $is_fuse = 1;
+	    vprint "Detected FUSE filesystem: $fstype at $mountpoint\n";
+	    last;
+	}
+    }
+    close($mounts);
+    
+    return () unless $is_fuse;
+    
+    # Find the FUSE monitor port using lsof -i
+    # Look for sshfs processes with LISTEN state
+    my $lsof_output = `lsof -i 2>/dev/null | grep sshfs | grep LISTEN`;
+    for my $line (split /\n/, $lsof_output) {
+	# Parse lsof output: sshfs PID user ... TCP *:PORT (LISTEN)
+	if ($line =~ /sshfs\s+(\d+)\s+.*TCP\s+\*:(\d+)\s+\(LISTEN\)/) {
+	    my ($pid, $port) = ($1, $2);
+	    vprint "Found FUSE monitor on port $port (PID $pid)\n";
+	    return ($mountpoint, $port, $server, $remote_path);
+	}
+    }
+    
+    return ();
+}
+
 # Get FUSE remote server information from df output
 # Returns (server, remote_path) or (undef, undef) if not FUSE
 sub get_fuse_remote_info {
     my ($path) = @_;
     $path //= '.';
 
-    # Run df to get filesystem info
-    my $df_output = `df '$path' 2>/dev/null`;
-    return (undef, undef) unless $df_output;
+    my ($mountpoint, $port, $server, $remote_path) = detect_fuse_monitor($path);
 
-    # Parse df output - look for sshfs format: user@host:/remote/path
-    # Example: dkc@workhorse:/home/dkc/src-00/iverilog
-    my @lines = split(/\n/, $df_output);
-    return (undef, undef) unless @lines >= 2;
-
-    my $fs_line = $lines[1];  # First line is header
-    my ($filesystem) = split(/\s+/, $fs_line);
-
-    # Check if it matches FUSE/sshfs format: [user@]host:path
-    if ($filesystem =~ /^(.+?):(.+)$/) {
-        my ($server, $remote_path) = ($1, $2);
-        return ($server, $remote_path);
-    }
-
-    return (undef, undef);
+    return ($server, $remote_path);
 }
 
 # Show dependencies for a target
@@ -5334,11 +5372,19 @@ sub run_job_master {
 
     # Write ports to file for smak-attach to find
     my $port_dir = get_port_file_dir();
-    open(my $port_fh, '>', "$port_dir/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
+    my $port_file = "$port_dir/smak-jobserver-$$.port";
+    open(my $port_fh, '>', $port_file) or warn "Cannot write port file: $!\n";
     if ($port_fh) {
         print $port_fh "$observer_port\n";
         print $port_fh "$master_port\n";
         close($port_fh);
+
+        # Create symlink in current directory for easy access
+        my $local_link = ".smak.connect";
+        unlink($local_link) if -l $local_link;  # Remove old symlink if exists
+        if (!symlink($port_file, $local_link)) {
+            warn "Warning: Cannot create symlink $local_link: $!\n" if $ENV{SMAK_DEBUG};
+        }
     }
 
     our @observers;  # List of connected observers
@@ -5406,58 +5452,12 @@ sub run_job_master {
 	print $worker "ENV_END\n";
     }
     
-    sub detect_fuse_monitor {
-        # Check if we're in a FUSE filesystem
-        my $cwd = abs_path('.');
-
-        # Use df to get the mountpoint for current directory
-        my $df_output = `df . 2>/dev/null | tail -1`;
-        my $mountpoint;
-        if ($df_output =~ /\s+(\/\S+)$/) {
-            $mountpoint = $1;
-            vprint "Mount point for current directory: $mountpoint\n";
-        } else {
-            return ();
-        }
-
-        # Read /proc/mounts to verify it's a FUSE filesystem
-        open(my $mounts, '<', '/proc/mounts') or return ();
-        my $is_fuse = 0;
-        my $fstype;
-        while (my $line = <$mounts>) {
-            # Look for fuse.sshfs or similar at our mountpoint
-            if ($line =~ /^(\S+)\s+\Q$mountpoint\E\s+fuse\.(\S+)/) {
-                $is_fuse = 1;
-                $fstype = $2;
-                vprint "Detected FUSE filesystem: $fstype at $mountpoint\n";
-                last;
-            }
-        }
-        close($mounts);
-
-        return () unless $is_fuse;
-
-        # Find the FUSE monitor port using lsof -i
-        # Look for sshfs processes with LISTEN state
-        my $lsof_output = `lsof -i 2>/dev/null | grep sshfs | grep LISTEN`;
-        for my $line (split /\n/, $lsof_output) {
-            # Parse lsof output: sshfs PID user ... TCP *:PORT (LISTEN)
-            if ($line =~ /sshfs\s+(\d+)\s+.*TCP\s+\*:(\d+)\s+\(LISTEN\)/) {
-                my ($pid, $port) = ($1, $2);
-                vprint "Found FUSE monitor on port $port (PID $pid)\n";
-                return ($mountpoint, $port);
-            }
-        }
-
-        return ();
-    }
-
     my $fuse_mountpoint;
     our $has_fuse = 0;
     # Check if FUSE was detected early (before makefile parsing)
     my $fuse_early_detected = $ENV{SMAK_FUSE_DETECTED} || 0;
 
-    if (my ($mountpoint, $fuse_port) = detect_fuse_monitor()) {
+    if (my ($mountpoint, $fuse_port) = detect_fuse_monitor(abs_path('.'))) {
         $fuse_mountpoint = $mountpoint;
         $has_fuse = 1;
         print STDERR "Detected FUSE filesystem at $mountpoint, port $fuse_port\n" if $ENV{SMAK_DEBUG};
@@ -6686,6 +6686,12 @@ sub run_job_master {
         # (In interactive mode, stay running even when idle)
         if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0 && !defined($master_socket)) {
             vprint "All jobs complete and master disconnected. Job-master exiting.\n";
+
+            # Cleanup: remove symlink and port file
+            my $local_link = ".smak.connect";
+            unlink($local_link) if -l $local_link;
+            unlink($port_file) if -f $port_file;
+
             last;
         }
 
@@ -7237,7 +7243,8 @@ sub run_job_master {
                             }
                         }
                     }
-                    print $master_socket "Added $count worker(s), total is ".1+$#workers.". Workers will connect asynchronously.\n";
+		    my $w = 1 + $#workers;
+                    print $master_socket "Added $count worker(s), total is $w. Workers will connect asynchronously.\n";
 
                 } elsif ($line =~ /^REMOVE_WORKER (\d+)$/) {
                     my $count = $1;

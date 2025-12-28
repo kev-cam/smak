@@ -22,8 +22,9 @@ EOF
 # Create source file
 echo "int main() { return 0; }" > test_auto.c
 
-# Run smak in interactive CLI mode with job server
-SMAK_DEBUG=1 ../smak -f Makefile.autorescan -j2 -cli 
+# Run smak in interactive debug mode with job server
+# This will be automated by test runner using test_autorescan.script
+SMAK_DEBUG=1 ../smak -f Makefile.autorescan -j2 -Kd
 
 if [ -f test_auto.o ] ; then
     rm -f test_auto.c test_auto.o test_auto.o-old

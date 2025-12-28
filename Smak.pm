@@ -7930,6 +7930,17 @@ sub run_job_master {
                                             }
                                         }
                                     }
+
+                                    # Clear completed targets that now need rebuilding due to this file change
+                                    # This handles cases like: main.o deleted -> ivl needs rebuilding
+                                    for my $target (keys %completed_targets) {
+                                        # Check if target needs rebuilding (considers all dependencies recursively)
+                                        if (needs_rebuild($target)) {
+                                            delete $completed_targets{$target};
+                                            delete $in_progress{$target};
+                                            print STDERR "FUSE: Cleared completed target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
+                                        }
+                                    }
                                 }
                             }
                         }

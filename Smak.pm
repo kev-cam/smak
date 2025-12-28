@@ -3337,6 +3337,7 @@ sub unified_cli {
     # Create SmakCli handler with tab completion and async notification support
     my $cli = SmakCli->new(
         prompt => $prompt,
+        get_prompt => sub { $busy ? "[busy]" : $prompt },
         socket => $socket,
         check_notifications => $check_notifications,
     );

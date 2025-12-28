@@ -134,6 +134,7 @@ run_test() {
     run_single_mode() {
         local mode_cache="$1"  # "off" or "default"
         local mode_jobs="$2"   # "" (sequential) or "-j4" (parallel)
+        local output_file="$3"  # temp file to store output
 
         if [ $is_interactive -eq 1 ] && [ $has_script -ne 0 ] && [ $TTY_MODE -eq 0 ]; then
             # Extract smak arguments from test script (e.g., -f Makefile.test)
@@ -149,68 +150,76 @@ WRAPPER_EOF
             chmod +x "$wrapper_script"
 
             # Run with script automation using run-with-script.pl (with timeout)
-            local output=$(timeout 30 env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$script_file" "$wrapper_script" 2>&1)
+            timeout 30 env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$script_file" "$wrapper_script" >"$output_file" 2>&1
             local result=$?
             rm -f "$wrapper_script"
-            echo "$result"
-            return 0
+            return $result
 
         elif [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 1 ]; then
             # For TTY mode, we can't easily inject -j, skip parallel testing
             if [ -n "$mode_jobs" ]; then
-                echo "0"  # Skip parallel in TTY mode
-                return 0
+                return 0  # Skip parallel in TTY mode
             fi
-            local output=$(timeout 60 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" 2>&1)
-            local result=$?
-            echo "$result"
-            return 0
+            timeout 60 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1
+            return $?
 
         else
             # Default: non-interactive tests, redirect stdin (with timeout)
             # For parallel mode, modify the test script invocation
             if [ -n "$mode_jobs" ]; then
                 # Inject -j4 into smak invocation
-                local output=$(timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(smak[^-]*\)/\1 -j4 /' '$test_script' | bash" 2>&1 < "${script_file:-/dev/null}")
+                timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(smak[^-]*\)/\1 -j4 /' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
             else
-                local output=$(timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" 2>&1 < "${script_file:-/dev/null}")
+                timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
             fi
-            local result=$?
-            echo "$result"
-            return 0
+            return $?
         fi
     }
 
+    # Create temp files for output
+    local out_seq_nc="/tmp/smak-test-${test_name}-seq-nc-$$.log"
+    local out_seq_c="/tmp/smak-test-${test_name}-seq-c-$$.log"
+    local out_par_nc="/tmp/smak-test-${test_name}-par-nc-$$.log"
+    local out_par_c="/tmp/smak-test-${test_name}-par-c-$$.log"
+
     # Run all 4 modes
-    result_seq_nocache=$(run_single_mode "off" "")
+    run_single_mode "off" "" "$out_seq_nc"
+    result_seq_nocache=$?
     if [ $result_seq_nocache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
         [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
         return
     fi
 
-    result_seq_cache=$(run_single_mode "default" "")
+    run_single_mode "default" "" "$out_seq_c"
+    result_seq_cache=$?
     if [ $result_seq_cache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
         [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
         return
     fi
 
-    result_par_nocache=$(run_single_mode "off" "-j4")
+    run_single_mode "off" "-j4" "$out_par_nc"
+    result_par_nocache=$?
     if [ $result_par_nocache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
         [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
         return
     fi
 
-    result_par_cache=$(run_single_mode "default" "-j4")
+    run_single_mode "default" "-j4" "$out_par_c"
+    result_par_cache=$?
     if [ $result_par_cache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
         [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
         return
     fi
 
@@ -219,6 +228,22 @@ WRAPPER_EOF
 
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
+
+    # Display output in verbose mode
+    if [ $show_output -eq 1 ]; then
+        echo "=== Sequential/NoCache ==="
+        cat "$out_seq_nc"
+        echo ""
+        echo "=== Sequential/Cache ==="
+        cat "$out_seq_c"
+        echo ""
+        echo "=== Parallel/NoCache ==="
+        cat "$out_par_nc"
+        echo ""
+        echo "=== Parallel/Cache ==="
+        cat "$out_par_c"
+        echo ""
+    fi
 
     # Build result string (PPPP or PPFP etc.)
     local result_str=""
@@ -261,18 +286,35 @@ WRAPPER_EOF
         echo -e "${GREEN}${result_str}${NC} (${duration}s)"
         ((PASSED++))
         PASSED_TESTS+=("$test_name")
+        # Clean up temp files on success
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
     else
         echo -e "${RED}${result_str}${NC} (${duration}s)"
         ((FAILED++))
         FAILED_TESTS+=("$test_name")
         # Save failure details
         if [ $VERBOSE -eq 0 ]; then
+            local fail_log="/tmp/smak-test-fail-$test_name.log"
             {
                 echo "Test: $test_name"
                 echo "Results: Seq/NoCache=$result_seq_nocache Seq/Cache=$result_seq_cache Par/NoCache=$result_par_nocache Par/Cache=$result_par_cache"
                 echo "Result string: $result_str"
-            } > "/tmp/smak-test-fail-$test_name.log"
+                echo ""
+                echo "=== Sequential/NoCache Output ==="
+                cat "$out_seq_nc"
+                echo ""
+                echo "=== Sequential/Cache Output ==="
+                cat "$out_seq_c"
+                echo ""
+                echo "=== Parallel/NoCache Output ==="
+                cat "$out_par_nc"
+                echo ""
+                echo "=== Parallel/Cache Output ==="
+                cat "$out_par_c"
+            } > "$fail_log"
         fi
+        # Clean up temp files after saving to fail log
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
     fi
 }
 

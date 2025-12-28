@@ -7429,6 +7429,17 @@ sub run_job_master {
                     # Mark a file as dirty (out-of-date)
                     my $file = $1;
                     $dirty_files{$file} = 1;
+
+                    # Clear from completed targets and in_progress so it will be rebuilt
+                    # This handles both direct removal (rm command) and FUSE events
+                    delete $completed_targets{$file};
+                    delete $in_progress{$file};
+
+                    # Also try with absolute path in case it was tracked that way
+                    my $abs_path = File::Spec->rel2abs($file);
+                    delete $completed_targets{$abs_path};
+                    delete $in_progress{$abs_path};
+
                     print STDERR "Marked file as dirty: $file\n" if $ENV{SMAK_DEBUG};
 
                 } elsif ($line =~ /^BUILD:(.+)$/) {
@@ -7879,14 +7890,15 @@ sub run_job_master {
                                 print $watch_client "WATCH:$path\n";
                             }
 
-                            # For DELETE or WRITE operations, handle stale targets
-                            if ($op eq 'DELETE' || $op eq 'WRITE') {
+                            # For DELETE, RENAME, or WRITE operations, handle stale targets
+                            if ($op eq 'DELETE' || $op eq 'RENAME' || $op eq 'WRITE') {
                                 # Get basename for matching
                                 my $basename = $path;
                                 $basename =~ s{^.*/}{};  # Get just the filename
 
-                                # Clear the file from completed targets if it was deleted
-                                if ($op eq 'DELETE') {
+                                # Clear the file from completed targets if it was deleted or renamed
+                                # RENAME happens when 'rm' command moves file to .prev backup
+                                if ($op eq 'DELETE' || $op eq 'RENAME') {
                                     delete $completed_targets{$basename};
                                     delete $completed_targets{$path};
                                     delete $in_progress{$basename};

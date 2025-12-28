@@ -36,19 +36,119 @@ my $remote_cd = '';  # Remote directory for SSH workers
 
 # Read ~/.smak.rc if it exists (before any other configuration)
 my $smakrc = $ENV{HOME} ? "$ENV{HOME}/.smak.rc" : '';
+my $reconnect = 0;
+my $kill_old_js = 0;
+
+# Whitelist of allowed variable names for 'set' command
+my %allowed_vars = (
+    jobs => 1,
+    verbose => 1,
+    silent => 1,
+    dry_run => 1,
+    makefile => 1,
+    directory => 1,
+    ssh_host => 1,
+    remote_cd => 1,
+    cli => 1,
+    yes => 1,
+    reconnect => 1,      # Special: reconnect to existing job server
+    kill_old_js => 1,    # Special: kill old job server before reconnecting
+);
+
 if ($smakrc && -f $smakrc) {
     if (open(my $rc_fh, '<', $smakrc)) {
+        my $line_num = 0;
         while (my $line = <$rc_fh>) {
+            $line_num++;
             chomp $line;
             # Skip comments and empty lines
             next if $line =~ /^\s*#/ || $line =~ /^\s*$/;
-            # Execute as Perl code in current package
+
+            # Handle 'set name = value' command
+            if ($line =~ /^\s*set\s+(\w+)\s*=\s*(.+?)\s*$/) {
+                my ($name, $value) = ($1, $2);
+
+                # Check if variable is allowed
+                unless (exists $allowed_vars{$name}) {
+                    warn "~/.smak.rc:$line_num: Unknown variable '$name' (not in whitelist)\n";
+                    next;
+                }
+
+                # Translate to Perl assignment
+                my $perl_code = "\$$name = $value";
+                eval $perl_code;
+                if ($@) {
+                    warn "~/.smak.rc:$line_num: $@";
+                }
+                next;
+            }
+
+            # Otherwise execute as Perl code
             eval $line;
-            warn "~/.smak.rc:$.: $@" if $@;
+            warn "~/.smak.rc:$line_num: $@" if $@;
         }
         close($rc_fh);
     } else {
         warn "Warning: Cannot read $smakrc: $!\n";
+    }
+}
+
+# Handle special reconnect and kill_old_js options
+if ($reconnect || $kill_old_js) {
+    my $connect_file = '.smak.connect';
+
+    if (-l $connect_file || -f $connect_file) {
+        # Read port file
+        if (open(my $port_fh, '<', $connect_file)) {
+            my $observer_port = <$port_fh>;
+            my $master_port = <$port_fh>;
+            close($port_fh);
+
+            if ($observer_port && $master_port) {
+                chomp($observer_port, $master_port);
+
+                # If kill_old_js is set, try to shutdown old server
+                if ($kill_old_js) {
+                    my $shutdown_socket = IO::Socket::INET->new(
+                        PeerHost => '127.0.0.1',
+                        PeerPort => $master_port,
+                        Proto    => 'tcp',
+                        Timeout  => 2,
+                    );
+                    if ($shutdown_socket) {
+                        print $shutdown_socket "SHUTDOWN\n";
+                        my $ack = <$shutdown_socket>;
+                        close($shutdown_socket);
+                        print "Shutdown old job server\n" if $verbose;
+                        # Wait a moment for shutdown to complete
+                        select(undef, undef, undef, 0.5);
+                    }
+                }
+
+                # If reconnect is set, try to connect to existing server
+                if ($reconnect && !$kill_old_js) {
+                    use IO::Socket::INET;
+                    my $test_socket = IO::Socket::INET->new(
+                        PeerHost => '127.0.0.1',
+                        PeerPort => $master_port,
+                        Proto    => 'tcp',
+                        Timeout  => 2,
+                    );
+                    if ($test_socket) {
+                        close($test_socket);
+                        # Set jobs to non-zero to indicate parallel mode
+                        # The actual connection will happen later via start_job_server
+                        $jobs = 1 unless $jobs;
+                        $Smak::job_server_master_port = $master_port;
+                        print "Reconnecting to existing job server (port $master_port)\n" if $verbose;
+                    } else {
+                        warn "Cannot connect to job server at port $master_port (may have already exited)\n";
+                    }
+                }
+            }
+        }
+    } elsif ($reconnect) {
+        warn "Cannot reconnect: .smak.connect not found\n";
     }
 }
 

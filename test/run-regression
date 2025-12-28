@@ -66,8 +66,10 @@ echo "======================================"
 echo "SMAK REGRESSION TEST SUITE"
 echo "======================================"
 echo ""
-echo "Test modes: [Seq/NoCache] [Seq/Cache] [Par/NoCache] [Par/Cache]"
-echo "Results shown as: PPPP (all pass) or PPFP (3rd mode failed), etc."
+echo "Test modes: [Seq/NoCache] [Seq/Cache] [Par/NoCache] [Par/Cache] [Fail-test]"
+echo "Results shown as: PPPPp (all pass + fail test works)"
+echo "              or: PPPPx (all pass, no fail test)"
+echo "              or: PPFPp (3rd mode failed, fail test works), etc."
 echo ""
 
 # Function to run a test script
@@ -279,6 +281,28 @@ WRAPPER_EOF
     else
         result_str="${result_str}F"
         all_passed=0
+    fi
+
+    # Check for -fail test
+    local fail_test="${test_script%.sh}-fail.sh"
+    if [ -f "$fail_test" ] && [ -x "$fail_test" ]; then
+        # Run the fail test (just sequential/no-cache)
+        local fail_output="/tmp/smak-test-${test_name}-fail-$$.log"
+        timeout 30 env SMAK_CACHE_DIR=off ./"$(basename "$fail_test")" >"$fail_output" 2>&1 < /dev/null
+        local fail_result=$?
+
+        # The fail test should fail (non-zero exit code)
+        if [ $fail_result -ne 0 ] && [ $fail_result -ne 124 ]; then
+            result_str="${result_str}p"
+        else
+            # Fail test passed when it should have failed, or timed out
+            result_str="${result_str}F"
+            all_passed=0
+        fi
+        rm -f "$fail_output"
+    else
+        # No fail test exists
+        result_str="${result_str}x"
     fi
 
     # Display result

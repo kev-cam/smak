@@ -5552,12 +5552,12 @@ sub run_job_master {
     # Auto-rescan: Enable by default when FUSE is NOT detected
     # When FUSE is present, it provides file change notifications
     # When FUSE is absent, we need periodic polling to detect changes
-    my $auto_rescan = $has_fuse ? 0 : 1;
+    our $auto_rescan = $has_fuse ? 0 : 1;
 
     # FUSE auto-clear: Enable by default when FUSE is detected
     # When enabled, FUSE events automatically clear failed targets (like rescan -auto)
     # When disabled (unwatch), FUSE events are collected but manual rescan is needed
-    my $fuse_auto_clear = $has_fuse ? 1 : 0;
+    our $fuse_auto_clear = $has_fuse ? 1 : 0;
 
     # Track last FUSE debug message to suppress consecutive duplicates
     my $last_fuse_debug_msg = '';

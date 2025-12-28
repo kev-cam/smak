@@ -5453,7 +5453,7 @@ sub run_job_master {
     }
 
     my $fuse_mountpoint;
-    my $has_fuse = 0;
+    our $has_fuse = 0;
     # Check if FUSE was detected early (before makefile parsing)
     my $fuse_early_detected = $ENV{SMAK_FUSE_DETECTED} || 0;
 

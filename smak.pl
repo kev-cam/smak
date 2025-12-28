@@ -674,6 +674,31 @@ if (!$debug) {
         }
     };
 
+    # Wait for all submitted jobs to complete before shutting down
+    if ($Smak::job_server_socket && keys %Smak::in_progress) {
+        while (keys %Smak::in_progress) {
+            # Read job completion notifications from job server
+            my $response = <$Smak::job_server_socket>;
+            last unless defined $response;
+
+            chomp $response;
+            if ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
+                my ($target, $exit_code) = ($1, $2);
+                delete $Smak::in_progress{$target};
+                if ($exit_code != 0) {
+                    warn "Job failed: $target (exit $exit_code)\n" unless $Smak::silent_mode;
+                }
+            }
+            # Also handle other messages to prevent blocking
+            elsif ($response =~ /^OUTPUT (.*)$/) {
+                print "$1\n" unless $Smak::silent_mode;
+            }
+            elsif ($response =~ /^ERROR (.*)$/) {
+                warn "ERROR: $1\n";
+            }
+        }
+    }
+
     my $sts = wait_for_jobs();
 
     # Check if build failed

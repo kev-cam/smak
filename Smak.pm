@@ -3252,6 +3252,22 @@ sub unified_cli {
 
         # Signal all processes to pick up the new CLI owner
         kill 'WINCH', $server_pid if $server_pid > 0;
+
+        # Auto-enable watch mode if FUSE is detected
+        if ($ENV{SMAK_FUSE_DETECTED}) {
+            print $socket "WATCH_START\n";
+            $socket->flush();
+            my $response = <$socket>;
+            if ($response) {
+                chomp $response;
+                if ($response eq 'WATCH_STARTED') {
+                    $watch_enabled = 1;
+                    print "Watch mode enabled (FUSE file change notifications active)\n";
+                } elsif ($response =~ /^WATCH_UNAVAILABLE/) {
+                    print STDERR "Warning: FUSE detected but watch mode unavailable\n" if $ENV{SMAK_DEBUG};
+                }
+            }
+        }
     }
 
     # Helper: check for asynchronous notifications and job output
@@ -5251,6 +5267,10 @@ sub run_job_master {
     use POSIX qw(:sys_wait_h);
     use Cwd 'abs_path';
 
+    # Job-master should ignore SIGINT (Ctrl-C)
+    # The CLI process handles cancellation - job-master should keep running
+    $SIG{INT} = 'IGNORE';
+
     # Job-master has access to all parsed Makefile data:
     # Bring package-level variables into scope
     our %fixed_deps;
@@ -5752,9 +5772,14 @@ sub run_job_master {
         # First quick check
         return 1 if -e $target_path;
 
+        # FUSE filesystems may have significant caching delays
+        # Use longer retries and delays for FUSE
+        my $max_attempts = $has_fuse ? 10 : 3;
+        my $delay_multiplier = $has_fuse ? 0.05 : 0.01;  # 50ms vs 10ms per attempt
+
         # If not found, try syncing the directory and retry
         # This handles cases where the file is buffered but not yet visible
-        for my $attempt (1..3) {
+        for my $attempt (1..$max_attempts) {
             # Sync the directory to flush filesystem buffers
             if ($dir && -d $dir) {
                 # Open and sync the directory
@@ -5765,12 +5790,14 @@ sub run_job_master {
                 }
             }
 
-            # Small delay to allow filesystem to catch up
-            select(undef, undef, undef, 0.01 * $attempt);  # 10ms, 20ms, 30ms
+            # Delay to allow filesystem to catch up
+            # FUSE: 50ms, 100ms, 150ms, ... up to 500ms (total 2.75s)
+            # Local: 10ms, 20ms, 30ms (total 60ms)
+            select(undef, undef, undef, $delay_multiplier * $attempt);
 
             return 1 if -e $target_path;
 
-            vprint "Warning: Target '$target' not found at '$target_path', retry $attempt/3\n";
+            vprint "Warning: Target '$target' not found at '$target_path', retry $attempt/$max_attempts\n";
         }
 
         # Final check
@@ -7402,6 +7429,17 @@ sub run_job_master {
                     # Mark a file as dirty (out-of-date)
                     my $file = $1;
                     $dirty_files{$file} = 1;
+
+                    # Clear from completed targets and in_progress so it will be rebuilt
+                    # This handles both direct removal (rm command) and FUSE events
+                    delete $completed_targets{$file};
+                    delete $in_progress{$file};
+
+                    # Also try with absolute path in case it was tracked that way
+                    my $abs_path = File::Spec->rel2abs($file);
+                    delete $completed_targets{$abs_path};
+                    delete $in_progress{$abs_path};
+
                     print STDERR "Marked file as dirty: $file\n" if $ENV{SMAK_DEBUG};
 
                 } elsif ($line =~ /^BUILD:(.+)$/) {
@@ -7852,14 +7890,15 @@ sub run_job_master {
                                 print $watch_client "WATCH:$path\n";
                             }
 
-                            # For DELETE or WRITE operations, handle stale targets
-                            if ($op eq 'DELETE' || $op eq 'WRITE') {
+                            # For DELETE, RENAME, or WRITE operations, handle stale targets
+                            if ($op eq 'DELETE' || $op eq 'RENAME' || $op eq 'WRITE') {
                                 # Get basename for matching
                                 my $basename = $path;
                                 $basename =~ s{^.*/}{};  # Get just the filename
 
-                                # Clear the file from completed targets if it was deleted
-                                if ($op eq 'DELETE') {
+                                # Clear the file from completed targets if it was deleted or renamed
+                                # RENAME happens when 'rm' command moves file to .prev backup
+                                if ($op eq 'DELETE' || $op eq 'RENAME') {
                                     delete $completed_targets{$basename};
                                     delete $completed_targets{$path};
                                     delete $in_progress{$basename};
@@ -7889,6 +7928,17 @@ sub run_job_master {
                                                 delete $failed_targets{$target};
                                                 print STDERR "FUSE: Cleared failed composite target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
                                             }
+                                        }
+                                    }
+
+                                    # Clear completed targets that now need rebuilding due to this file change
+                                    # This handles cases like: main.o deleted -> ivl needs rebuilding
+                                    for my $target (keys %completed_targets) {
+                                        # Check if target needs rebuilding (considers all dependencies recursively)
+                                        if (needs_rebuild($target)) {
+                                            delete $completed_targets{$target};
+                                            delete $in_progress{$target};
+                                            print STDERR "FUSE: Cleared completed target '$target' (affected by $op on '$path')\n" if $ENV{SMAK_DEBUG};
                                         }
                                     }
                                 }

@@ -6463,9 +6463,17 @@ sub run_job_master {
                             }
                         }
 
-                        print STDERR "DEBUG dispatch:   Checking dep '$single_dep' for target '$target'\n" if $ENV{SMAK_DEBUG};
-                        print STDERR "DEBUG dispatch:     completed_targets: " . (exists $completed_targets{$single_dep} ? "YES" : "NO") . "\n" if $ENV{SMAK_DEBUG};
-                        print STDERR "DEBUG dispatch:     in_progress: " . (exists $in_progress{$single_dep} ? $in_progress{$single_dep} : "NO") . "\n" if $ENV{SMAK_DEBUG};
+                        # Only print debug for non-trivial cases (skip satisfied dependencies to reduce noise)
+                        my $is_satisfied = exists $completed_targets{$single_dep} &&
+                                          (!exists $in_progress{$single_dep} ||
+                                           $in_progress{$single_dep} eq 'done' ||
+                                           !$in_progress{$single_dep});
+
+                        if (!$is_satisfied && $ENV{SMAK_DEBUG}) {
+                            print STDERR "DEBUG dispatch:   Checking dep '$single_dep' for target '$target'\n";
+                            print STDERR "DEBUG dispatch:     completed_targets: " . (exists $completed_targets{$single_dep} ? "YES" : "NO") . "\n";
+                            print STDERR "DEBUG dispatch:     in_progress: " . (exists $in_progress{$single_dep} ? $in_progress{$single_dep} : "NO") . "\n";
+                        }
 
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering

@@ -7257,7 +7257,8 @@ sub run_job_master {
                             }
                         }
                     }
-                    print $master_socket "Added $count worker(s), total is ".1+$#workers.". Workers will connect asynchronously.\n";
+		    my $w = 1 + $#workers;
+                    print $master_socket "Added $count worker(s), total is $w. Workers will connect asynchronously.\n";
 
                 } elsif ($line =~ /^REMOVE_WORKER (\d+)$/) {
                     my $count = $1;

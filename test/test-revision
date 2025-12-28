@@ -5,7 +5,10 @@
 
 set -e
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+cd "$REPO_ROOT"
 
 # If a commit hash is provided, use it
 if [ -n "$1" ]; then
@@ -30,25 +33,24 @@ if ! git rev-parse "$COMMIT" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Get current branch and commit for restoration
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-CURRENT_COMMIT=$(git rev-parse HEAD)
+# Get commit short hash for directory name
+COMMIT_SHORT=$(git rev-parse --short "$COMMIT")
+TAG=$(date +%Y%m%d-%H%M%S)
+TEST_DIR="/tmp/smak/test-${TAG}-${COMMIT_SHORT}"
 
 echo ""
 echo "Testing commit: $(git log -1 --oneline "$COMMIT")"
-echo "Current state will be saved for restoration"
+echo "Test directory: $TEST_DIR"
 echo ""
 
-# Stash any uncommitted changes
-STASHED=0
-if ! git diff-index --quiet HEAD --; then
-    echo "Stashing uncommitted changes..."
-    git stash push -m "test-revision auto-stash $(date +%Y%m%d-%H%M%S)"
-    STASHED=1
-fi
+# Create test directory and clone
+echo "Cloning repository to test directory..."
+mkdir -p "$TEST_DIR"
+git clone -q "$REPO_ROOT" "$TEST_DIR"
 
-# Checkout the target commit
-echo "Checking out $COMMIT..."
+# Checkout the target commit in the cloned directory
+echo "Checking out $COMMIT in clone..."
+cd "$TEST_DIR"
 git checkout -q "$COMMIT"
 
 # Run tests
@@ -64,18 +66,6 @@ else
     TEST_EXIT=1
 fi
 
-cd ..
-
-# Restore original state
-echo ""
-echo "Restoring original state..."
-git checkout -q "$CURRENT_BRANCH"
-
-if [ $STASHED -eq 1 ]; then
-    echo "Restoring stashed changes..."
-    git stash pop -q
-fi
-
 # Print summary
 echo ""
 echo "============================"
@@ -83,6 +73,9 @@ echo "Test Summary"
 echo "============================"
 echo "Commit:  $(git log -1 --oneline "$COMMIT")"
 echo "Result:  $TEST_RESULT"
+echo ""
+echo "Test directory preserved at: $TEST_DIR"
+echo "============================"
 echo ""
 
 exit $TEST_EXIT

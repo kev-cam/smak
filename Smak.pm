@@ -5334,11 +5334,19 @@ sub run_job_master {
 
     # Write ports to file for smak-attach to find
     my $port_dir = get_port_file_dir();
-    open(my $port_fh, '>', "$port_dir/smak-jobserver-$$.port") or warn "Cannot write port file: $!\n";
+    my $port_file = "$port_dir/smak-jobserver-$$.port";
+    open(my $port_fh, '>', $port_file) or warn "Cannot write port file: $!\n";
     if ($port_fh) {
         print $port_fh "$observer_port\n";
         print $port_fh "$master_port\n";
         close($port_fh);
+
+        # Create symlink in current directory for easy access
+        my $local_link = ".smak.connect";
+        unlink($local_link) if -l $local_link;  # Remove old symlink if exists
+        if (!symlink($port_file, $local_link)) {
+            warn "Warning: Cannot create symlink $local_link: $!\n" if $ENV{SMAK_DEBUG};
+        }
     }
 
     our @observers;  # List of connected observers
@@ -6686,6 +6694,12 @@ sub run_job_master {
         # (In interactive mode, stay running even when idle)
         if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0 && !defined($master_socket)) {
             vprint "All jobs complete and master disconnected. Job-master exiting.\n";
+
+            # Cleanup: remove symlink and port file
+            my $local_link = ".smak.connect";
+            unlink($local_link) if -l $local_link;
+            unlink($port_file) if -f $port_file;
+
             last;
         }
 

@@ -34,6 +34,24 @@ my $directory = '';  # Directory to change to before running (-C option)
 my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
 my $remote_cd = '';  # Remote directory for SSH workers
 
+# Read ~/.smak.rc if it exists (before any other configuration)
+my $smakrc = $ENV{HOME} ? "$ENV{HOME}/.smak.rc" : '';
+if ($smakrc && -f $smakrc) {
+    if (open(my $rc_fh, '<', $smakrc)) {
+        while (my $line = <$rc_fh>) {
+            chomp $line;
+            # Skip comments and empty lines
+            next if $line =~ /^\s*#/ || $line =~ /^\s*$/;
+            # Execute as Perl code in current package
+            eval $line;
+            warn "~/.smak.rc:$.: $@" if $@;
+        }
+        close($rc_fh);
+    } else {
+        warn "Warning: Cannot read $smakrc: $!\n";
+    }
+}
+
 # Detect recursive invocation early to prevent USR_SMAK_OPT from enabling parallel builds
 my $is_recursive = 0;
 if (defined $ENV{SMAK_RECURSION_LEVEL}) {

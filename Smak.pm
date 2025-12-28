@@ -4274,7 +4274,18 @@ sub cmd_rescan {
         chomp $response if $response;
         print "$response\n" if $response;
     } else {
-        print "Job server not running. Rescan requires active job server.\n";
+        # Job server not running
+        if ($auto || $noauto) {
+            # Auto-rescan flags will be applied when job server starts
+            # Check if FUSE is detected to provide helpful feedback
+            if ($ENV{SMAK_FUSE_DETECTED} && $auto) {
+                print "Note: Auto-rescan is disabled on FUSE filesystems (use 'unwatch' then 'rescan -auto' if needed)\n";
+            }
+            # Otherwise silently ignore (will be set correctly when job server starts)
+        } else {
+            # Basic rescan - just note that job server is needed for full functionality
+            print "Job server not running. Start with -j option for full rescan functionality.\n";
+        }
     }
 }
 
@@ -5423,11 +5434,17 @@ sub run_job_master {
 
     my $fuse_mountpoint;
     my $has_fuse = 0;
+    # Check if FUSE was detected early (before makefile parsing)
+    my $fuse_early_detected = $ENV{SMAK_FUSE_DETECTED} || 0;
+
     if (my ($mountpoint, $fuse_port) = detect_fuse_monitor()) {
         $fuse_mountpoint = $mountpoint;
         $has_fuse = 1;
         print STDERR "Detected FUSE filesystem at $mountpoint, port $fuse_port\n" if $ENV{SMAK_DEBUG};
-        print STDERR "Auto-rescan disabled (FUSE provides file notifications). Use 'rescan -auto' to enable if needed.\n";
+        unless ($fuse_early_detected) {
+            # Only print this if we didn't already detect FUSE early
+            print STDERR "Auto-rescan disabled (FUSE provides file notifications). Use 'rescan -auto' to enable if needed.\n";
+        }
         # Connect to FUSE monitor
         $fuse_socket = IO::Socket::INET->new(
             PeerHost => '127.0.0.1',

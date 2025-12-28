@@ -521,6 +521,18 @@ if ($verbose || $ENV{SMAK_DEBUG}) {
 $Smak::ssh_host = $ssh_host if $ssh_host;
 $Smak::remote_cd = $remote_cd if $remote_cd;
 
+# Detect FUSE filesystem early (before makefile parsing and Makefile.smak execution)
+# This allows Makefile.smak to make decisions based on FUSE status (e.g., auto-rescan)
+my $fuse_detected = 0;
+my ($fuse_server, $fuse_path) = Smak::get_fuse_remote_info('.');
+if (defined $fuse_server) {
+    $fuse_detected = 1;
+    $ENV{SMAK_FUSE_DETECTED} = 1;
+    $ENV{SMAK_FUSE_SERVER} = $fuse_server;
+    $ENV{SMAK_FUSE_PATH} = $fuse_path;
+    print "Detected FUSE filesystem: $fuse_server at $fuse_path\n" unless $silent;
+}
+
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it
 parse_makefile($makefile);

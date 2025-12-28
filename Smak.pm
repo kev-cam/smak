@@ -3252,6 +3252,22 @@ sub unified_cli {
 
         # Signal all processes to pick up the new CLI owner
         kill 'WINCH', $server_pid if $server_pid > 0;
+
+        # Auto-enable watch mode if FUSE is detected
+        if ($ENV{SMAK_FUSE_DETECTED}) {
+            print $socket "WATCH_START\n";
+            $socket->flush();
+            my $response = <$socket>;
+            if ($response) {
+                chomp $response;
+                if ($response eq 'WATCH_STARTED') {
+                    $watch_enabled = 1;
+                    print "Watch mode enabled (FUSE file change notifications active)\n";
+                } elsif ($response =~ /^WATCH_UNAVAILABLE/) {
+                    print STDERR "Warning: FUSE detected but watch mode unavailable\n" if $ENV{SMAK_DEBUG};
+                }
+            }
+        }
     }
 
     # Helper: check for asynchronous notifications and job output

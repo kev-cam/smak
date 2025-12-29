@@ -1291,9 +1291,26 @@ sub parse_included_makefile {
     my @current_targets;  # Array to handle multiple targets
     my $current_rule = '';
     my $current_type;
+    my @current_deps;  # Track current dependencies for multi-output detection
 
     my $save_current_rule = sub {
         return unless @current_targets;
+
+        # Detect multi-output pattern rules (same as in main parse_makefile)
+        my @pattern_targets = grep { classify_target($_) eq 'pattern' } @current_targets;
+        if (@pattern_targets > 1) {
+            my $prereqs_key = join(',', @current_deps);
+            my $group_key = "$saved_makefile\t$prereqs_key\t$current_rule";
+
+            $multi_output_groups{$group_key} = [@pattern_targets];
+
+            for my $target (@pattern_targets) {
+                my $target_key = "$saved_makefile\t$target";
+                $multi_output_siblings{$target_key} = [@pattern_targets];
+            }
+
+            warn "DEBUG: Multi-output pattern rule in included file: @pattern_targets\n" if $ENV{SMAK_DEBUG};
+        }
 
         # Save rule for all targets in the current rule
         for my $target (@current_targets) {
@@ -1423,6 +1440,7 @@ sub parse_included_makefile {
             @targets = grep { $_ ne '' } @targets;
 
             @current_targets = @targets;
+            @current_deps = @deps;  # Store dependencies for multi-output detection
             $current_type = classify_target($current_targets[0]) if @current_targets;
             $current_rule = '';
 

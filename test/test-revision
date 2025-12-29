@@ -11,14 +11,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 # Default options
-NUM_COMMITS=9999
+UNTIL_COMMIT=""
 RUN_TESTS=1
 
 # Parse options
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -n|--num)
-            NUM_COMMITS="$2"
+        -until|--until)
+            UNTIL_COMMIT="$2"
             shift 2
             ;;
         -notest|--no-test)
@@ -32,17 +32,17 @@ Usage: ./test-revision [options] [commit-hash]
 Test a specific git revision in a clean cloned environment.
 
 Options:
-  -n, --num <number>    Number of commits to show in log (default: 9999 = all)
+  -until <commit>       List commits from HEAD down to (and including) this commit
   -notest, --no-test    Skip running regression tests (just clone and shell)
   -h, --help            Show this help
 
-If no commit hash is provided, shows all commits with date/time and prompts for selection.
+If no commit hash is provided, shows commits with date/time and prompts for selection.
 
 Examples:
-  ./test-revision                    # Interactive selection from all commits
-  ./test-revision -n 50              # Show last 50 commits for selection
-  ./test-revision abc123             # Test specific commit
-  ./test-revision -notest abc123     # Clone commit, drop to shell, skip tests
+  ./test-revision                      # Interactive selection from all commits
+  ./test-revision -until e1d9c5d       # Show commits from HEAD to e1d9c5d (inclusive)
+  ./test-revision abc123               # Test specific commit
+  ./test-revision -notest abc123       # Clone commit, drop to shell, skip tests
 EOF
             exit 0
             ;;
@@ -64,7 +64,21 @@ if [ -z "$COMMIT" ]; then
     # Show recent commits and let user pick
     echo "Recent commits on current branch:"
     echo "=================================="
-    git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS} | nl -w3 -s'. '
+
+    # Build git log command based on options
+    if [ -n "$UNTIL_COMMIT" ]; then
+        # Validate until commit exists
+        if ! git rev-parse "$UNTIL_COMMIT" >/dev/null 2>&1; then
+            echo "Error: Invalid commit '$UNTIL_COMMIT' for -until option"
+            exit 1
+        fi
+        # Show commits from UNTIL_COMMIT (inclusive) to HEAD
+        git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' ${UNTIL_COMMIT}^..HEAD | nl -w3 -s'. '
+    else
+        # Show all commits
+        git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' | nl -w3 -s'. '
+    fi
+
     echo ""
     echo -n "Enter commit hash (or press Enter for HEAD): "
     read COMMIT

@@ -64,7 +64,7 @@ if [ -z "$COMMIT" ]; then
     # Show recent commits and let user pick
     echo "Recent commits on current branch:"
     echo "=================================="
-    git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS}
+    git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS} | nl -w3 -s'. '
     echo ""
     echo -n "Enter commit hash (or press Enter for HEAD): "
     read COMMIT

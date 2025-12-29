@@ -579,6 +579,10 @@ if [ $SANITY_MODE -eq 1 ]; then
 else
     # Normal mode: run all tests
     for test in test_*.sh; do
+        # Skip -fail.sh tests (they're run as variants of the main test)
+        if [[ "$test" == *"-fail.sh" ]]; then
+            continue
+        fi
         if [ -f "$test" ]; then
             run_test "$test"
         fi

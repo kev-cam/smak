@@ -228,6 +228,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
 }
 
 # Parse command-line options (override environment)
+my $scanner_paths;
 GetOptions(
     'f|file|makefile=s' => \$makefile,
     'C|directory=s' => \$directory,
@@ -244,6 +245,7 @@ GetOptions(
     'ssh=s' => \$ssh_host,
     'cd=s' => \$remote_cd,
     'norc' => \$norc,
+    'scanner=s' => \$scanner_paths,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -448,6 +450,7 @@ Options:
   -Kd, -Kdebug                Enter interactive debug mode
   -Ks, -Kscript FILE          Load and execute smak commands from FILE
   -Kreport                    Create verbose build log and run make-cmp
+  -scanner PATH[,PATH...]     Run as standalone file watcher (outputs CREATE/MODIFY/DELETE events)
 
 Environment Variables:
   USR_SMAK_OPT                Options to prepend (e.g., "USR_SMAK_OPT=-Kd")
@@ -805,6 +808,13 @@ if ($cli) {
     if ($own_server && "stop" eq $result) {
         stop_job_server();
     }
+    exit 0;
+}
+
+# If scanner mode, run standalone file watcher
+if (defined $scanner_paths) {
+    my @paths = split(/,/, $scanner_paths);
+    Smak::run_standalone_scanner(@paths);
     exit 0;
 }
 

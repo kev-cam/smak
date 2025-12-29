@@ -4923,6 +4923,61 @@ sub auto_rescan_watcher {
     }
 }
 
+sub run_standalone_scanner {
+    my (@watch_paths) = @_;
+
+    # Validate paths
+    for my $path (@watch_paths) {
+        if (! -e $path) {
+            warn "Warning: Path does not exist: $path\n";
+        }
+    }
+
+    # Track file mtimes
+    my %last_mtimes;
+
+    # Initialize mtimes for existing files
+    for my $path (@watch_paths) {
+        if (-e $path) {
+            $last_mtimes{$path} = (stat($path))[9];
+        }
+    }
+
+    # Output format matches FUSE monitor: OP:PID:PATH
+    my $pid = $$;
+
+    # Main scanner loop (runs until interrupted)
+    while (1) {
+        for my $path (@watch_paths) {
+            if (!-e $path) {
+                # File was deleted
+                if (exists $last_mtimes{$path}) {
+                    print "DELETE:$pid:$path\n";
+                    STDOUT->flush();
+                    delete $last_mtimes{$path};
+                }
+            } else {
+                # File exists - check if modified
+                my $current_mtime = (stat($path))[9];
+                if (!exists $last_mtimes{$path}) {
+                    # Newly appeared
+                    $last_mtimes{$path} = $current_mtime;
+                    print "CREATE:$pid:$path\n";
+                    STDOUT->flush();
+                } elsif ($current_mtime != $last_mtimes{$path}) {
+                    # Modified
+                    $last_mtimes{$path} = $current_mtime;
+                    print "MODIFY:$pid:$path\n";
+                    STDOUT->flush();
+                }
+            }
+        }
+
+        # Sleep 1 second between scans (low CPU usage)
+        sleep 1;
+    }
+}
+
 sub interactive_debug {
     my ($OUT,$input) = @_ ;
     my $term = Term::ReadLine->new('smak');

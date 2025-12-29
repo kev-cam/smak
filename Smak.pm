@@ -4841,6 +4841,88 @@ sub perform_auto_rescan {
     return $stale_count;
 }
 
+sub auto_rescan_watcher {
+    my ($socket, $makefile_ref) = @_;
+
+    # Run at lower priority to avoid interfering with builds
+    eval { setpriority(0, 0, 10); };  # Nice +10 (lower priority)
+
+    # Track file mtimes
+    my %last_mtimes;
+    my %watched_targets;  # Targets we're actively watching
+
+    # Get initial list of targets from makefile
+    our %fixed_rule;
+    our %is_phony;
+
+    # Populate initial watch list with non-phony file targets
+    for my $key (keys %fixed_rule) {
+        my ($mf, $target) = split(/\t/, $key, 2);
+        next unless $target;
+        next if exists $is_phony{$target};
+        next if $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/;
+
+        if (-e $target) {
+            $watched_targets{$target} = 1;
+            $last_mtimes{$target} = (stat($target))[9];
+        }
+    }
+
+    $socket->autoflush(1);
+
+    # Main watcher loop
+    while (1) {
+        # Check for commands from parent (non-blocking)
+        $socket->blocking(0);
+        while (my $cmd = <$socket>) {
+            chomp $cmd;
+
+            if ($cmd eq 'SHUTDOWN') {
+                exit 0;
+            } elsif ($cmd =~ /^WATCH:(.+)$/) {
+                my $target = $1;
+                $watched_targets{$target} = 1;
+                if (-e $target) {
+                    $last_mtimes{$target} = (stat($target))[9];
+                }
+            } elsif ($cmd =~ /^UNWATCH:(.+)$/) {
+                my $target = $1;
+                delete $watched_targets{$target};
+                delete $last_mtimes{$target};
+            }
+        }
+
+        # Scan watched targets for changes
+        for my $target (keys %watched_targets) {
+            if (!-e $target) {
+                # File was deleted
+                if (exists $last_mtimes{$target}) {
+                    $socket->blocking(1);
+                    print $socket "DELETE:$$:$target\n";
+                    delete $last_mtimes{$target};
+                }
+            } else {
+                # File exists - check if modified
+                my $current_mtime = (stat($target))[9];
+                if (!exists $last_mtimes{$target}) {
+                    # Newly appeared
+                    $last_mtimes{$target} = $current_mtime;
+                    $socket->blocking(1);
+                    print $socket "CREATE:$$:$target\n";
+                } elsif ($current_mtime != $last_mtimes{$target}) {
+                    # Modified
+                    $last_mtimes{$target} = $current_mtime;
+                    $socket->blocking(1);
+                    print $socket "MODIFY:$$:$target\n";
+                }
+            }
+        }
+
+        # Sleep ~1 second between scans (low CPU usage)
+        sleep 1;
+    }
+}
+
 sub interactive_debug {
     my ($OUT,$input) = @_ ;
     my $term = Term::ReadLine->new('smak');
@@ -4853,10 +4935,10 @@ sub interactive_debug {
     # Set interactive flag so Ctrl-C doesn't exit
     local $interactive = 1;
 
-    # Auto-rescan state (without job server)
+    # Auto-rescan state
     my $auto_rescan_enabled = 0;
-    my $last_rescan_time = 0;
-    my %last_file_mtimes;  # Track file modification times
+    my $watcher_pid;
+    my $watcher_socket;
 
     # Declare package variables used in CLI commands
     our %rules;
@@ -4867,35 +4949,56 @@ sub interactive_debug {
 
     while (1) {
         if (!$have_input) {
-            # Use select() with timeout to allow periodic auto-rescan checks
+            # Use select() with timeout to allow periodic checks
             my $rin = '';
             vec($rin, fileno(STDIN), 1) = 1;
-            my $timeout = $auto_rescan_enabled ? 2.0 : 60.0;  # 2s for auto-rescan, 60s otherwise
+
+            # Add watcher socket to select if auto-rescan is enabled
+            if ($watcher_socket) {
+                vec($rin, fileno($watcher_socket), 1) = 1;
+            }
+
+            my $timeout = 60.0;  # 60s timeout (watcher handles auto-rescan timing)
             my $nfound = select(my $rout = $rin, undef, undef, $timeout);
 
             if ($nfound > 0) {
-                # Input available - read it directly from STDIN to avoid readline blocking
-                print $OUT $prompt if $echo;
-                $input = <STDIN>;
-                unless (defined $input) {
-                    # EOF (Ctrl-D) or Ctrl-C
-                    if ($SmakCli::cancel_requested) {
-                        $SmakCli::cancel_requested = 0;  # Clear the flag
-                        next;  # Return to prompt, don't exit
+                # Check if watcher has events
+                if ($watcher_socket && vec($rout, fileno($watcher_socket), 1)) {
+                    # Process watcher events
+                    $watcher_socket->blocking(0);
+                    while (my $event = <$watcher_socket>) {
+                        chomp $event;
+
+                        # Parse event: "OP:PID:PATH"
+                        if ($event =~ /^(\w+):\d+:(.+)$/) {
+                            my ($op, $path) = ($1, $2);
+
+                            if ($op eq 'DELETE' || $op eq 'MODIFY') {
+                                # Mark target as stale
+                                $stale_targets_cache{$path} = time();
+                                print $OUT "[auto-rescan] $path $op detected\n";
+                            }
+                        }
                     }
-                    last;  # Ctrl-D or other termination
+                }
+
+                # Check if STDIN has input
+                if (vec($rout, fileno(STDIN), 1)) {
+                    # Input available - read it directly from STDIN
+                    print $OUT $prompt if $echo;
+                    $input = <STDIN>;
+                    unless (defined $input) {
+                        # EOF (Ctrl-D) or Ctrl-C
+                        if ($SmakCli::cancel_requested) {
+                            $SmakCli::cancel_requested = 0;  # Clear the flag
+                            next;  # Return to prompt, don't exit
+                        }
+                        last;  # Ctrl-D or other termination
+                    }
                 }
             } elsif ($nfound == 0) {
-                # Timeout - check for auto-rescan
-                if ($auto_rescan_enabled && time() - $last_rescan_time >= 2) {
-                    $last_rescan_time = time();
-                    # Perform quick rescan check
-                    my $stale_count = perform_auto_rescan(\%last_file_mtimes, $OUT);
-                    if ($stale_count > 0) {
-                        print $OUT "[auto-rescan] Found $stale_count stale target(s)\n";
-                    }
-                }
-                next;  # Continue loop to wait for more input
+                # Timeout - no activity
+                next;  # Continue loop
             } else {
                 # Error in select
                 last;
@@ -5061,21 +5164,55 @@ HELP
             my $arg = @parts > 0 ? $parts[0] : '';
 
             if ($arg eq '-auto') {
-                $auto_rescan_enabled = 1;
-                $last_rescan_time = time();
-                # Initialize file mtimes for tracking
-                %last_file_mtimes = ();
-                my $stale_count = perform_auto_rescan(\%last_file_mtimes, $OUT);
-                print $OUT "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+                # Enable auto-rescan with background watcher
+                if (!$watcher_pid) {
+                    # Create socketpair for bidirectional communication
+                    use Socket;
+                    socketpair(my $parent_sock, my $child_sock, AF_UNIX, SOCK_STREAM, PF_UNSPEC)
+                        or die "socketpair failed: $!";
+
+                    $parent_sock->autoflush(1);
+                    $child_sock->autoflush(1);
+
+                    $watcher_pid = fork();
+                    die "fork failed: $!" unless defined $watcher_pid;
+
+                    if ($watcher_pid == 0) {
+                        # Child process - run watcher
+                        close($parent_sock);
+                        auto_rescan_watcher($child_sock, \$makefile);
+                        exit 0;  # Should never reach here
+                    } else {
+                        # Parent process - keep parent socket
+                        close($child_sock);
+                        $watcher_socket = $parent_sock;
+                        $auto_rescan_enabled = 1;
+                        print $OUT "Auto-rescan enabled (background watcher PID $watcher_pid)\n";
+                    }
+                } else {
+                    print $OUT "Auto-rescan already enabled (PID $watcher_pid)\n";
+                }
+
             } elsif ($arg eq '-noauto') {
+                # Disable auto-rescan and shutdown watcher
+                if ($watcher_pid) {
+                    print $watcher_socket "SHUTDOWN\n" if $watcher_socket;
+                    waitpid($watcher_pid, 0);
+                    close($watcher_socket) if $watcher_socket;
+                    $watcher_pid = undef;
+                    $watcher_socket = undef;
+                }
                 $auto_rescan_enabled = 0;
                 print $OUT "Auto-rescan disabled.\n";
+
             } else {
                 # One-time rescan
                 if ($job_server_socket) {
                     cmd_rescan(\@parts, $job_server_socket);
                 } else {
-                    my $stale_count = perform_auto_rescan(\%last_file_mtimes, $OUT);
+                    # Perform immediate scan
+                    my %temp_mtimes;
+                    my $stale_count = perform_auto_rescan(\%temp_mtimes, $OUT);
                     print $OUT "Rescan complete. Marked $stale_count target(s) as stale.\n";
                 }
             }
@@ -5309,6 +5446,13 @@ HELP
         }
 
 	last if $exit_after_one;
+    }
+
+    # Cleanup: shutdown watcher process if running
+    if ($watcher_pid) {
+        print $watcher_socket "SHUTDOWN\n" if $watcher_socket;
+        waitpid($watcher_pid, 0);
+        close($watcher_socket) if $watcher_socket;
     }
 }
 

@@ -419,12 +419,13 @@ sub execute_command_sequential {
 
     for my $part (@command_parts) {
         $part =~ s/^\s+|\s+$//g;  # Trim whitespace
+        $part =~ s/^[@-]+//;      # Strip @ (silent) and - (ignore errors) prefixes
         # Match: smak -C <dir> <target> or make -C <dir> <target>
         # Also handle trailing " true" or similar
         if ($part =~ m{^(?:(?:/[\w/.-]+/)?(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
             push @recursive_calls, { dir => $1, target => $2 };
-        } elsif ($part eq 'true' || $part eq ':') {
-            # Ignore these no-op commands
+        } elsif ($part eq 'true' || $part eq ':' || $part eq '') {
+            # Ignore these no-op commands and empty parts
             next;
         } else {
             $all_recursive = 0;

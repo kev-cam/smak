@@ -20,3 +20,4 @@ test/test_auto.c
 # Cloned test repositories
 iverilog/
 test/.smak.connect
+test/Makefile.autorescan-fail

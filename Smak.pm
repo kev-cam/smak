@@ -89,6 +89,17 @@ our %pattern_deps;
 our %pseudo_rule;
 our %pseudo_deps;
 
+# Track multi-output pattern rules (e.g., parse%cc parse%h: parse%y)
+# Maps a canonical rule key to array of all target patterns in the group
+# Key format: "makefile\tprereqs\tcommand"
+# Value: ["target1", "target2", ...]
+our %multi_output_groups;
+
+# Reverse mapping: target pattern -> all patterns in its group
+# Key format: "makefile\ttarget_pattern"
+# Value: ["target1", "target2", ...] (all targets including this one)
+our %multi_output_siblings;
+
 # VPATH search directories: pattern => [directories]
 our %vpath;
 
@@ -943,9 +954,32 @@ sub parse_makefile {
     my @current_targets;  # Array to handle multiple targets (e.g., "target1 target2:")
     my $current_rule = '';
     my $current_type;  # 'fixed', 'pattern', or 'pseudo'
+    my @current_deps;  # Track current dependencies for multi-output detection
 
     my $save_current_rule = sub {
         return unless @current_targets;
+
+        # Detect multi-output pattern rules
+        # If we have multiple pattern targets with the same prerequisites and command,
+        # they form a multi-output group (e.g., parse%cc parse%h: parse%y)
+        my @pattern_targets = grep { classify_target($_) eq 'pattern' } @current_targets;
+        if (@pattern_targets > 1) {
+            # Get current prerequisites
+            # We'll create a group key based on the makefile and prerequisites
+            my $prereqs_key = join(',', @current_deps);
+            my $group_key = "$makefile\t$prereqs_key\t$current_rule";
+
+            # Store all targets in this group
+            $multi_output_groups{$group_key} = [@pattern_targets];
+
+            # Create reverse mapping: each target -> all siblings
+            for my $target (@pattern_targets) {
+                my $target_key = "$makefile\t$target";
+                $multi_output_siblings{$target_key} = [@pattern_targets];
+            }
+
+            warn "DEBUG: Multi-output pattern rule: @pattern_targets\n" if $ENV{SMAK_DEBUG};
+        }
 
         # Save rule for all targets in the current rule
         for my $target (@current_targets) {
@@ -975,6 +1009,7 @@ sub parse_makefile {
         }
 
         @current_targets = ();
+        @current_deps = ();
         $current_rule = '';
         $current_type = undef;
     };
@@ -1126,6 +1161,7 @@ sub parse_makefile {
 
             # Store all targets for rule accumulation
             @current_targets = @targets;
+            @current_deps = @deps;  # Store dependencies for multi-output detection
             $current_type = classify_target($current_targets[0]) if @current_targets;
             $current_rule = '';
 
@@ -1274,6 +1310,7 @@ sub parse_included_makefile {
         }
 
         @current_targets = ();
+        @current_deps = ();
         $current_rule = '';
         $current_type = undef;
     };
@@ -5949,6 +5986,9 @@ sub run_job_master {
             $rule = $pseudo_rule{$key} || '';
         }
 
+        # Track which pattern rule matched (for multi-output detection)
+        my $matched_pattern_key;
+
         # If we have fixed deps but no rule, try to find a matching pattern rule
         if ($has_fixed_deps && !($rule && $rule =~ /\S/)) {
             print STDERR "Target '$target' in fixed_deps but no rule, checking for pattern rules\n" if $ENV{SMAK_DEBUG};
@@ -5961,6 +6001,7 @@ sub run_job_master {
                         # Found matching pattern rule - use its rule, keep fixed deps
                         $rule = $pattern_rule{$pkey} || '';
                         $stem = $1;  # Save stem for $* expansion
+                        $matched_pattern_key = $pkey;  # Save for multi-output detection
                         print STDERR "Found pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
                         last;
                     }
@@ -5980,6 +6021,7 @@ sub run_job_master {
                         $rule = $pattern_rule{$pkey} || '';
                         # Expand % in dependencies
                         $stem = $1;  # Save stem for $* expansion
+                        $matched_pattern_key = $pkey;  # Save for multi-output detection
                         @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
                         # Resolve dependencies through vpath
                         my @orig_deps = @deps;
@@ -6182,13 +6224,53 @@ sub run_job_master {
             my $processed_rule = process_command($rule);
             $processed_rule = expand_job_command($processed_rule, $target, \@deps);
 
+            # Handle multi-output pattern rules (e.g., parse%cc parse%h: parse%y)
+            # If this target is part of a multi-output group, check if a sibling is already being built
+            my @sibling_targets;
+            if ($matched_pattern_key) {
+                # matched_pattern_key should be set when we matched a pattern rule
+                # Extract just the pattern part (after the tab)
+                my ($mf_part, $pattern_part) = split(/\t/, $matched_pattern_key, 2);
+                my $target_key = "$makefile\t$pattern_part";
+                if (exists $multi_output_siblings{$target_key}) {
+                    # This target is part of a multi-output group
+                    # Expand all sibling patterns with the current stem
+                    @sibling_targets = map { my $s = $_; $s =~ s/%/$stem/g; $s } @{$multi_output_siblings{$target_key}};
+                    warn "DEBUG: Multi-output target '$target' has siblings: @sibling_targets\n" if $ENV{SMAK_DEBUG};
+
+                    # Check if any sibling is already queued or in progress
+                    my $sibling_building = '';
+                    for my $sibling (@sibling_targets) {
+                        if ($sibling ne $target && exists $in_progress{$sibling} && $in_progress{$sibling} ne "done") {
+                            $sibling_building = $sibling;
+                            last;
+                        }
+                    }
+
+                    if ($sibling_building) {
+                        # A sibling is already being built - don't queue duplicate job
+                        # Mark this target as waiting for its sibling
+                        $in_progress{$target} = "sibling:$sibling_building";
+                        warn "DEBUG: Target '$target' waiting for sibling '$sibling_building' to complete\n" if $ENV{SMAK_DEBUG};
+                        return;
+                    }
+                }
+            }
+
             push @job_queue, {
                 target => $target,
                 dir => $dir,
                 command => $processed_rule,
+                siblings => [@sibling_targets],  # Track siblings that will also be created
             };
             $in_progress{$target} = "queued";
-            vprint "Queued target: $target\n";
+            # Mark all siblings as queued too (they'll be created by the same command)
+            for my $sibling (@sibling_targets) {
+                if ($sibling ne $target) {
+                    $in_progress{$sibling} = "sibling:$target";
+                }
+            }
+            vprint "Queued target: $target" . (@sibling_targets > 1 ? " (with siblings: " . join(", ", grep { $_ ne $target } @sibling_targets) . ")" : "") . "\n";
         } elsif (@deps > 0) {
             # Composite target or target with dependencies but no rule
             if ($ENV{SMAK_DEBUG}) {
@@ -6849,6 +6931,17 @@ sub run_job_master {
                                 if (!$is_phony) {
                                     $completed_targets{$job->{target}} = 1;
                                     $in_progress{$job->{target}} = "done";
+
+                                    # If this job has siblings (multi-output pattern rule), mark them as complete too
+                                    if ($job->{siblings} && @{$job->{siblings}} > 1) {
+                                        for my $sibling (@{$job->{siblings}}) {
+                                            if ($sibling ne $job->{target}) {
+                                                $completed_targets{$sibling} = 1;
+                                                $in_progress{$sibling} = "done";
+                                                warn "DEBUG: Marking sibling '$sibling' as complete (created with '$job->{target}')\n" if $ENV{SMAK_DEBUG};
+                                            }
+                                        }
+                                    }
                                 } else {
                                     # For phony targets, remove from in_progress entirely
                                     # This allows them to be queued again on next request

@@ -81,8 +81,8 @@ if [ -z "$COMMIT" ]; then
             echo "Error: Invalid commit '$UNTIL_COMMIT' for -until option"
             exit 1
         fi
-        # Show commits from UNTIL_COMMIT (inclusive) to HEAD, limited by -n
-        git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS} ${UNTIL_COMMIT}^..HEAD | nl -w3 -s'. '
+        # Show commits from UNTIL_COMMIT (inclusive) to HEAD, plus 2 extra commits after, limited by -n
+        git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS} ${UNTIL_COMMIT}~2..HEAD | nl -w3 -s'. '
     else
         # Show commits limited by -n
         git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS} | nl -w3 -s'. '

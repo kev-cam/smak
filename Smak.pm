@@ -421,8 +421,8 @@ sub execute_command_sequential {
         $part =~ s/^\s+|\s+$//g;  # Trim whitespace
         $part =~ s/^[@-]+//;      # Strip @ (silent) and - (ignore errors) prefixes
         # Match: smak -C <dir> <target> or make -C <dir> <target>
-        # Also handle trailing " true" or similar
-        if ($part =~ m{^(?:(?:/[\w/.-]+/)?(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
+        # Also match relative paths like ../smak or ./smak
+        if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
             push @recursive_calls, { dir => $1, target => $2 };
         } elsif ($part eq 'true' || $part eq ':' || $part eq '') {
             # Ignore these no-op commands and empty parts
@@ -436,56 +436,70 @@ sub execute_command_sequential {
     if ($all_recursive && @recursive_calls > 0) {
         warn "DEBUG[" . __LINE__ . "]: Detected " . scalar(@recursive_calls) . " recursive build(s) in chain\n" if $ENV{SMAK_DEBUG};
 
-        # Handle all recursive calls in-process
-        use Cwd 'getcwd';
-        my $saved_dir = getcwd();
-        my $saved_makefile = $makefile;
+        # Check if built-in optimizations are disabled (for testing)
+        if ($ENV{SMAK_NO_BUILTINS}) {
+            warn "DEBUG[" . __LINE__ . "]: SMAK_NO_BUILTINS set - skipping in-process optimization\n" if $ENV{SMAK_DEBUG};
+            # Fall through to spawn subprocess
+        } else {
+            # Handle all recursive calls in-process
+            use Cwd 'getcwd';
+            my $saved_dir = getcwd();
+            my $saved_makefile = $makefile;
 
-        eval {
-            for my $call (@recursive_calls) {
-                my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
-                warn "DEBUG[" . __LINE__ . "]: In-process build: dir='$subdir' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
+            eval {
+                for my $call (@recursive_calls) {
+                    my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
+                    warn "DEBUG[" . __LINE__ . "]: In-process build: dir='$subdir' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
 
-                # Convert subdir to absolute path to avoid issues with relative paths
-                my $abs_subdir = $subdir;
-                unless ($abs_subdir =~ m{^/}) {
-                    # Relative path - make it absolute from the saved directory
-                    $abs_subdir = "$saved_dir/$subdir";
+                    # Convert subdir to absolute path to avoid issues with relative paths
+                    my $abs_subdir = $subdir;
+                    unless ($abs_subdir =~ m{^/}) {
+                        # Relative path - make it absolute from the saved directory
+                        $abs_subdir = "$saved_dir/$subdir";
+                    }
+
+                    chdir($abs_subdir) or die "Cannot chdir to $abs_subdir: $!\n";
+
+                    # Parse the Makefile in the subdirectory if not already done
+                    my $sub_makefile = "Makefile";
+                    if (-f $sub_makefile) {
+                        # Temporarily update $makefile for proper rule keys
+                        $makefile = $sub_makefile;
+                        parse_makefile($sub_makefile) unless $parsed_file_mtimes{$sub_makefile};
+                    }
+
+                    # Build the target in the subdirectory
+                    build_target($subtarget);
+
+                    # Change back to saved dir for next iteration
+                    chdir($saved_dir);
+                    $makefile = $saved_makefile;
                 }
+            };
 
-                chdir($abs_subdir) or die "Cannot chdir to $abs_subdir: $!\n";
+            my $error = $@;
 
-                # Parse the Makefile in the subdirectory if not already done
-                my $sub_makefile = "Makefile";
-                if (-f $sub_makefile) {
-                    # Temporarily update $makefile for proper rule keys
-                    $makefile = $sub_makefile;
-                    parse_makefile($sub_makefile) unless $parsed_file_mtimes{$sub_makefile};
-                }
+            # Restore directory and makefile
+            chdir($saved_dir);
+            $makefile = $saved_makefile;
 
-                # Build the target in the subdirectory
-                build_target($subtarget);
+            chdir($old_dir) if $old_dir;
 
-                # Change back to saved dir for next iteration
-                chdir($saved_dir);
-                $makefile = $saved_makefile;
+            if ($error) {
+                die $error;
             }
-        };
 
-        my $error = $@;
-
-        # Restore directory and makefile
-        chdir($saved_dir);
-        $makefile = $saved_makefile;
-
-        chdir($old_dir) if $old_dir;
-
-        if ($error) {
-            die $error;
+            warn "DEBUG[" . __LINE__ . "]: In-process recursive builds complete\n" if $ENV{SMAK_DEBUG};
+            return 0;
         }
+    }
 
-        warn "DEBUG[" . __LINE__ . "]: In-process recursive builds complete\n" if $ENV{SMAK_DEBUG};
-        return 0;
+    # Assert that we should be using built-in optimizations (for testing)
+    if ($ENV{SMAK_ASSERT_NO_SPAWN} && $all_recursive && @recursive_calls > 0) {
+        die "SMAK_ASSERT_NO_SPAWN: About to spawn subprocess for recursive build, but built-in should be used\n" .
+            "Command: $command\n" .
+            "Recursive calls detected: " . scalar(@recursive_calls) . "\n" .
+            "Targets: " . join(", ", map { "$_->{dir}/$_->{target}" } @recursive_calls) . "\n";
     }
 
     # Execute command

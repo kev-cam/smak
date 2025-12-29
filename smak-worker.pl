@@ -170,12 +170,13 @@ while (my $line = <$socket>) {
 
         for my $part (@command_parts) {
             $part =~ s/^\s+|\s+$//g;  # Trim whitespace
+            $part =~ s/^[@-]+//;      # Strip @ (silent) and - (ignore errors) prefixes
             # Match: smak -C <dir> <target> or make -C <dir> <target>
-            # Also match full paths like /path/to/smak -C <dir> <target>
-            if ($part =~ m{^(?:(?:/[\w/.-]+/)?(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
+            # Also match relative paths like ../smak or ./smak
+            if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
                 push @recursive_calls, { dir => $1, target => $2 };
-            } elsif ($part eq 'true' || $part eq ':') {
-                # Ignore no-op commands
+            } elsif ($part eq 'true' || $part eq ':' || $part eq '') {
+                # Ignore no-op commands and empty parts
                 next;
             } else {
                 $all_recursive = 0;
@@ -184,39 +185,57 @@ while (my $line = <$socket>) {
         }
 
         if ($all_recursive && @recursive_calls > 0) {
-            # Handle recursive calls in-process using existing smak
-            # Instead of spawning new job servers, execute smak directly
-            print $socket "OUTPUT [In-process: " . scalar(@recursive_calls) . " recursive build(s)]\n";
+            # Check if built-in optimizations are disabled (for testing)
+            if ($ENV{SMAK_NO_BUILTINS}) {
+                print STDERR "DEBUG: SMAK_NO_BUILTINS set - skipping in-process optimization\n" if $ENV{SMAK_VERBOSE};
+                # Fall through to execute command normally
+            } else {
+                # Handle recursive calls in-process using existing smak
+                # Instead of spawning new job servers, execute smak directly
+                print $socket "OUTPUT [In-process: " . scalar(@recursive_calls) . " recursive build(s)]\n";
 
-            my $final_exit = 0;
-            for my $call (@recursive_calls) {
-                my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
+                my $final_exit = 0;
+                for my $call (@recursive_calls) {
+                    my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
 
-                # Convert subdir to absolute path
-                my $abs_subdir = $subdir;
-                unless ($abs_subdir =~ m{^/}) {
-                    use Cwd 'abs_path';
-                    $abs_subdir = abs_path($subdir) || "$old_dir/$subdir";
+                    # Convert subdir to absolute path
+                    my $abs_subdir = $subdir;
+                    unless ($abs_subdir =~ m{^/}) {
+                        use Cwd 'abs_path';
+                        $abs_subdir = abs_path($subdir) || "$old_dir/$subdir";
+                    }
+
+                    # Execute smak directly in the subdirectory (reuses parent job server)
+                    # The key is NOT using -j flag, which would spawn a new job server
+                    my $smak_cmd = "cd '$abs_subdir' && smak '$subtarget'";
+                    print $socket "OUTPUT   → $abs_subdir: $subtarget\n";
+
+                    my $sub_exit = system($smak_cmd) >> 8;
+                    if ($sub_exit != 0) {
+                        print $socket "OUTPUT   ✗ Failed (exit $sub_exit)\n";
+                        $final_exit = $sub_exit;
+                        last;
+                    }
+                    print $socket "OUTPUT   ✓ Complete\n";
                 }
 
-                # Execute smak directly in the subdirectory (reuses parent job server)
-                # The key is NOT using -j flag, which would spawn a new job server
-                my $smak_cmd = "cd '$abs_subdir' && smak '$subtarget'";
-                print $socket "OUTPUT   → $abs_subdir: $subtarget\n";
-
-                my $sub_exit = system($smak_cmd) >> 8;
-                if ($sub_exit != 0) {
-                    print $socket "OUTPUT   ✗ Failed (exit $sub_exit)\n";
-                    $final_exit = $sub_exit;
-                    last;
-                }
-                print $socket "OUTPUT   ✓ Complete\n";
+                print $socket "TASK_END $task_id $final_exit\n";
+                chdir($old_dir);
+                print $socket "READY\n";
+                next;
             }
+        }
 
-            print $socket "TASK_END $task_id $final_exit\n";
-            chdir($old_dir);
-            print $socket "READY\n";
-            next;
+        # Assert that we should be using built-in optimizations (for testing)
+        if ($ENV{SMAK_ASSERT_NO_SPAWN} && $all_recursive && @recursive_calls > 0) {
+            my $error_msg = "SMAK_ASSERT_NO_SPAWN: About to spawn subprocess for recursive build, but built-in should be used\n" .
+                "Command: $command\n" .
+                "Recursive calls detected: " . scalar(@recursive_calls) . "\n" .
+                "Targets: " . join(", ", map { "$_->{dir}/$_->{target}" } @recursive_calls) . "\n";
+            print $socket "OUTPUT $error_msg";
+            print $socket "TASK_END $task_id 1\n";
+            print STDERR $error_msg;
+            die $error_msg;
         }
 
         # Not a recursive build - execute command normally

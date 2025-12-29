@@ -13,3 +13,6 @@ test/program
 test/test-debug
 test/example-debug
 *~
+
+# Cloned test repositories
+iverilog/

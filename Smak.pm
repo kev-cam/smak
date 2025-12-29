@@ -125,32 +125,30 @@ sub has_source_control_recursion {
 sub should_filter_dependency {
     my ($dep) = @_;
 
-    # GENERAL RULE 1: Filter pattern dependencies that reference non-existent subdirectories
-    # This prevents infinite recursion from rules like "%: RCS/%,v" when RCS/ doesn't exist
-    # Also prevents wasted processing trying to build targets in directories that don't exist
+    # Filter source control pattern dependencies to prevent recursion
+    # Only filter source control directories (RCS, SCCS, CVS) - not general build directories
+    # The problem: rules like "%: RCS/%,v" create infinite loops
+    # Solution: Filter these patterns when the source control directory doesn't exist
     if ($dep =~ /%/ && $dep =~ m{/}) {
         # Extract the directory part before the % wildcard
-        # Examples: "RCS/%,v" -> "RCS", "SCCS/s.%" -> "SCCS", "build/%.o" -> "build"
         if ($dep =~ m{^([^%/]+)/}) {
             my $dir_part = $1;
-            # Check if this directory exists relative to current working directory
-            # (Makefiles are parsed in the context of their directory)
-            if (!-d $dir_part) {
-                warn "DEBUG: Filtering pattern dependency '$dep' - directory '$dir_part' does not exist\n" if $ENV{SMAK_DEBUG};
+            # Only filter KNOWN source control directories when they don't exist
+            # This prevents recursion (RCS/RCS/, SCCS/SCCS/) when the base dir doesn't exist
+            # But allows normal build directories to work even if they don't exist yet
+            if ($dir_part =~ /^(RCS|SCCS|CVS)$/ && !-d $dir_part) {
+                warn "DEBUG: Filtering source control pattern dependency '$dep' - directory '$dir_part' does not exist\n" if $ENV{SMAK_DEBUG};
                 return 1;
             }
         }
     }
 
-    # GENERAL RULE 2: Filter pattern dependencies with prefixes when no matching files exist
-    # This prevents infinite recursion from rules like "%: s.%" (SCCS) when no s.* files exist
-    if ($dep =~ /%/ && $dep =~ m{^([^%/]+)\.%}) {
-        # Pattern has prefix before wildcard: "s.%" -> "s", "RCS.%" -> "RCS"
-        my $prefix = $1;
-        # Check if any files with this prefix exist
-        my @matching_files = glob("${prefix}.*");
+    # Filter SCCS-style prefix patterns (s.%) when no matching files exist
+    # This prevents infinite recursion from rules like "%: s.%" when no s.* files exist
+    if ($dep =~ /^s\.%/) {
+        my @matching_files = glob("s.*");
         if (@matching_files == 0) {
-            warn "DEBUG: Filtering pattern dependency '$dep' - no files matching '${prefix}.*' exist\n" if $ENV{SMAK_DEBUG};
+            warn "DEBUG: Filtering SCCS pattern dependency '$dep' - no s.* files exist\n" if $ENV{SMAK_DEBUG};
             return 1;
         }
     }

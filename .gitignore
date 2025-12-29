@@ -5,6 +5,7 @@ bugs/
 *.a
 *.so
 *.old
+*.o-old
 test/*.txt
 test/file1
 test/file2
@@ -12,6 +13,8 @@ test/test
 test/program
 test/test-debug
 test/example-debug
+test/Makefile.autorescan
+test/test_auto.c
 *~
 
 # Cloned test repositories

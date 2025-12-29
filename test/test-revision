@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test a specific git revision
-# Usage: ./test-revision [commit-hash]
+# Usage: ./test-revision [options] [commit-hash]
 #        If no hash provided, shows menu to select from recent commits
 
 set -e
@@ -10,14 +10,84 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
+# Default options
+NUM_COMMITS=9999
+UNTIL_COMMIT=""
+RUN_TESTS=1
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--num)
+            NUM_COMMITS="$2"
+            shift 2
+            ;;
+        -until|--until)
+            UNTIL_COMMIT="$2"
+            shift 2
+            ;;
+        -notest|--no-test)
+            RUN_TESTS=0
+            shift
+            ;;
+        -h|--help)
+            cat << 'EOF'
+Usage: ./test-revision [options] [commit-hash]
+
+Test a specific git revision in a clean cloned environment.
+
+Options:
+  -n, --num <number>    Limit number of commits to show (default: 9999)
+  -until <commit>       List commits from HEAD down to (and including) this commit
+  -notest, --no-test    Skip running regression tests (just clone and shell)
+  -h, --help            Show this help
+
+If no commit hash is provided, shows commits with date/time and prompts for selection.
+Both -n and -until can be combined (shows up to N commits or until target, whichever comes first).
+
+Examples:
+  ./test-revision                      # Interactive selection from all commits
+  ./test-revision -n 50                # Show last 50 commits for selection
+  ./test-revision -until e1d9c5d       # Show commits from HEAD to e1d9c5d (inclusive)
+  ./test-revision -n 20 -until e1d9c5d # Show up to 20 commits or until e1d9c5d
+  ./test-revision abc123               # Test specific commit
+  ./test-revision -notest abc123       # Clone commit, drop to shell, skip tests
+EOF
+            exit 0
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage"
+            exit 1
+            ;;
+        *)
+            # Not an option, must be commit hash
+            COMMIT="$1"
+            shift
+            ;;
+    esac
+done
+
 # If a commit hash is provided, use it
-if [ -n "$1" ]; then
-    COMMIT="$1"
-else
+if [ -z "$COMMIT" ]; then
     # Show recent commits and let user pick
     echo "Recent commits on current branch:"
     echo "=================================="
-    git log --oneline --decorate -20
+
+    # Build git log command based on options
+    if [ -n "$UNTIL_COMMIT" ]; then
+        # Validate until commit exists
+        if ! git rev-parse "$UNTIL_COMMIT" >/dev/null 2>&1; then
+            echo "Error: Invalid commit '$UNTIL_COMMIT' for -until option"
+            exit 1
+        fi
+        # Show commits from UNTIL_COMMIT (inclusive) to HEAD, plus 2 extra commits after, limited by -n
+        git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS} ${UNTIL_COMMIT}~2..HEAD | nl -w3 -s'. '
+    else
+        # Show commits limited by -n
+        git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS} | nl -w3 -s'. '
+    fi
+
     echo ""
     echo -n "Enter commit hash (or press Enter for HEAD): "
     read COMMIT
@@ -53,30 +123,44 @@ echo "Checking out $COMMIT in clone..."
 cd "$TEST_DIR"
 git checkout -q "$COMMIT"
 
-# Run tests
-echo ""
-echo "Running regression tests..."
-echo "============================"
-cd test
-if ./run-regression; then
-    TEST_RESULT="PASSED"
-    TEST_EXIT=0
-else
-    TEST_RESULT="FAILED"
-    TEST_EXIT=1
-fi
+# Run tests if requested
+if [ $RUN_TESTS -eq 1 ]; then
+    echo ""
+    echo "Running regression tests..."
+    echo "============================"
+    cd test
+    if ./run-regression; then
+        TEST_RESULT="PASSED"
+        TEST_EXIT=0
+    else
+        TEST_RESULT="FAILED"
+        TEST_EXIT=1
+    fi
 
-# Print summary
-echo ""
-echo "============================"
-echo "Test Summary"
-echo "============================"
-echo "Commit:  $(git log -1 --oneline "$COMMIT")"
-echo "Result:  $TEST_RESULT"
-echo ""
-echo "Test directory: $TEST_DIR"
-echo "============================"
-echo ""
+    # Print summary
+    echo ""
+    echo "============================"
+    echo "Test Summary"
+    echo "============================"
+    echo "Commit:  $(git log -1 --oneline "$COMMIT")"
+    echo "Result:  $TEST_RESULT"
+    echo ""
+    echo "Test directory: $TEST_DIR"
+    echo "============================"
+    echo ""
+else
+    echo ""
+    echo "============================"
+    echo "Skipping tests (use without -notest to run tests)"
+    echo "============================"
+    echo "Commit:  $(git log -1 --oneline "$COMMIT")"
+    echo "Test directory: $TEST_DIR"
+    echo "============================"
+    echo ""
+    TEST_RESULT="SKIPPED"
+    TEST_EXIT=0
+    cd "$TEST_DIR"
+fi
 
 # Drop into shell with smak in PATH
 echo "Dropping into shell with smak directory in PATH"

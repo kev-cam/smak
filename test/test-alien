@@ -1,23 +1,26 @@
 #!/bin/bash
 # Test smak with an external (alien) project
-# Usage: ./test-alien <directory>
+# Usage: ./test-alien <directory> [smak-options...]
 #        Tests building the project in the given directory
 
 set -e
 
 if [ $# -eq 0 ]; then
-    echo "Usage: $0 <directory>"
+    echo "Usage: $0 <directory> [smak-options...]"
     echo ""
     echo "Tests smak with an external project by running:"
-    echo "  1. smak clean"
-    echo "  2. smak all"
+    echo "  1. smak [options] clean"
+    echo "  2. smak [options] all"
     echo ""
-    echo "Example:"
+    echo "Examples:"
     echo "  $0 /tmp/iverilog"
+    echo "  $0 /tmp/iverilog -norc"
+    echo "  $0 /tmp/iverilog -j4 -norc"
     exit 1
 fi
 
 TARGET_DIR="$1"
+shift  # Remove directory argument, leaving extra smak options
 
 if [ ! -d "$TARGET_DIR" ]; then
     echo "Error: Directory '$TARGET_DIR' does not exist"
@@ -33,11 +36,17 @@ if [ ! -x "$SMAK" ]; then
     exit 1
 fi
 
+# Store extra smak options
+SMAK_OPTS="$@"
+
 echo "======================================"
 echo "SMAK ALIEN PROJECT TEST"
 echo "======================================"
 echo "Project directory: $TARGET_DIR"
 echo "Using smak: $SMAK"
+if [ -n "$SMAK_OPTS" ]; then
+    echo "Smak options: $SMAK_OPTS"
+fi
 echo ""
 
 cd "$TARGET_DIR"
@@ -60,7 +69,7 @@ fi
 
 echo "Step 1: Clean"
 echo "-------------"
-if "$SMAK" clean; then
+if "$SMAK" $SMAK_OPTS clean; then
     echo "Clean: SUCCESS"
 else
     echo "Clean: FAILED"
@@ -70,7 +79,7 @@ fi
 echo ""
 echo "Step 2: Build"
 echo "-------------"
-if "$SMAK" all; then
+if "$SMAK" $SMAK_OPTS all; then
     echo "Build: SUCCESS"
 else
     echo "Build: FAILED"

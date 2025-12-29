@@ -445,7 +445,14 @@ sub execute_command_sequential {
                 my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
                 warn "DEBUG[" . __LINE__ . "]: In-process build: dir='$subdir' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
 
-                chdir($subdir) or die "Cannot chdir to $subdir: $!\n";
+                # Convert subdir to absolute path to avoid issues with relative paths
+                my $abs_subdir = $subdir;
+                unless ($abs_subdir =~ m{^/}) {
+                    # Relative path - make it absolute from the saved directory
+                    $abs_subdir = "$saved_dir/$subdir";
+                }
+
+                chdir($abs_subdir) or die "Cannot chdir to $abs_subdir: $!\n";
 
                 # Parse the Makefile in the subdirectory if not already done
                 my $sub_makefile = "Makefile";

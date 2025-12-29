@@ -11,7 +11,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 # Default options
-NUM_COMMITS=20
+NUM_COMMITS=9999
 RUN_TESTS=1
 
 # Parse options
@@ -32,14 +32,14 @@ Usage: ./test-revision [options] [commit-hash]
 Test a specific git revision in a clean cloned environment.
 
 Options:
-  -n, --num <number>    Number of commits to show in log (default: 20)
+  -n, --num <number>    Number of commits to show in log (default: 9999 = all)
   -notest, --no-test    Skip running regression tests (just clone and shell)
   -h, --help            Show this help
 
-If no commit hash is provided, shows recent commits and prompts for selection.
+If no commit hash is provided, shows all commits with date/time and prompts for selection.
 
 Examples:
-  ./test-revision                    # Interactive selection from last 20 commits
+  ./test-revision                    # Interactive selection from all commits
   ./test-revision -n 50              # Show last 50 commits for selection
   ./test-revision abc123             # Test specific commit
   ./test-revision -notest abc123     # Clone commit, drop to shell, skip tests
@@ -64,7 +64,7 @@ if [ -z "$COMMIT" ]; then
     # Show recent commits and let user pick
     echo "Recent commits on current branch:"
     echo "=================================="
-    git log --oneline --decorate -${NUM_COMMITS}
+    git log --format='%h %ad %s' --date=format:'%Y-%m-%d %H:%M' -${NUM_COMMITS}
     echo ""
     echo -n "Enter commit hash (or press Enter for HEAD): "
     read COMMIT

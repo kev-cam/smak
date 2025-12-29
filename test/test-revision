@@ -100,30 +100,44 @@ echo "Checking out $COMMIT in clone..."
 cd "$TEST_DIR"
 git checkout -q "$COMMIT"
 
-# Run tests
-echo ""
-echo "Running regression tests..."
-echo "============================"
-cd test
-if ./run-regression; then
-    TEST_RESULT="PASSED"
-    TEST_EXIT=0
-else
-    TEST_RESULT="FAILED"
-    TEST_EXIT=1
-fi
+# Run tests if requested
+if [ $RUN_TESTS -eq 1 ]; then
+    echo ""
+    echo "Running regression tests..."
+    echo "============================"
+    cd test
+    if ./run-regression; then
+        TEST_RESULT="PASSED"
+        TEST_EXIT=0
+    else
+        TEST_RESULT="FAILED"
+        TEST_EXIT=1
+    fi
 
-# Print summary
-echo ""
-echo "============================"
-echo "Test Summary"
-echo "============================"
-echo "Commit:  $(git log -1 --oneline "$COMMIT")"
-echo "Result:  $TEST_RESULT"
-echo ""
-echo "Test directory: $TEST_DIR"
-echo "============================"
-echo ""
+    # Print summary
+    echo ""
+    echo "============================"
+    echo "Test Summary"
+    echo "============================"
+    echo "Commit:  $(git log -1 --oneline "$COMMIT")"
+    echo "Result:  $TEST_RESULT"
+    echo ""
+    echo "Test directory: $TEST_DIR"
+    echo "============================"
+    echo ""
+else
+    echo ""
+    echo "============================"
+    echo "Skipping tests (use without -notest to run tests)"
+    echo "============================"
+    echo "Commit:  $(git log -1 --oneline "$COMMIT")"
+    echo "Test directory: $TEST_DIR"
+    echo "============================"
+    echo ""
+    TEST_RESULT="SKIPPED"
+    TEST_EXIT=0
+    cd "$TEST_DIR"
+fi
 
 # Drop into shell with smak in PATH
 echo "Dropping into shell with smak directory in PATH"

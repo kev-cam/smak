@@ -162,6 +162,64 @@ while (my $line = <$socket>) {
     if ($line =~ /^TASK (\d+)$/) {
 	get_task($1,$env_done);
 
+        # Check if command is entirely composed of recursive smak/make -C calls
+        # This prevents spawning multiple job servers for subdirectories
+        my @command_parts = split(/\s+&&\s+/, $command);
+        my $all_recursive = 1;
+        my @recursive_calls;
+
+        for my $part (@command_parts) {
+            $part =~ s/^\s+|\s+$//g;  # Trim whitespace
+            # Match: smak -C <dir> <target> or make -C <dir> <target>
+            # Also match full paths like /path/to/smak -C <dir> <target>
+            if ($part =~ m{^(?:(?:/[\w/.-]+/)?(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
+                push @recursive_calls, { dir => $1, target => $2 };
+            } elsif ($part eq 'true' || $part eq ':') {
+                # Ignore no-op commands
+                next;
+            } else {
+                $all_recursive = 0;
+                last;
+            }
+        }
+
+        if ($all_recursive && @recursive_calls > 0) {
+            # Handle recursive calls in-process using existing smak
+            # Instead of spawning new job servers, execute smak directly
+            print $socket "OUTPUT [In-process: " . scalar(@recursive_calls) . " recursive build(s)]\n";
+
+            my $final_exit = 0;
+            for my $call (@recursive_calls) {
+                my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
+
+                # Convert subdir to absolute path
+                my $abs_subdir = $subdir;
+                unless ($abs_subdir =~ m{^/}) {
+                    use Cwd 'abs_path';
+                    $abs_subdir = abs_path($subdir) || "$old_dir/$subdir";
+                }
+
+                # Execute smak directly in the subdirectory (reuses parent job server)
+                # The key is NOT using -j flag, which would spawn a new job server
+                my $smak_cmd = "cd '$abs_subdir' && smak '$subtarget'";
+                print $socket "OUTPUT   → $abs_subdir: $subtarget\n";
+
+                my $sub_exit = system($smak_cmd) >> 8;
+                if ($sub_exit != 0) {
+                    print $socket "OUTPUT   ✗ Failed (exit $sub_exit)\n";
+                    $final_exit = $sub_exit;
+                    last;
+                }
+                print $socket "OUTPUT   ✓ Complete\n";
+            }
+
+            print $socket "TASK_END $task_id $final_exit\n";
+            chdir($old_dir);
+            print $socket "READY\n";
+            next;
+        }
+
+        # Not a recursive build - execute command normally
         # Execute command with non-blocking I/O to remain responsive
         use IO::Select;
         use POSIX ":sys_wait_h";

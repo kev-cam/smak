@@ -4809,6 +4809,7 @@ sub interactive_debug {
 
     while (1) {
         if (!$have_input) {
+            # Always use readline which handles PTY input correctly
             $input = $term->readline($echo ? $prompt : $prompt);
             unless (defined $input) {
                 # EOF (Ctrl-D) or Ctrl-C

@@ -12,6 +12,7 @@ FULL_MODE=0
 VERBOSE=0
 TTY_MODE=0
 CLONE_MODE=""
+SANITY_MODE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -25,6 +26,10 @@ while [ $# -gt 0 ]; do
             ;;
         -t|--tty)
             TTY_MODE=1
+            shift
+            ;;
+        -s|--sanity)
+            SANITY_MODE=1
             shift
             ;;
         -clone|--clone)
@@ -49,6 +54,7 @@ Each test's -fail variant is also run in all 4 modes to verify error handling.
 
 Options:
   (none)              Run all tests including scripted interactive tests
+  -s, --sanity        Run quick sanity check (2 basic non-interactive tests)
   -f, --full          Run full test suite including random builds and CLI tests
   -v, --verbose       Show test output
   -t, --tty           Run interactive tests with actual TTY input (not scripted)
@@ -58,6 +64,7 @@ Options:
 
 Examples:
   $0                  # All tests with scripted automation (default)
+  $0 --sanity         # Quick sanity check (2 non-interactive tests)
   $0 --full           # Full test suite
   $0 --verbose        # Show all test output
   $0 --tty            # Interactive tests require user input
@@ -135,6 +142,7 @@ if [ -n "$CLONE_MODE" ]; then
 
     # Build the command to run, preserving other options
     CMD="./run-regression"
+    [ $SANITY_MODE -eq 1 ] && CMD="$CMD --sanity"
     [ $FULL_MODE -eq 1 ] && CMD="$CMD --full"
     [ $VERBOSE -eq 1 ] && CMD="$CMD --verbose"
     [ $TTY_MODE -eq 1 ] && CMD="$CMD --tty"
@@ -168,7 +176,11 @@ declare -a FAILED_TESTS
 declare -a PASSED_TESTS
 
 echo "======================================"
-echo "SMAK REGRESSION TEST SUITE"
+if [ $SANITY_MODE -eq 1 ]; then
+    echo "SMAK SANITY CHECK (Quick Tests)"
+else
+    echo "SMAK REGRESSION TEST SUITE"
+fi
 echo "======================================"
 echo ""
 echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail] [Par/NoCache+fail] [Par/Cache+fail]"
@@ -504,21 +516,47 @@ WRAPPER_EOF
     fi
 }
 
+# Define sanity test list (quick, basic non-interactive tests)
+# Note: Interactive tests currently timeout due to select() issue with STDIN
+SANITY_TESTS=(
+    "test_phony_repeat.sh"
+)
+SANITY_DEFAULT_TARGET_TEST="test-default-target.sh"
+
 # Run all test_*.sh scripts (non-interactive unit tests)
 echo "Unit Tests:"
 echo "----------"
-for test in test_*.sh; do
-    if [ -f "$test" ]; then
-        run_test "$test"
-    fi
-done
 
-# Run default target test
-echo ""
-echo "Default Target Tests:"
-echo "--------------------"
-if [ -f "test-default-target.sh" ]; then
-    run_test "test-default-target.sh"
+if [ $SANITY_MODE -eq 1 ]; then
+    # Sanity mode: only run selected tests
+    for test in "${SANITY_TESTS[@]}"; do
+        if [ -f "$test" ]; then
+            run_test "$test"
+        fi
+    done
+
+    # Run default target test in sanity mode
+    if [ -f "$SANITY_DEFAULT_TARGET_TEST" ]; then
+        echo ""
+        echo "Default Target Tests:"
+        echo "--------------------"
+        run_test "$SANITY_DEFAULT_TARGET_TEST"
+    fi
+else
+    # Normal mode: run all tests
+    for test in test_*.sh; do
+        if [ -f "$test" ]; then
+            run_test "$test"
+        fi
+    done
+
+    # Run default target test
+    echo ""
+    echo "Default Target Tests:"
+    echo "--------------------"
+    if [ -f "test-default-target.sh" ]; then
+        run_test "test-default-target.sh"
+    fi
 fi
 
 # Run generator-based tests if in full mode
@@ -613,7 +651,12 @@ fi
 echo ""
 if [ $FAILED -eq 0 ]; then
     echo -e "${GREEN}All tests passed!${NC}"
-    if [ $FULL_MODE -eq 0 ]; then
+    if [ $SANITY_MODE -eq 1 ]; then
+        echo ""
+        echo "Note: This was a sanity check (2 basic non-interactive tests)."
+        echo "Run '$0' for full regression testing."
+        echo "Run '$0 --full' for comprehensive testing including random builds and CLI tests."
+    elif [ $FULL_MODE -eq 0 ]; then
         echo ""
         echo "Note: This was a quick regression test."
         echo "Run '$0 --full' for comprehensive testing including:"

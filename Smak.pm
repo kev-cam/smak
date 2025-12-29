@@ -410,30 +410,58 @@ sub execute_command_sequential {
         chdir($dir) or die "Cannot chdir to $dir: $!\n";
     }
 
-    # Check if this is a recursive smak/make invocation that can be handled in-process
-    # Pattern: smak -C <dir> <target> or make -C <dir> <target>
-    if ($command =~ m{^(?:(?:/[\w/.-]+/)?(?:smak|make))\s+-C\s+(\S+)\s+(.+)$}) {
-        my ($subdir, $subtarget) = ($1, $2);
-        warn "DEBUG[" . __LINE__ . "]: Detected recursive build: dir='$subdir' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
+    # Check if command is entirely composed of recursive smak/make -C calls
+    # Pattern: smak -C <dir> <target> [&& smak -C <dir> <target> ...]
+    # Split on && and check if all parts are recursive calls
+    my @command_parts = split(/\s+&&\s+/, $command);
+    my $all_recursive = 1;
+    my @recursive_calls;
 
-        # Handle in-process: change dir, build target, change back
+    for my $part (@command_parts) {
+        $part =~ s/^\s+|\s+$//g;  # Trim whitespace
+        # Match: smak -C <dir> <target> or make -C <dir> <target>
+        # Also handle trailing " true" or similar
+        if ($part =~ m{^(?:(?:/[\w/.-]+/)?(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
+            push @recursive_calls, { dir => $1, target => $2 };
+        } elsif ($part eq 'true' || $part eq ':') {
+            # Ignore these no-op commands
+            next;
+        } else {
+            $all_recursive = 0;
+            last;
+        }
+    }
+
+    if ($all_recursive && @recursive_calls > 0) {
+        warn "DEBUG[" . __LINE__ . "]: Detected " . scalar(@recursive_calls) . " recursive build(s) in chain\n" if $ENV{SMAK_DEBUG};
+
+        # Handle all recursive calls in-process
         use Cwd 'getcwd';
         my $saved_dir = getcwd();
         my $saved_makefile = $makefile;
 
         eval {
-            chdir($subdir) or die "Cannot chdir to $subdir: $!\n";
+            for my $call (@recursive_calls) {
+                my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
+                warn "DEBUG[" . __LINE__ . "]: In-process build: dir='$subdir' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
 
-            # Parse the Makefile in the subdirectory if not already done
-            my $sub_makefile = "Makefile";
-            if (-f $sub_makefile) {
-                # Temporarily update $makefile for proper rule keys
-                $makefile = $sub_makefile;
-                parse_makefile($sub_makefile) unless $parsed_file_mtimes{$sub_makefile};
+                chdir($subdir) or die "Cannot chdir to $subdir: $!\n";
+
+                # Parse the Makefile in the subdirectory if not already done
+                my $sub_makefile = "Makefile";
+                if (-f $sub_makefile) {
+                    # Temporarily update $makefile for proper rule keys
+                    $makefile = $sub_makefile;
+                    parse_makefile($sub_makefile) unless $parsed_file_mtimes{$sub_makefile};
+                }
+
+                # Build the target in the subdirectory
+                build_target($subtarget);
+
+                # Change back to saved dir for next iteration
+                chdir($saved_dir);
+                $makefile = $saved_makefile;
             }
-
-            # Build the target in the subdirectory
-            build_target($subtarget);
         };
 
         my $error = $@;
@@ -448,7 +476,7 @@ sub execute_command_sequential {
             die $error;
         }
 
-        warn "DEBUG[" . __LINE__ . "]: In-process recursive build complete\n" if $ENV{SMAK_DEBUG};
+        warn "DEBUG[" . __LINE__ . "]: In-process recursive builds complete\n" if $ENV{SMAK_DEBUG};
         return 0;
     }
 

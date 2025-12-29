@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test a specific git revision
-# Usage: ./test-revision [commit-hash]
+# Usage: ./test-revision [options] [commit-hash]
 #        If no hash provided, shows menu to select from recent commits
 
 set -e
@@ -10,14 +10,61 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
+# Default options
+NUM_COMMITS=20
+RUN_TESTS=1
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--num)
+            NUM_COMMITS="$2"
+            shift 2
+            ;;
+        -notest|--no-test)
+            RUN_TESTS=0
+            shift
+            ;;
+        -h|--help)
+            cat << 'EOF'
+Usage: ./test-revision [options] [commit-hash]
+
+Test a specific git revision in a clean cloned environment.
+
+Options:
+  -n, --num <number>    Number of commits to show in log (default: 20)
+  -notest, --no-test    Skip running regression tests (just clone and shell)
+  -h, --help            Show this help
+
+If no commit hash is provided, shows recent commits and prompts for selection.
+
+Examples:
+  ./test-revision                    # Interactive selection from last 20 commits
+  ./test-revision -n 50              # Show last 50 commits for selection
+  ./test-revision abc123             # Test specific commit
+  ./test-revision -notest abc123     # Clone commit, drop to shell, skip tests
+EOF
+            exit 0
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage"
+            exit 1
+            ;;
+        *)
+            # Not an option, must be commit hash
+            COMMIT="$1"
+            shift
+            ;;
+    esac
+done
+
 # If a commit hash is provided, use it
-if [ -n "$1" ]; then
-    COMMIT="$1"
-else
+if [ -z "$COMMIT" ]; then
     # Show recent commits and let user pick
     echo "Recent commits on current branch:"
     echo "=================================="
-    git log --oneline --decorate -20
+    git log --oneline --decorate -${NUM_COMMITS}
     echo ""
     echo -n "Enter commit hash (or press Enter for HEAD): "
     read COMMIT

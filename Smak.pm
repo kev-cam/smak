@@ -4664,6 +4664,11 @@ sub interactive_debug {
     # Set interactive flag so Ctrl-C doesn't exit
     local $interactive = 1;
 
+    # Declare package variables used in CLI commands
+    our %rules;
+    our %rule_deps;
+    our %pattern_rules;
+
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
 
     while (1) {

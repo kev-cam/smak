@@ -4905,6 +4905,9 @@ sub interactive_debug {
 
         chomp $input;
 
+        # Skip comment lines (but not empty lines, those are handled below)
+        next if $input =~ /^\s*#/;
+
         # Echo the line if echo mode is enabled
         if ($echo && $input ne '') {
             print "$prompt$input\n";

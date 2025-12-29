@@ -4788,6 +4788,59 @@ sub cmd_restart {
 }
 
 
+sub perform_auto_rescan {
+    my ($last_mtimes_ref, $OUT) = @_;
+    my $stale_count = 0;
+
+    # Get targets that have been built (from rules hash)
+    my %targets_to_check;
+
+    # Access package variables
+    our %fixed_rule;
+    our %is_phony;
+    our %stale_targets_cache;
+
+    # Check all rules for targets that exist as files
+    for my $key (keys %fixed_rule) {
+        my ($mf, $target) = split(/\t/, $key, 2);
+        next unless $target;
+
+        # Skip phony targets
+        next if exists $is_phony{$target};
+        next if $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/;
+
+        $targets_to_check{$target} = 1 if -e $target;
+    }
+
+    # Check each target for changes
+    for my $target (keys %targets_to_check) {
+        my $current_mtime = (stat($target))[9];
+
+        if (!-e $target) {
+            # File was deleted
+            if (exists $last_mtimes_ref->{$target}) {
+                $stale_count++;
+                delete $last_mtimes_ref->{$target};
+                # Mark as stale in cache
+                $stale_targets_cache{$target} = time();
+                print STDERR "  [auto-rescan] Marked stale (deleted): $target\n" if $ENV{SMAK_DEBUG};
+            }
+        } elsif (!exists $last_mtimes_ref->{$target}) {
+            # New file - track it
+            $last_mtimes_ref->{$target} = $current_mtime;
+        } elsif ($current_mtime != $last_mtimes_ref->{$target}) {
+            # File was modified
+            $stale_count++;
+            $last_mtimes_ref->{$target} = $current_mtime;
+            # Mark as stale in cache
+            $stale_targets_cache{$target} = time();
+            print STDERR "  [auto-rescan] Marked stale (modified): $target\n" if $ENV{SMAK_DEBUG};
+        }
+    }
+
+    return $stale_count;
+}
+
 sub interactive_debug {
     my ($OUT,$input) = @_ ;
     my $term = Term::ReadLine->new('smak');
@@ -4800,6 +4853,11 @@ sub interactive_debug {
     # Set interactive flag so Ctrl-C doesn't exit
     local $interactive = 1;
 
+    # Auto-rescan state (without job server)
+    my $auto_rescan_enabled = 0;
+    my $last_rescan_time = 0;
+    my %last_file_mtimes;  # Track file modification times
+
     # Declare package variables used in CLI commands
     our %rules;
     our %rule_deps;
@@ -4809,15 +4867,38 @@ sub interactive_debug {
 
     while (1) {
         if (!$have_input) {
-            # Always use readline which handles PTY input correctly
-            $input = $term->readline($echo ? $prompt : $prompt);
-            unless (defined $input) {
-                # EOF (Ctrl-D) or Ctrl-C
-                if ($SmakCli::cancel_requested) {
-                    $SmakCli::cancel_requested = 0;  # Clear the flag
-                    next;  # Return to prompt, don't exit
+            # Use select() with timeout to allow periodic auto-rescan checks
+            my $rin = '';
+            vec($rin, fileno(STDIN), 1) = 1;
+            my $timeout = $auto_rescan_enabled ? 2.0 : 60.0;  # 2s for auto-rescan, 60s otherwise
+            my $nfound = select(my $rout = $rin, undef, undef, $timeout);
+
+            if ($nfound > 0) {
+                # Input available - read it directly from STDIN to avoid readline blocking
+                print $OUT $prompt if $echo;
+                $input = <STDIN>;
+                unless (defined $input) {
+                    # EOF (Ctrl-D) or Ctrl-C
+                    if ($SmakCli::cancel_requested) {
+                        $SmakCli::cancel_requested = 0;  # Clear the flag
+                        next;  # Return to prompt, don't exit
+                    }
+                    last;  # Ctrl-D or other termination
                 }
-                last;  # Ctrl-D or other termination
+            } elsif ($nfound == 0) {
+                # Timeout - check for auto-rescan
+                if ($auto_rescan_enabled && time() - $last_rescan_time >= 2) {
+                    $last_rescan_time = time();
+                    # Perform quick rescan check
+                    my $stale_count = perform_auto_rescan(\%last_file_mtimes, $OUT);
+                    if ($stale_count > 0) {
+                        print $OUT "[auto-rescan] Found $stale_count stale target(s)\n";
+                    }
+                }
+                next;  # Continue loop to wait for more input
+            } else {
+                # Error in select
+                last;
             }
         }
         $have_input = 0;  # Only use provided input once
@@ -4974,7 +5055,27 @@ HELP
         elsif ($cmd eq 'rescan') {
             # Handle rescan command
             shift @parts;  # Remove 'rescan' from @parts to get just the arguments
-            cmd_rescan(\@parts, $job_server_socket);
+            my $arg = @parts > 0 ? $parts[0] : '';
+
+            if ($arg eq '-auto') {
+                $auto_rescan_enabled = 1;
+                $last_rescan_time = time();
+                # Initialize file mtimes for tracking
+                %last_file_mtimes = ();
+                my $stale_count = perform_auto_rescan(\%last_file_mtimes, $OUT);
+                print $OUT "Auto-rescan enabled. Found $stale_count stale target(s).\n";
+            } elsif ($arg eq '-noauto') {
+                $auto_rescan_enabled = 0;
+                print $OUT "Auto-rescan disabled.\n";
+            } else {
+                # One-time rescan
+                if ($job_server_socket) {
+                    cmd_rescan(\@parts, $job_server_socket);
+                } else {
+                    my $stale_count = perform_auto_rescan(\%last_file_mtimes, $OUT);
+                    print $OUT "Rescan complete. Marked $stale_count target(s) as stale.\n";
+                }
+            }
         }
         elsif ($cmd eq 'vpath') {
             if (@parts < 2) {

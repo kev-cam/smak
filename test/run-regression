@@ -570,10 +570,10 @@ if [ $FULL_MODE -eq 1 ]; then
         # Run test-generator tests
         if [ $VERBOSE -eq 1 ]; then
             ./run-tests -f 5 -t 60 -v
-            local gen_result=$?
+            gen_result=$?
         else
             ./run-tests -f 5 -t 60 > /tmp/smak-generator-test.log 2>&1
-            local gen_result=$?
+            gen_result=$?
         fi
 
         if [ $gen_result -eq 0 ]; then
@@ -602,10 +602,10 @@ if [ $FULL_MODE -eq 1 ]; then
     if [ -x "./test-cli-advanced" ]; then
         if [ $VERBOSE -eq 1 ]; then
             ./test-cli-advanced
-            local cli_result=$?
+            cli_result=$?
         else
             ./test-cli-advanced > /tmp/smak-cli-test.log 2>&1
-            local cli_result=$?
+            cli_result=$?
         fi
 
         if [ $cli_result -eq 0 ]; then

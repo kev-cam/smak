@@ -264,7 +264,7 @@ run_test() {
             local wrapper_script="/tmp/smak-wrapper-${test_name}-$$.sh"
             cat > "$wrapper_script" << WRAPPER_EOF
 #!/bin/bash
-cd "\$(dirname "$0")"
+cd "$SCRIPT_DIR"
 exec ../smak $smak_args $mode_jobs -Kd
 WRAPPER_EOF
             chmod +x "$wrapper_script"

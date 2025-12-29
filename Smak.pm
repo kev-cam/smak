@@ -7147,7 +7147,13 @@ sub run_job_master {
 
                 for my $target (keys %completed_targets) {
                     # Skip phony targets - they don't create files so shouldn't be checked
+                    # Check both explicit .PHONY declarations and auto-detected common phony targets
                     next if exists $is_phony{$target};
+
+                    # Auto-detect common phony target names (same as in build logic)
+                    if ($target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+                        next;  # Skip auto-detected phony targets
+                    }
 
                     my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
 

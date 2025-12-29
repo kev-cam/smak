@@ -856,6 +856,9 @@ if (!$debug) {
         }
     }
 
+    # Stop job server and clean up workers (must be done before wait_for_jobs)
+    stop_job_server();
+
     my $sts = wait_for_jobs();
 
     # Check if build failed
@@ -863,9 +866,6 @@ if (!$debug) {
         $build_failed = 1;
         $build_error = $@;
     }
-
-    # Stop job server and clean up workers
-    stop_job_server();
 
     # If in report mode, run dry-run comparison between smak and make
     if ($report) {

@@ -4946,9 +4946,14 @@ sub interactive_debug {
     our %pattern_rules;
 
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
+    $OUT->flush() if $OUT->can('flush');
 
     while (1) {
         if (!$have_input) {
+            # Print prompt before waiting for input
+            print $OUT $prompt;
+            $OUT->flush() if $OUT->can('flush');
+            STDOUT->flush();
             # Use select() with timeout to allow periodic checks
             my $rin = '';
             vec($rin, fileno(STDIN), 1) = 1;

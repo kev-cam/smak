@@ -206,10 +206,10 @@ run_test() {
     fi
 
     # Check if test uses interactive debug mode (-Kd flag)
-    # Only treat as interactive if -Kd is the primary mode (heredoc or exec)
+    # Only treat as interactive if -Kd is the primary mode (heredoc or direct invocation)
     local is_interactive=0
     if grep -q "cat.*<<.*|.*smak.*-Kd" "$test_script" 2>/dev/null || \
-       grep -q "exec.*smak.*-Kd" "$test_script" 2>/dev/null; then
+       grep -q "smak.*-Kd" "$test_script" 2>/dev/null; then
         is_interactive=1
     fi
 

@@ -32,7 +32,15 @@ cd "$IVERILOG_DIR"
 
 # Ensure we have a Makefile
 if [ ! -f "Makefile" ] && [ ! -f "makefile" ]; then
-    echo "No Makefile found, checking for configure..."
+    echo "No Makefile found, setting up build system..."
+
+    # Check for autoconf.sh (iverilog specific)
+    if [ -f "autoconf.sh" ]; then
+        echo "Running autoconf.sh to generate configure script..."
+        sh autoconf.sh
+    fi
+
+    # Now run configure if it exists
     if [ -f "configure" ]; then
         echo "Running configure..."
         ./configure
@@ -40,7 +48,12 @@ if [ ! -f "Makefile" ] && [ ! -f "makefile" ]; then
         echo "Running autogen.sh..."
         ./autogen.sh
     else
-        echo "Error: No Makefile or configure script found"
+        echo "Error: No configure script found after autoconf.sh"
+        exit 1
+    fi
+
+    if [ ! -f "Makefile" ]; then
+        echo "Error: Makefile not generated after configure"
         exit 1
     fi
 fi

@@ -5305,9 +5305,71 @@ HELP
                 print $OUT "Usage: build <target>\n";
             } else {
                 my $target = $parts[1];
-                eval { build_target($target); };
-                if ($@) {
-                    print $OUT "Error building target: $@\n";
+
+                # Check if we have a job server connection
+                if ($job_server_socket) {
+                    # Using job server - submit directly and wait for completion
+                    my $build_start_time = time();
+
+                    # Submit the job directly to job server (avoid race condition with build_target)
+                    use IO::Select;
+                    use Cwd 'getcwd';
+                    my $cwd = getcwd();
+
+                    print $job_server_socket "SUBMIT_JOB\n";
+                    print $job_server_socket "$target\n";
+                    print $job_server_socket "$cwd\n";
+                    print $job_server_socket "true\n";  # Composite target placeholder command
+                    $job_server_socket->flush();
+
+                    # Wait for job completion, displaying output as it arrives
+                    my $select = IO::Select->new($job_server_socket);
+                    my $job_done = 0;
+                    my $timeout = 60;  # 60 seconds total timeout
+                    my $deadline = time() + $timeout;
+
+                    while (!$job_done && time() < $deadline) {
+                        # Process messages from job server
+                        if ($select->can_read(0.1)) {
+                            my $response = <$job_server_socket>;
+                            unless (defined $response) {
+                                print $OUT "Connection to job server lost\n";
+                                last;
+                            }
+                            chomp $response;
+
+                            if ($response =~ /^OUTPUT (.*)$/) {
+                                print $OUT "$1\n";
+                                $OUT->flush() if $OUT->can('flush');
+                            } elsif ($response =~ /^ERROR (.*)$/) {
+                                print $OUT "ERROR: $1\n";
+                                $OUT->flush() if $OUT->can('flush');
+                            } elsif ($response =~ /^WARN (.*)$/) {
+                                print $OUT "WARN: $1\n";
+                                $OUT->flush() if $OUT->can('flush');
+                            } elsif ($response =~ /^JOB_COMPLETE\s+(\S+)\s+(\d+)$/) {
+                                my ($completed_target, $exit_code) = ($1, $2);
+                                # Only stop when we get completion for our requested target
+                                if ($completed_target eq $target) {
+                                    $job_done = 1;
+                                    my $elapsed = time() - $build_start_time;
+                                    if ($exit_code != 0) {
+                                        # Failure message already shown via ERROR/OUTPUT
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!$job_done) {
+                        print $OUT "Build timed out after ${timeout}s\n";
+                    }
+                } else {
+                    # No job server - build sequentially
+                    eval { build_target($target); };
+                    if ($@) {
+                        print $OUT "Error building target: $@\n";
+                    }
                 }
             }
         }

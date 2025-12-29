@@ -1,0 +1,83 @@
+#!/bin/bash
+# Test smak with an external (alien) project
+# Usage: ./test-alien <directory>
+#        Tests building the project in the given directory
+
+set -e
+
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <directory>"
+    echo ""
+    echo "Tests smak with an external project by running:"
+    echo "  1. smak clean"
+    echo "  2. smak all"
+    echo ""
+    echo "Example:"
+    echo "  $0 /tmp/iverilog"
+    exit 1
+fi
+
+TARGET_DIR="$1"
+
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "Error: Directory '$TARGET_DIR' does not exist"
+    exit 1
+fi
+
+# Get absolute path to smak script
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SMAK="$SCRIPT_DIR/../smak"
+
+if [ ! -x "$SMAK" ]; then
+    echo "Error: smak script not found at $SMAK"
+    exit 1
+fi
+
+echo "======================================"
+echo "SMAK ALIEN PROJECT TEST"
+echo "======================================"
+echo "Project directory: $TARGET_DIR"
+echo "Using smak: $SMAK"
+echo ""
+
+cd "$TARGET_DIR"
+
+# Check if there's a Makefile
+if [ ! -f "Makefile" ] && [ ! -f "makefile" ]; then
+    echo "Warning: No Makefile found in $TARGET_DIR"
+    echo "Checking for configure script..."
+    if [ -f "configure" ]; then
+        echo "Found configure script, running it..."
+        ./configure
+    elif [ -f "autogen.sh" ]; then
+        echo "Found autogen.sh, running it..."
+        ./autogen.sh
+    else
+        echo "Error: No Makefile or configure script found"
+        exit 1
+    fi
+fi
+
+echo "Step 1: Clean"
+echo "-------------"
+if "$SMAK" clean; then
+    echo "Clean: SUCCESS"
+else
+    echo "Clean: FAILED"
+    exit 1
+fi
+
+echo ""
+echo "Step 2: Build"
+echo "-------------"
+if "$SMAK" all; then
+    echo "Build: SUCCESS"
+else
+    echo "Build: FAILED"
+    exit 1
+fi
+
+echo ""
+echo "======================================"
+echo "TEST COMPLETE: SUCCESS"
+echo "======================================"

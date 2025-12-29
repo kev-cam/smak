@@ -4704,6 +4704,7 @@ sub interactive_debug {
             print $OUT <<'HELP';
 Commands:
   list, l              - List all rules
+  rules <target>       - Show rules for a specific target
   build <target>       - Build a target
   progress	       - Show work in progress
   vpath <file>         - Test vpath resolution for a file
@@ -4728,6 +4729,81 @@ HELP
         }
         elsif ($cmd eq 'list' || $cmd eq 'l') {
             print_rules();
+        }
+        elsif ($cmd eq 'rules') {
+            if (@parts < 2) {
+                print $OUT "Usage: rules <target>\n";
+            } else {
+                my $target = $parts[1];
+
+                # Look for explicit rules
+                my $found = 0;
+                for my $makefile (keys %rules) {
+                    my $key = "$makefile\t$target";
+                    if (exists $rules{$key}) {
+                        $found = 1;
+                        print $OUT "Explicit rule in $makefile:\n";
+                        print $OUT "  Target: $target\n";
+
+                        # Show dependencies
+                        if (exists $rule_deps{$key}) {
+                            my @deps = @{$rule_deps{$key}};
+                            print $OUT "  Dependencies: " . join(' ', @deps) . "\n";
+                        }
+
+                        # Show commands
+                        my $cmds = $rules{$key};
+                        if ($cmds && @$cmds) {
+                            print $OUT "  Commands:\n";
+                            for my $cmd (@$cmds) {
+                                print $OUT "    $cmd\n";
+                            }
+                        } else {
+                            print $OUT "  Commands: (none)\n";
+                        }
+                    }
+                }
+
+                # Check for pattern rules that might match
+                for my $makefile (keys %pattern_rules) {
+                    for my $pattern_key (keys %{$pattern_rules{$makefile}}) {
+                        my ($prereqs_pattern, $target_pattern) = split(/\t/, $pattern_key, 2);
+
+                        # Simple pattern matching (handle % wildcard)
+                        my $pattern_re = $target_pattern;
+                        $pattern_re =~ s/%/(.*)/;
+                        $pattern_re = "^$pattern_re\$";
+
+                        if ($target =~ /$pattern_re/) {
+                            my $stem = $1 // '';
+                            print $OUT "Pattern rule in $makefile:\n";
+                            print $OUT "  Pattern: $target_pattern\n";
+                            print $OUT "  Matches: $target (stem='$stem')\n";
+
+                            if ($prereqs_pattern) {
+                                my $prereq = $prereqs_pattern;
+                                $prereq =~ s/%/$stem/g;
+                                print $OUT "  Prereqs pattern: $prereqs_pattern\n";
+                                print $OUT "  Expanded prereqs: $prereq\n";
+                            }
+
+                            my $cmds = $pattern_rules{$makefile}{$pattern_key};
+                            if ($cmds && @$cmds) {
+                                print $OUT "  Commands:\n";
+                                for my $cmd (@$cmds) {
+                                    print $OUT "    $cmd\n";
+                                }
+                            }
+                            $found = 1;
+                        }
+                    }
+                }
+
+                if (!$found) {
+                    print $OUT "No rules found for target '$target'\n";
+                    print $OUT "Target may be built by implicit rules or already exists\n";
+                }
+            }
         }
         elsif ($cmd eq 'build') {
             if (@parts < 2) {

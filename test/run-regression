@@ -175,6 +175,40 @@ SKIPPED=0
 declare -a FAILED_TESTS
 declare -a PASSED_TESTS
 
+# Function to show partial report and cleanup on interrupt
+show_partial_report() {
+    echo ""
+    echo ""
+    echo "======================================"
+    echo "INTERRUPTED - PARTIAL TEST SUMMARY"
+    echo "======================================"
+    echo "Total tests:   $TOTAL"
+    echo -e "Passed:        ${GREEN}$PASSED${NC}"
+    echo -e "Failed:        ${RED}$FAILED${NC}"
+    echo -e "Skipped:       ${YELLOW}$SKIPPED${NC}"
+
+    if [ $FAILED -gt 0 ]; then
+        echo ""
+        echo "Failed tests:"
+        for test in "${FAILED_TESTS[@]}"; do
+            echo -e "  ${RED}✗${NC} $test"
+        done
+    fi
+
+    echo ""
+    echo "Testing interrupted by user (Ctrl-C)"
+    echo ""
+
+    # Clean up any temp files from interrupted test
+    rm -f /tmp/smak-wrapper-*.sh 2>/dev/null
+    rm -f /tmp/smak-test-*.log 2>/dev/null
+
+    exit 130  # Standard exit code for SIGINT
+}
+
+# Set up Ctrl-C and termination handlers
+trap show_partial_report SIGINT SIGTERM
+
 echo "======================================"
 if [ $SANITY_MODE -eq 1 ]; then
     echo "SMAK SANITY CHECK (Quick Tests)"

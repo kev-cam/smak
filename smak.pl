@@ -4,6 +4,8 @@ use warnings;
 use Getopt::Long qw(:config);
 use FindBin qw($RealBin);
 use File::Path qw(make_path);
+use File::Spec;
+use Cwd qw(abs_path);
 use POSIX qw(strftime);
 use lib $RealBin;
 use Smak qw(:all);
@@ -33,6 +35,159 @@ my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
 my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
 my $remote_cd = '';  # Remote directory for SSH workers
+my $norc = 0;  # Skip reading .smak.rc files
+
+# Check for -norc early (before reading .smak.rc)
+for my $arg (@ARGV) {
+    if ($arg eq '-norc' || $arg eq '--norc') {
+        $norc = 1;
+        last;
+    }
+}
+
+# Read .smak.rc if it exists (before any other configuration)
+# Search upward from current directory for .smak.rc, fall back to ~/.smak.rc
+my $smakrc = '';
+if (!$norc) {
+    # Search upward from current directory for .smak.rc
+    my $dir = abs_path('.');
+    while (1) {
+        my $rc = File::Spec->catfile($dir, '.smak.rc');
+        if (-f $rc) {
+            $smakrc = $rc;
+            last;
+        }
+
+        # Move to parent directory
+        my $parent = File::Spec->catdir($dir, File::Spec->updir());
+        $parent = abs_path($parent);
+
+        # Stop if we've reached the root
+        last if $parent eq $dir;
+        $dir = $parent;
+    }
+
+    # Fall back to ~/.smak.rc if no .smak.rc found in directory tree
+    if (!$smakrc && $ENV{HOME} && -f "$ENV{HOME}/.smak.rc") {
+        $smakrc = "$ENV{HOME}/.smak.rc";
+    }
+}
+
+my $reconnect = 0;
+my $kill_old_js = 0;
+
+# Whitelist of allowed variable names for 'set' command
+my %allowed_vars = (
+    jobs => 1,
+    verbose => 1,
+    silent => 1,
+    dry_run => 1,
+    makefile => 1,
+    directory => 1,
+    ssh_host => 1,
+    remote_cd => 1,
+    cli => 1,
+    yes => 1,
+    reconnect => 1,      # Special: reconnect to existing job server
+    kill_old_js => 1,    # Special: kill old job server before reconnecting
+);
+
+if ($smakrc && -f $smakrc) {
+    if (open(my $rc_fh, '<', $smakrc)) {
+        my $line_num = 0;
+        while (my $line = <$rc_fh>) {
+            $line_num++;
+            chomp $line;
+            # Skip comments and empty lines
+            next if $line =~ /^\s*#/ || $line =~ /^\s*$/;
+
+            # Handle 'set name = value' command
+            if ($line =~ /^\s*set\s+(\w+)\s*=\s*(.+?)\s*$/) {
+                my ($name, $value) = ($1, $2);
+
+                # Check if variable is allowed
+                unless (exists $allowed_vars{$name}) {
+                    warn "$smakrc:$line_num: Unknown variable '$name' (not in whitelist)\n";
+                    next;
+                }
+
+                # Translate to Perl assignment
+                my $perl_code = "\$$name = $value";
+                eval $perl_code;
+                if ($@) {
+                    warn "$smakrc:$line_num: $@";
+                }
+                next;
+            }
+
+            # Otherwise execute as Perl code
+            eval $line;
+            warn "$smakrc:$line_num: $@" if $@;
+        }
+        close($rc_fh);
+    } else {
+        warn "Warning: Cannot read $smakrc: $!\n";
+    }
+}
+
+# Handle special reconnect and kill_old_js options
+if ($reconnect || $kill_old_js) {
+    my $connect_file = '.smak.connect';
+
+    if (-l $connect_file || -f $connect_file) {
+        # Read port file
+        if (open(my $port_fh, '<', $connect_file)) {
+            my $observer_port = <$port_fh>;
+            my $master_port = <$port_fh>;
+            close($port_fh);
+
+            if ($observer_port && $master_port) {
+                chomp($observer_port, $master_port);
+
+                # If kill_old_js is set, try to shutdown old server
+                if ($kill_old_js) {
+                    my $shutdown_socket = IO::Socket::INET->new(
+                        PeerHost => '127.0.0.1',
+                        PeerPort => $master_port,
+                        Proto    => 'tcp',
+                        Timeout  => 2,
+                    );
+                    if ($shutdown_socket) {
+                        print $shutdown_socket "SHUTDOWN\n";
+                        my $ack = <$shutdown_socket>;
+                        close($shutdown_socket);
+                        print "Shutdown old job server\n" if $verbose;
+                        # Wait a moment for shutdown to complete
+                        select(undef, undef, undef, 0.5);
+                    }
+                }
+
+                # If reconnect is set, try to connect to existing server
+                if ($reconnect && !$kill_old_js) {
+                    use IO::Socket::INET;
+                    my $test_socket = IO::Socket::INET->new(
+                        PeerHost => '127.0.0.1',
+                        PeerPort => $master_port,
+                        Proto    => 'tcp',
+                        Timeout  => 2,
+                    );
+                    if ($test_socket) {
+                        close($test_socket);
+                        # Set jobs to non-zero to indicate parallel mode
+                        # The actual connection will happen later via start_job_server
+                        $jobs = 1 unless $jobs;
+                        $Smak::job_server_master_port = $master_port;
+                        print "Reconnecting to existing job server (port $master_port)\n" if $verbose;
+                    } else {
+                        warn "Cannot connect to job server at port $master_port (may have already exited)\n";
+                    }
+                }
+            }
+        }
+    } elsif ($reconnect) {
+        warn "Cannot reconnect: .smak.connect not found\n";
+    }
+}
 
 # Detect recursive invocation early to prevent USR_SMAK_OPT from enabling parallel builds
 my $is_recursive = 0;
@@ -66,6 +221,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'v|verbose' => \$verbose,
         'ssh=s' => \$ssh_host,
         'cd=s' => \$remote_cd,
+        'norc' => \$norc,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -87,6 +243,7 @@ GetOptions(
     'v|verbose' => \$verbose,
     'ssh=s' => \$ssh_host,
     'cd=s' => \$remote_cd,
+    'norc' => \$norc,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)

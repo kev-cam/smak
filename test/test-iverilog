@@ -1,0 +1,185 @@
+#!/bin/bash
+# Comprehensive test of iverilog as an alien project
+# Tests sequential build, parallel build with timing, and interrupt handling
+
+set -e
+
+# Configuration
+IVERILOG_DIR="${1:-/tmp/iverilog}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SMAK="$SCRIPT_DIR/../smak"
+
+if [ ! -d "$IVERILOG_DIR" ]; then
+    echo "Error: iverilog directory not found at $IVERILOG_DIR"
+    echo "Usage: $0 [iverilog-directory]"
+    echo "Default: /tmp/iverilog"
+    exit 1
+fi
+
+if [ ! -x "$SMAK" ]; then
+    echo "Error: smak script not found at $SMAK"
+    exit 1
+fi
+
+echo "======================================"
+echo "IVERILOG ALIEN PROJECT TEST"
+echo "======================================"
+echo "Project directory: $IVERILOG_DIR"
+echo "Using smak: $SMAK"
+echo ""
+
+cd "$IVERILOG_DIR"
+
+# Ensure we have a Makefile
+if [ ! -f "Makefile" ] && [ ! -f "makefile" ]; then
+    echo "No Makefile found, checking for configure..."
+    if [ -f "configure" ]; then
+        echo "Running configure..."
+        ./configure
+    elif [ -f "autogen.sh" ]; then
+        echo "Running autogen.sh..."
+        ./autogen.sh
+    else
+        echo "Error: No Makefile or configure script found"
+        exit 1
+    fi
+fi
+
+# Test 1: Sequential build
+echo "======================================"
+echo "Test 1: Sequential Build"
+echo "======================================"
+echo "Cleaning first..."
+"$SMAK" clean > /dev/null 2>&1 || true
+
+echo "Building sequentially..."
+START_SEQ=$(date +%s)
+if "$SMAK" all; then
+    END_SEQ=$(date +%s)
+    SEQ_TIME=$((END_SEQ - START_SEQ))
+    echo "Sequential build: SUCCESS (${SEQ_TIME}s)"
+else
+    echo "Sequential build: FAILED"
+    exit 1
+fi
+
+# Test 2: Parallel build
+echo ""
+echo "======================================"
+echo "Test 2: Parallel Build"
+echo "======================================"
+echo "Cleaning..."
+"$SMAK" clean > /dev/null 2>&1 || true
+
+echo "Building with -j4..."
+START_PAR=$(date +%s)
+if "$SMAK" -j4 all; then
+    END_PAR=$(date +%s)
+    PAR_TIME=$((END_PAR - START_PAR))
+    echo "Parallel build: SUCCESS (${PAR_TIME}s)"
+else
+    echo "Parallel build: FAILED"
+    exit 1
+fi
+
+# Calculate speedup
+if [ $SEQ_TIME -gt 0 ]; then
+    SPEEDUP=$(echo "scale=2; $SEQ_TIME / $PAR_TIME" | bc)
+    echo ""
+    echo "Performance comparison:"
+    echo "  Sequential: ${SEQ_TIME}s"
+    echo "  Parallel:   ${PAR_TIME}s"
+    echo "  Speedup:    ${SPEEDUP}x"
+fi
+
+# Test 3: Interrupt handling
+echo ""
+echo "======================================"
+echo "Test 3: Interrupt and Resume"
+echo "======================================"
+echo "Cleaning..."
+"$SMAK" clean > /dev/null 2>&1 || true
+
+# Create a test script that interrupts the build midway
+INTERRUPT_SCRIPT="/tmp/iverilog-interrupt-test-$$.sh"
+cat > "$INTERRUPT_SCRIPT" << 'EOF'
+#!/bin/bash
+# Start build in background
+"$1" -j4 all &
+BUILD_PID=$!
+
+# Wait for build to get started (give it a few seconds)
+sleep 3
+
+# Send interrupt
+echo "Sending interrupt to build..."
+kill -INT $BUILD_PID 2>/dev/null || true
+
+# Wait for it to stop
+wait $BUILD_PID 2>/dev/null || true
+
+echo "Build interrupted, resuming..."
+
+# Resume the build
+if "$1" -j4 all; then
+    echo "Resume build: SUCCESS"
+    exit 0
+else
+    echo "Resume build: FAILED"
+    exit 1
+fi
+EOF
+
+chmod +x "$INTERRUPT_SCRIPT"
+
+echo "Testing interrupt and resume..."
+if bash "$INTERRUPT_SCRIPT" "$SMAK"; then
+    echo "Interrupt test: SUCCESS"
+    INTERRUPT_RESULT="PASS"
+else
+    echo "Interrupt test: FAILED"
+    INTERRUPT_RESULT="FAIL"
+fi
+
+rm -f "$INTERRUPT_SCRIPT"
+
+# Test 4: Verify clean
+echo ""
+echo "======================================"
+echo "Test 4: Clean Verification"
+echo "======================================"
+if "$SMAK" clean; then
+    # Check if object files remain
+    OBJ_COUNT=$(find . -name "*.o" 2>/dev/null | wc -l)
+    if [ "$OBJ_COUNT" -eq 0 ]; then
+        echo "Clean verification: SUCCESS (no .o files remain)"
+        CLEAN_RESULT="PASS"
+    else
+        echo "Clean verification: FAILED ($OBJ_COUNT .o files remain)"
+        CLEAN_RESULT="FAIL"
+    fi
+else
+    echo "Clean command: FAILED"
+    CLEAN_RESULT="FAIL"
+fi
+
+# Summary
+echo ""
+echo "======================================"
+echo "TEST SUMMARY"
+echo "======================================"
+echo "Sequential build:     PASS (${SEQ_TIME}s)"
+echo "Parallel build:       PASS (${PAR_TIME}s)"
+echo "Speedup:              ${SPEEDUP}x"
+echo "Interrupt/Resume:     $INTERRUPT_RESULT"
+echo "Clean verification:   $CLEAN_RESULT"
+echo "======================================"
+echo ""
+
+if [ "$INTERRUPT_RESULT" = "PASS" ] && [ "$CLEAN_RESULT" = "PASS" ]; then
+    echo "All tests PASSED"
+    exit 0
+else
+    echo "Some tests FAILED"
+    exit 1
+fi

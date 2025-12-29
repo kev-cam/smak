@@ -4926,55 +4926,158 @@ sub auto_rescan_watcher {
 sub run_standalone_scanner {
     my (@watch_paths) = @_;
 
-    # Validate paths
+    use IO::Socket::INET;
+    use IO::Select;
+    use File::Spec;
+    use File::Basename;
+    use Cwd 'abs_path';
+
+    # Convert paths to absolute
+    my @abs_paths;
+    my %path_map;  # Maps absolute paths back to original
     for my $path (@watch_paths) {
+        my $abs_path = abs_path($path) || File::Spec->rel2abs($path);
+        push @abs_paths, $abs_path;
+        $path_map{$abs_path} = $path;
         if (! -e $path) {
             warn "Warning: Path does not exist: $path\n";
         }
     }
 
-    # Track file mtimes
-    my %last_mtimes;
+    # Check for FUSE monitoring
+    my %fuse_sockets;  # mountpoint => socket
+    my %fuse_paths;    # path => mountpoint
+    my %polling_paths; # Paths that need polling
 
-    # Initialize mtimes for existing files
-    for my $path (@watch_paths) {
-        if (-e $path) {
-            $last_mtimes{$path} = (stat($path))[9];
+    for my $abs_path (@abs_paths) {
+        my $dir = -d $abs_path ? $abs_path : dirname($abs_path);
+
+        if (my ($mountpoint, $fuse_port, $server, $remote_path) = detect_fuse_monitor($dir)) {
+            # Check if we already connected to this mountpoint
+            if (!exists $fuse_sockets{$mountpoint}) {
+                my $socket = IO::Socket::INET->new(
+                    PeerHost => '127.0.0.1',
+                    PeerPort => $fuse_port,
+                    Proto    => 'tcp',
+                    Timeout  => 5,
+                );
+                if ($socket) {
+                    $socket->autoflush(1);
+                    $fuse_sockets{$mountpoint} = $socket;
+                    print STDERR "Connected to FUSE monitor for $mountpoint (port $fuse_port)\n";
+                } else {
+                    warn "Warning: Could not connect to FUSE monitor on port $fuse_port: $!\n";
+                    $polling_paths{$abs_path} = 1;
+                }
+            }
+            $fuse_paths{$abs_path} = $mountpoint if exists $fuse_sockets{$mountpoint};
+        } else {
+            $polling_paths{$abs_path} = 1;
         }
     }
 
-    # Output format matches FUSE monitor: OP:PID:PATH
+    # Track file mtimes for polling paths
+    my %last_mtimes;
+    for my $abs_path (keys %polling_paths) {
+        if (-e $abs_path) {
+            $last_mtimes{$abs_path} = (stat($abs_path))[9];
+        }
+    }
+
     my $pid = $$;
+
+    # Set up select for FUSE sockets
+    my $select = IO::Select->new();
+    for my $socket (values %fuse_sockets) {
+        $select->add($socket);
+    }
+
+    # Track inode to path mapping for FUSE events
+    my %inode_to_path;
 
     # Main scanner loop (runs until interrupted)
     while (1) {
-        for my $path (@watch_paths) {
-            if (!-e $path) {
+        # Check FUSE sockets with small timeout
+        my @ready = $select->can_read(0.5);
+
+        for my $socket (@ready) {
+            my $line = <$socket>;
+            unless (defined $line) {
+                # FUSE monitor disconnected
+                print STDERR "FUSE monitor disconnected\n";
+                $select->remove($socket);
+                # Move paths from this socket to polling
+                for my $path (keys %fuse_paths) {
+                    my $mp = $fuse_paths{$path};
+                    if ($fuse_sockets{$mp} == $socket) {
+                        delete $fuse_paths{$path};
+                        $polling_paths{$path} = 1;
+                        $last_mtimes{$path} = (stat($path))[9] if -e $path;
+                    }
+                }
+                next;
+            }
+            chomp $line;
+
+            # Parse FUSE event: OP:PID:INODE or INO:INODE:PATH
+            if ($line =~ /^(\w+):(\d+):(.+)$/) {
+                my ($op, $arg1, $arg2) = ($1, $2, $3);
+
+                if ($op eq 'INO') {
+                    # Inode-to-path mapping
+                    my ($inode, $fuse_path) = ($arg1, $arg2);
+                    $inode_to_path{$inode} = $fuse_path;
+                } elsif ($op =~ /^(DELETE|MODIFY|CREATE)$/) {
+                    my $inode = $arg2;
+                    my $fuse_path = $inode_to_path{$inode} || "inode:$inode";
+
+                    # Check if this path is in our watch list
+                    for my $abs_path (keys %fuse_paths) {
+                        # Simple check - if the FUSE path ends with our watched file
+                        my $watch_file = File::Spec->abs2rel($abs_path, '/');
+                        if ($fuse_path =~ /\Q$watch_file\E$/ || $abs_path eq $fuse_path) {
+                            my $orig_path = $path_map{$abs_path};
+                            print "$op:$pid:$orig_path (via FUSE)\n";
+                            STDOUT->flush();
+                        }
+                    }
+                }
+            }
+        }
+
+        # Poll non-FUSE paths
+        for my $abs_path (keys %polling_paths) {
+            my $orig_path = $path_map{$abs_path};
+            if (!-e $abs_path) {
                 # File was deleted
-                if (exists $last_mtimes{$path}) {
-                    print "DELETE:$pid:$path\n";
+                if (exists $last_mtimes{$abs_path}) {
+                    print "DELETE:$pid:$orig_path\n";
                     STDOUT->flush();
-                    delete $last_mtimes{$path};
+                    delete $last_mtimes{$abs_path};
                 }
             } else {
                 # File exists - check if modified
-                my $current_mtime = (stat($path))[9];
-                if (!exists $last_mtimes{$path}) {
+                my $current_mtime = (stat($abs_path))[9];
+                if (!defined $current_mtime) {
+                    # stat failed, file disappeared between -e check and stat
+                    next;
+                }
+                if (!exists $last_mtimes{$abs_path}) {
                     # Newly appeared
-                    $last_mtimes{$path} = $current_mtime;
-                    print "CREATE:$pid:$path\n";
+                    $last_mtimes{$abs_path} = $current_mtime;
+                    print "CREATE:$pid:$orig_path\n";
                     STDOUT->flush();
-                } elsif ($current_mtime != $last_mtimes{$path}) {
+                } elsif ($current_mtime != $last_mtimes{$abs_path}) {
                     # Modified
-                    $last_mtimes{$path} = $current_mtime;
-                    print "MODIFY:$pid:$path\n";
+                    $last_mtimes{$abs_path} = $current_mtime;
+                    print "MODIFY:$pid:$orig_path\n";
                     STDOUT->flush();
                 }
             }
         }
 
-        # Sleep 1 second between scans (low CPU usage)
-        sleep 1;
+        # Sleep briefly if we're only polling (FUSE has already waited in select)
+        sleep 0.5 if keys %polling_paths;
     }
 }
 

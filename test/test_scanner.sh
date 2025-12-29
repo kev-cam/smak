@@ -40,12 +40,17 @@ echo ""
 echo "Scanner output:"
 cat /tmp/scanner-output-$$.txt
 
-# Verify events
-if grep -q "CREATE:$SCANNER_PID:test_scan_file.txt" /tmp/scanner-output-$$.txt && \
-   grep -q "MODIFY:$SCANNER_PID:test_scan_file.txt" /tmp/scanner-output-$$.txt && \
-   grep -q "DELETE:$SCANNER_PID:test_scan_file.txt" /tmp/scanner-output-$$.txt; then
+# Verify events (allow optional " (via FUSE)" suffix)
+if grep -qE "CREATE:$SCANNER_PID:test_scan_file.txt( \(via FUSE\))?" /tmp/scanner-output-$$.txt && \
+   grep -qE "MODIFY:$SCANNER_PID:test_scan_file.txt( \(via FUSE\))?" /tmp/scanner-output-$$.txt && \
+   grep -qE "DELETE:$SCANNER_PID:test_scan_file.txt( \(via FUSE\))?" /tmp/scanner-output-$$.txt; then
     echo ""
-    echo "✓ All events detected correctly"
+    # Check if FUSE was used
+    if grep -q "(via FUSE)" /tmp/scanner-output-$$.txt; then
+        echo "✓ All events detected correctly (using FUSE monitoring)"
+    else
+        echo "✓ All events detected correctly (using polling)"
+    fi
     rm -f /tmp/scanner-output-$$.txt
     exit 0
 else

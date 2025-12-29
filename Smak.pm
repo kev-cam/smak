@@ -4426,8 +4426,14 @@ sub cmd_rescan {
             # Check if FUSE is detected to provide helpful feedback
             if ($ENV{SMAK_FUSE_DETECTED} && $auto) {
                 print "Note: Auto-rescan is disabled on FUSE filesystems (use 'unwatch' then 'rescan -auto' if needed)\n";
+            } else {
+                # Print confirmation message
+                if ($auto) {
+                    print "Auto-rescan enabled (will activate when job server starts)\n";
+                } elsif ($noauto) {
+                    print "Auto-rescan disabled\n";
+                }
             }
-            # Otherwise silently ignore (will be set correctly when job server starts)
         } else {
             # Basic rescan - just note that job server is needed for full functionality
             print "Job server not running. Start with -j option for full rescan functionality.\n";
@@ -4842,6 +4848,9 @@ Commands:
   rules <target>       - Show rules for a specific target
   build <target>       - Build a target
   progress	       - Show work in progress
+  rescan               - Rescan timestamps
+  rescan -auto         - Enable auto-rescan (detects file changes automatically)
+  rescan -noauto       - Disable auto-rescan
   vpath <file>         - Test vpath resolution for a file
   dry-run <target>     - Dry run a target
   print <expr>         - Evaluate and print an expression (in isolated subprocess)
@@ -4961,6 +4970,11 @@ HELP
 		}
 	    }
 	}
+        elsif ($cmd eq 'rescan') {
+            # Handle rescan command
+            shift @parts;  # Remove 'rescan' from @parts to get just the arguments
+            cmd_rescan(\@parts, $job_server_socket);
+        }
         elsif ($cmd eq 'vpath') {
             if (@parts < 2) {
                 print $OUT "Usage: vpath <file>\n";

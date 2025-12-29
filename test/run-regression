@@ -275,8 +275,8 @@ WRAPPER_EOF
             # Default: non-interactive tests, redirect stdin (with timeout)
             # For parallel mode, modify the test script invocation
             if [ -n "$mode_jobs" ]; then
-                # Inject -j4 into smak invocation
-                timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(smak[^-]*\)/\1 -j4 /' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
+                # Inject -j4 into smak invocation (handles both $SMAK variable and literal 'smak')
+                timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(\$\{SMAK\}\|\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
             else
                 timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
             fi
@@ -344,7 +344,7 @@ WRAPPER_EOF
     fi
     if [ $has_fail_test -eq 1 ]; then
         local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
-        timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(smak[^-]*\)/\1 -j4 /' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
+        timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(\$\{SMAK\}\|\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
         result_par_nocache_fail=$?
         rm -f "$fail_out"
     fi
@@ -361,7 +361,7 @@ WRAPPER_EOF
     fi
     if [ $has_fail_test -eq 1 ]; then
         local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
-        timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(smak[^-]*\)/\1 -j4 /' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
+        timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(\$\{SMAK\}\|\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
         result_par_cache_fail=$?
         rm -f "$fail_out"
     fi

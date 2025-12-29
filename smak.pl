@@ -1106,4 +1106,14 @@ sub prompt_commit_bug_report {
 }
 
 # Debug mode - enter interactive debugger
+# Start job server if parallel builds are requested (for auto-rescan support)
+if ($jobs > 0 && !$Smak::job_server_socket) {
+    start_job_server();
+}
+
 interactive_debug();
+
+# Clean up job server if it was started
+if ($Smak::job_server_socket) {
+    stop_job_server();
+}

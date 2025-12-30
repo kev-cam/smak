@@ -13,9 +13,11 @@ test/test
 test/program
 test/test-debug
 test/example-debug
-test/Makefile.autorescan
-test/test_auto.c
 *~
 
 # Cloned test repositories
 iverilog/
+test/.smak.connect
+
+# Test artifacts
+test/failures-*/

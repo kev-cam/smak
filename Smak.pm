@@ -419,12 +419,14 @@ sub execute_command_sequential {
 
     for my $part (@command_parts) {
         $part =~ s/^\s+|\s+$//g;  # Trim whitespace
+        $part =~ s/^[@-]+//;      # Strip @ (silent) and - (ignore errors) prefixes
         # Match: smak -C <dir> <target> or make -C <dir> <target>
-        # Also handle trailing " true" or similar
-        if ($part =~ m{^(?:(?:/[\w/.-]+/)?(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
+        # Also match relative paths like ../smak or ./smak
+        # Allow optional flags (like -j4) between smak and -C
+        if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make))(?:\s+-\S+)*\s+-C\s+(\S+)\s+(\S+)}) {
             push @recursive_calls, { dir => $1, target => $2 };
-        } elsif ($part eq 'true' || $part eq ':') {
-            # Ignore these no-op commands
+        } elsif ($part eq 'true' || $part eq ':' || $part eq '') {
+            # Ignore these no-op commands and empty parts
             next;
         } else {
             $all_recursive = 0;
@@ -435,56 +437,70 @@ sub execute_command_sequential {
     if ($all_recursive && @recursive_calls > 0) {
         warn "DEBUG[" . __LINE__ . "]: Detected " . scalar(@recursive_calls) . " recursive build(s) in chain\n" if $ENV{SMAK_DEBUG};
 
-        # Handle all recursive calls in-process
-        use Cwd 'getcwd';
-        my $saved_dir = getcwd();
-        my $saved_makefile = $makefile;
+        # Check if built-in optimizations are disabled (for testing)
+        if ($ENV{SMAK_NO_BUILTINS}) {
+            warn "DEBUG[" . __LINE__ . "]: SMAK_NO_BUILTINS set - skipping in-process optimization\n" if $ENV{SMAK_DEBUG};
+            # Fall through to spawn subprocess
+        } else {
+            # Handle all recursive calls in-process
+            use Cwd 'getcwd';
+            my $saved_dir = getcwd();
+            my $saved_makefile = $makefile;
 
-        eval {
-            for my $call (@recursive_calls) {
-                my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
-                warn "DEBUG[" . __LINE__ . "]: In-process build: dir='$subdir' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
+            eval {
+                for my $call (@recursive_calls) {
+                    my ($subdir, $subtarget) = ($call->{dir}, $call->{target});
+                    warn "DEBUG[" . __LINE__ . "]: In-process build: dir='$subdir' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
 
-                # Convert subdir to absolute path to avoid issues with relative paths
-                my $abs_subdir = $subdir;
-                unless ($abs_subdir =~ m{^/}) {
-                    # Relative path - make it absolute from the saved directory
-                    $abs_subdir = "$saved_dir/$subdir";
+                    # Convert subdir to absolute path to avoid issues with relative paths
+                    my $abs_subdir = $subdir;
+                    unless ($abs_subdir =~ m{^/}) {
+                        # Relative path - make it absolute from the saved directory
+                        $abs_subdir = "$saved_dir/$subdir";
+                    }
+
+                    chdir($abs_subdir) or die "Cannot chdir to $abs_subdir: $!\n";
+
+                    # Parse the Makefile in the subdirectory if not already done
+                    my $sub_makefile = "Makefile";
+                    if (-f $sub_makefile) {
+                        # Temporarily update $makefile for proper rule keys
+                        $makefile = $sub_makefile;
+                        parse_makefile($sub_makefile) unless $parsed_file_mtimes{$sub_makefile};
+                    }
+
+                    # Build the target in the subdirectory
+                    build_target($subtarget);
+
+                    # Change back to saved dir for next iteration
+                    chdir($saved_dir);
+                    $makefile = $saved_makefile;
                 }
+            };
 
-                chdir($abs_subdir) or die "Cannot chdir to $abs_subdir: $!\n";
+            my $error = $@;
 
-                # Parse the Makefile in the subdirectory if not already done
-                my $sub_makefile = "Makefile";
-                if (-f $sub_makefile) {
-                    # Temporarily update $makefile for proper rule keys
-                    $makefile = $sub_makefile;
-                    parse_makefile($sub_makefile) unless $parsed_file_mtimes{$sub_makefile};
-                }
+            # Restore directory and makefile
+            chdir($saved_dir);
+            $makefile = $saved_makefile;
 
-                # Build the target in the subdirectory
-                build_target($subtarget);
+            chdir($old_dir) if $old_dir;
 
-                # Change back to saved dir for next iteration
-                chdir($saved_dir);
-                $makefile = $saved_makefile;
+            if ($error) {
+                die $error;
             }
-        };
 
-        my $error = $@;
-
-        # Restore directory and makefile
-        chdir($saved_dir);
-        $makefile = $saved_makefile;
-
-        chdir($old_dir) if $old_dir;
-
-        if ($error) {
-            die $error;
+            warn "DEBUG[" . __LINE__ . "]: In-process recursive builds complete\n" if $ENV{SMAK_DEBUG};
+            return 0;
         }
+    }
 
-        warn "DEBUG[" . __LINE__ . "]: In-process recursive builds complete\n" if $ENV{SMAK_DEBUG};
-        return 0;
+    # Assert that we should be using built-in optimizations (for testing)
+    if ($ENV{SMAK_ASSERT_NO_SPAWN} && $all_recursive && @recursive_calls > 0) {
+        die "SMAK_ASSERT_NO_SPAWN: About to spawn subprocess for recursive build, but built-in should be used\n" .
+            "Command: $command\n" .
+            "Recursive calls detected: " . scalar(@recursive_calls) . "\n" .
+            "Targets: " . join(", ", map { "$_->{dir}/$_->{target}" } @recursive_calls) . "\n";
     }
 
     # Execute command
@@ -4426,8 +4442,14 @@ sub cmd_rescan {
             # Check if FUSE is detected to provide helpful feedback
             if ($ENV{SMAK_FUSE_DETECTED} && $auto) {
                 print "Note: Auto-rescan is disabled on FUSE filesystems (use 'unwatch' then 'rescan -auto' if needed)\n";
+            } else {
+                # Print confirmation message
+                if ($auto) {
+                    print "Auto-rescan enabled (will activate when job server starts)\n";
+                } elsif ($noauto) {
+                    print "Auto-rescan disabled\n";
+                }
             }
-            # Otherwise silently ignore (will be set correctly when job server starts)
         } else {
             # Basic rescan - just note that job server is needed for full functionality
             print "Job server not running. Start with -j option for full rescan functionality.\n";
@@ -4782,6 +4804,299 @@ sub cmd_restart {
 }
 
 
+sub perform_auto_rescan {
+    my ($last_mtimes_ref, $OUT) = @_;
+    my $stale_count = 0;
+
+    # Get targets that have been built (from rules hash)
+    my %targets_to_check;
+
+    # Access package variables
+    our %fixed_rule;
+    our %is_phony;
+    our %stale_targets_cache;
+
+    # Check all rules for targets that exist as files
+    for my $key (keys %fixed_rule) {
+        my ($mf, $target) = split(/\t/, $key, 2);
+        next unless $target;
+
+        # Skip phony targets
+        next if exists $is_phony{$target};
+        next if $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/;
+
+        $targets_to_check{$target} = 1 if -e $target;
+    }
+
+    # Check each target for changes
+    for my $target (keys %targets_to_check) {
+        my $current_mtime = (stat($target))[9];
+
+        if (!-e $target) {
+            # File was deleted
+            if (exists $last_mtimes_ref->{$target}) {
+                $stale_count++;
+                delete $last_mtimes_ref->{$target};
+                # Mark as stale in cache
+                $stale_targets_cache{$target} = time();
+                print STDERR "  [auto-rescan] Marked stale (deleted): $target\n" if $ENV{SMAK_DEBUG};
+            }
+        } elsif (!exists $last_mtimes_ref->{$target}) {
+            # New file - track it
+            $last_mtimes_ref->{$target} = $current_mtime;
+        } elsif ($current_mtime != $last_mtimes_ref->{$target}) {
+            # File was modified
+            $stale_count++;
+            $last_mtimes_ref->{$target} = $current_mtime;
+            # Mark as stale in cache
+            $stale_targets_cache{$target} = time();
+            print STDERR "  [auto-rescan] Marked stale (modified): $target\n" if $ENV{SMAK_DEBUG};
+        }
+    }
+
+    return $stale_count;
+}
+
+sub auto_rescan_watcher {
+    my ($socket, $makefile_ref) = @_;
+
+    # Run at lower priority to avoid interfering with builds
+    eval { setpriority(0, 0, 10); };  # Nice +10 (lower priority)
+
+    # Track file mtimes
+    my %last_mtimes;
+    my %watched_targets;  # Targets we're actively watching
+
+    # Get initial list of targets from makefile
+    our %fixed_rule;
+    our %is_phony;
+
+    # Populate initial watch list with non-phony file targets
+    for my $key (keys %fixed_rule) {
+        my ($mf, $target) = split(/\t/, $key, 2);
+        next unless $target;
+        next if exists $is_phony{$target};
+        next if $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/;
+
+        if (-e $target) {
+            $watched_targets{$target} = 1;
+            $last_mtimes{$target} = (stat($target))[9];
+        }
+    }
+
+    $socket->autoflush(1);
+
+    # Main watcher loop
+    while (1) {
+        # Check for commands from parent (non-blocking)
+        $socket->blocking(0);
+        while (my $cmd = <$socket>) {
+            chomp $cmd;
+
+            if ($cmd eq 'SHUTDOWN') {
+                exit 0;
+            } elsif ($cmd =~ /^WATCH:(.+)$/) {
+                my $target = $1;
+                $watched_targets{$target} = 1;
+                if (-e $target) {
+                    $last_mtimes{$target} = (stat($target))[9];
+                }
+            } elsif ($cmd =~ /^UNWATCH:(.+)$/) {
+                my $target = $1;
+                delete $watched_targets{$target};
+                delete $last_mtimes{$target};
+            }
+        }
+
+        # Scan watched targets for changes
+        for my $target (keys %watched_targets) {
+            if (!-e $target) {
+                # File was deleted
+                if (exists $last_mtimes{$target}) {
+                    $socket->blocking(1);
+                    print $socket "DELETE:$$:$target\n";
+                    delete $last_mtimes{$target};
+                }
+            } else {
+                # File exists - check if modified
+                my $current_mtime = (stat($target))[9];
+                if (!exists $last_mtimes{$target}) {
+                    # Newly appeared
+                    $last_mtimes{$target} = $current_mtime;
+                    $socket->blocking(1);
+                    print $socket "CREATE:$$:$target\n";
+                } elsif ($current_mtime != $last_mtimes{$target}) {
+                    # Modified
+                    $last_mtimes{$target} = $current_mtime;
+                    $socket->blocking(1);
+                    print $socket "MODIFY:$$:$target\n";
+                }
+            }
+        }
+
+        # Sleep ~1 second between scans (low CPU usage)
+        sleep 1;
+    }
+}
+
+sub run_standalone_scanner {
+    my (@watch_paths) = @_;
+
+    use IO::Socket::INET;
+    use IO::Select;
+    use File::Spec;
+    use File::Basename;
+    use Cwd 'abs_path';
+
+    # Convert paths to absolute
+    my @abs_paths;
+    my %path_map;  # Maps absolute paths back to original
+    for my $path (@watch_paths) {
+        my $abs_path = abs_path($path) || File::Spec->rel2abs($path);
+        push @abs_paths, $abs_path;
+        $path_map{$abs_path} = $path;
+        if (! -e $path) {
+            warn "Warning: Path does not exist: $path\n";
+        }
+    }
+
+    # Check for FUSE monitoring
+    my %fuse_sockets;  # mountpoint => socket
+    my %fuse_paths;    # path => mountpoint
+    my %polling_paths; # Paths that need polling
+
+    for my $abs_path (@abs_paths) {
+        my $dir = -d $abs_path ? $abs_path : dirname($abs_path);
+
+        if (my ($mountpoint, $fuse_port, $server, $remote_path) = detect_fuse_monitor($dir)) {
+            # Check if we already connected to this mountpoint
+            if (!exists $fuse_sockets{$mountpoint}) {
+                my $socket = IO::Socket::INET->new(
+                    PeerHost => '127.0.0.1',
+                    PeerPort => $fuse_port,
+                    Proto    => 'tcp',
+                    Timeout  => 5,
+                );
+                if ($socket) {
+                    $socket->autoflush(1);
+                    $fuse_sockets{$mountpoint} = $socket;
+                    print STDERR "Connected to FUSE monitor for $mountpoint (port $fuse_port)\n";
+                } else {
+                    warn "Warning: Could not connect to FUSE monitor on port $fuse_port: $!\n";
+                    $polling_paths{$abs_path} = 1;
+                }
+            }
+            $fuse_paths{$abs_path} = $mountpoint if exists $fuse_sockets{$mountpoint};
+        } else {
+            $polling_paths{$abs_path} = 1;
+        }
+    }
+
+    # Track file mtimes for polling paths
+    my %last_mtimes;
+    for my $abs_path (keys %polling_paths) {
+        if (-e $abs_path) {
+            $last_mtimes{$abs_path} = (stat($abs_path))[9];
+        }
+    }
+
+    my $pid = $$;
+
+    # Set up select for FUSE sockets
+    my $select = IO::Select->new();
+    for my $socket (values %fuse_sockets) {
+        $select->add($socket);
+    }
+
+    # Track inode to path mapping for FUSE events
+    my %inode_to_path;
+
+    # Main scanner loop (runs until interrupted)
+    while (1) {
+        # Check FUSE sockets with small timeout
+        my @ready = $select->can_read(0.5);
+
+        for my $socket (@ready) {
+            my $line = <$socket>;
+            unless (defined $line) {
+                # FUSE monitor disconnected
+                print STDERR "FUSE monitor disconnected\n";
+                $select->remove($socket);
+                # Move paths from this socket to polling
+                for my $path (keys %fuse_paths) {
+                    my $mp = $fuse_paths{$path};
+                    if ($fuse_sockets{$mp} == $socket) {
+                        delete $fuse_paths{$path};
+                        $polling_paths{$path} = 1;
+                        $last_mtimes{$path} = (stat($path))[9] if -e $path;
+                    }
+                }
+                next;
+            }
+            chomp $line;
+
+            # Parse FUSE event: OP:PID:INODE or INO:INODE:PATH
+            if ($line =~ /^(\w+):(\d+):(.+)$/) {
+                my ($op, $arg1, $arg2) = ($1, $2, $3);
+
+                if ($op eq 'INO') {
+                    # Inode-to-path mapping
+                    my ($inode, $fuse_path) = ($arg1, $arg2);
+                    $inode_to_path{$inode} = $fuse_path;
+                } elsif ($op =~ /^(DELETE|MODIFY|CREATE)$/) {
+                    my $inode = $arg2;
+                    my $fuse_path = $inode_to_path{$inode} || "inode:$inode";
+
+                    # Check if this path is in our watch list
+                    for my $abs_path (keys %fuse_paths) {
+                        # Simple check - if the FUSE path ends with our watched file
+                        my $watch_file = File::Spec->abs2rel($abs_path, '/');
+                        if ($fuse_path =~ /\Q$watch_file\E$/ || $abs_path eq $fuse_path) {
+                            my $orig_path = $path_map{$abs_path};
+                            print "$op:$pid:$orig_path (via FUSE)\n";
+                            STDOUT->flush();
+                        }
+                    }
+                }
+            }
+        }
+
+        # Poll non-FUSE paths
+        for my $abs_path (keys %polling_paths) {
+            my $orig_path = $path_map{$abs_path};
+            if (!-e $abs_path) {
+                # File was deleted
+                if (exists $last_mtimes{$abs_path}) {
+                    print "DELETE:$pid:$orig_path\n";
+                    STDOUT->flush();
+                    delete $last_mtimes{$abs_path};
+                }
+            } else {
+                # File exists - check if modified
+                my $current_mtime = (stat($abs_path))[9];
+                if (!defined $current_mtime) {
+                    # stat failed, file disappeared between -e check and stat
+                    next;
+                }
+                if (!exists $last_mtimes{$abs_path}) {
+                    # Newly appeared
+                    $last_mtimes{$abs_path} = $current_mtime;
+                    print "CREATE:$pid:$orig_path\n";
+                    STDOUT->flush();
+                } elsif ($current_mtime != $last_mtimes{$abs_path}) {
+                    # Modified
+                    $last_mtimes{$abs_path} = $current_mtime;
+                    print "MODIFY:$pid:$orig_path\n";
+                    STDOUT->flush();
+                }
+            }
+        }
+
+        # Sleep briefly if we're only polling (FUSE has already waited in select)
+        sleep 0.5 if keys %polling_paths;
+    }
+}
+
 sub interactive_debug {
     my ($OUT,$input) = @_ ;
     my $term = Term::ReadLine->new('smak');
@@ -4794,28 +5109,86 @@ sub interactive_debug {
     # Set interactive flag so Ctrl-C doesn't exit
     local $interactive = 1;
 
+    # Auto-rescan state
+    my $auto_rescan_enabled = 0;
+    my $watcher_pid;
+    my $watcher_socket;
+
     # Declare package variables used in CLI commands
     our %rules;
     our %rule_deps;
     our %pattern_rules;
 
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
+    $OUT->flush() if $OUT->can('flush');
 
     while (1) {
         if (!$have_input) {
-            $input = $term->readline($echo ? $prompt : $prompt);
-            unless (defined $input) {
-                # EOF (Ctrl-D) or Ctrl-C
-                if ($SmakCli::cancel_requested) {
-                    $SmakCli::cancel_requested = 0;  # Clear the flag
-                    next;  # Return to prompt, don't exit
+            # Print prompt before waiting for input
+            print $OUT $prompt;
+            $OUT->flush() if $OUT->can('flush');
+            STDOUT->flush();
+            # Use select() with timeout to allow periodic checks
+            my $rin = '';
+            vec($rin, fileno(STDIN), 1) = 1;
+
+            # Add watcher socket to select if auto-rescan is enabled
+            if ($watcher_socket) {
+                vec($rin, fileno($watcher_socket), 1) = 1;
+            }
+
+            my $timeout = 60.0;  # 60s timeout (watcher handles auto-rescan timing)
+            my $nfound = select(my $rout = $rin, undef, undef, $timeout);
+
+            if ($nfound > 0) {
+                # Check if watcher has events
+                if ($watcher_socket && vec($rout, fileno($watcher_socket), 1)) {
+                    # Process watcher events
+                    $watcher_socket->blocking(0);
+                    while (my $event = <$watcher_socket>) {
+                        chomp $event;
+
+                        # Parse event: "OP:PID:PATH"
+                        if ($event =~ /^(\w+):\d+:(.+)$/) {
+                            my ($op, $path) = ($1, $2);
+
+                            if ($op eq 'DELETE' || $op eq 'MODIFY') {
+                                # Mark target as stale
+                                $stale_targets_cache{$path} = time();
+                                print $OUT "[auto-rescan] $path $op detected\n";
+                            }
+                        }
+                    }
                 }
-                last;  # Ctrl-D or other termination
+
+                # Check if STDIN has input
+                if (vec($rout, fileno(STDIN), 1)) {
+                    # Input available - read it directly from STDIN
+                    print $OUT $prompt if $echo;
+                    $input = <STDIN>;
+                    unless (defined $input) {
+                        # EOF (Ctrl-D) or Ctrl-C
+                        if ($SmakCli::cancel_requested) {
+                            $SmakCli::cancel_requested = 0;  # Clear the flag
+                            next;  # Return to prompt, don't exit
+                        }
+                        last;  # Ctrl-D or other termination
+                    }
+                }
+            } elsif ($nfound == 0) {
+                # Timeout - no activity
+                next;  # Continue loop
+            } else {
+                # Error in select
+                last;
             }
         }
         $have_input = 0;  # Only use provided input once
 
         chomp $input;
+
+        # Skip comment lines (but not empty lines, those are handled below)
+        next if $input =~ /^\s*#/;
 
         # Echo the line if echo mode is enabled
         if ($echo && $input ne '') {
@@ -4842,6 +5215,9 @@ Commands:
   rules <target>       - Show rules for a specific target
   build <target>       - Build a target
   progress	       - Show work in progress
+  rescan               - Rescan timestamps
+  rescan -auto         - Enable auto-rescan (detects file changes automatically)
+  rescan -noauto       - Disable auto-rescan
   vpath <file>         - Test vpath resolution for a file
   dry-run <target>     - Dry run a target
   print <expr>         - Evaluate and print an expression (in isolated subprocess)
@@ -4945,9 +5321,71 @@ HELP
                 print $OUT "Usage: build <target>\n";
             } else {
                 my $target = $parts[1];
-                eval { build_target($target); };
-                if ($@) {
-                    print $OUT "Error building target: $@\n";
+
+                # Check if we have a job server connection
+                if ($job_server_socket) {
+                    # Using job server - submit directly and wait for completion
+                    my $build_start_time = time();
+
+                    # Submit the job directly to job server (avoid race condition with build_target)
+                    use IO::Select;
+                    use Cwd 'getcwd';
+                    my $cwd = getcwd();
+
+                    print $job_server_socket "SUBMIT_JOB\n";
+                    print $job_server_socket "$target\n";
+                    print $job_server_socket "$cwd\n";
+                    print $job_server_socket "true\n";  # Composite target placeholder command
+                    $job_server_socket->flush();
+
+                    # Wait for job completion, displaying output as it arrives
+                    my $select = IO::Select->new($job_server_socket);
+                    my $job_done = 0;
+                    my $timeout = 60;  # 60 seconds total timeout
+                    my $deadline = time() + $timeout;
+
+                    while (!$job_done && time() < $deadline) {
+                        # Process messages from job server
+                        if ($select->can_read(0.1)) {
+                            my $response = <$job_server_socket>;
+                            unless (defined $response) {
+                                print $OUT "Connection to job server lost\n";
+                                last;
+                            }
+                            chomp $response;
+
+                            if ($response =~ /^OUTPUT (.*)$/) {
+                                print $OUT "$1\n";
+                                $OUT->flush() if $OUT->can('flush');
+                            } elsif ($response =~ /^ERROR (.*)$/) {
+                                print $OUT "ERROR: $1\n";
+                                $OUT->flush() if $OUT->can('flush');
+                            } elsif ($response =~ /^WARN (.*)$/) {
+                                print $OUT "WARN: $1\n";
+                                $OUT->flush() if $OUT->can('flush');
+                            } elsif ($response =~ /^JOB_COMPLETE\s+(\S+)\s+(\d+)$/) {
+                                my ($completed_target, $exit_code) = ($1, $2);
+                                # Only stop when we get completion for our requested target
+                                if ($completed_target eq $target) {
+                                    $job_done = 1;
+                                    my $elapsed = time() - $build_start_time;
+                                    if ($exit_code != 0) {
+                                        # Failure message already shown via ERROR/OUTPUT
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!$job_done) {
+                        print $OUT "Build timed out after ${timeout}s\n";
+                    }
+                } else {
+                    # No job server - build sequentially
+                    eval { build_target($target); };
+                    if ($@) {
+                        print $OUT "Error building target: $@\n";
+                    }
                 }
             }
         }
@@ -4961,6 +5399,65 @@ HELP
 		}
 	    }
 	}
+        elsif ($cmd eq 'rescan') {
+            # Handle rescan command
+            shift @parts;  # Remove 'rescan' from @parts to get just the arguments
+            my $arg = @parts > 0 ? $parts[0] : '';
+
+            if ($arg eq '-auto') {
+                # Enable auto-rescan with background watcher
+                if (!$watcher_pid) {
+                    # Create socketpair for bidirectional communication
+                    use Socket;
+                    socketpair(my $parent_sock, my $child_sock, AF_UNIX, SOCK_STREAM, PF_UNSPEC)
+                        or die "socketpair failed: $!";
+
+                    $parent_sock->autoflush(1);
+                    $child_sock->autoflush(1);
+
+                    $watcher_pid = fork();
+                    die "fork failed: $!" unless defined $watcher_pid;
+
+                    if ($watcher_pid == 0) {
+                        # Child process - run watcher
+                        close($parent_sock);
+                        auto_rescan_watcher($child_sock, \$makefile);
+                        exit 0;  # Should never reach here
+                    } else {
+                        # Parent process - keep parent socket
+                        close($child_sock);
+                        $watcher_socket = $parent_sock;
+                        $auto_rescan_enabled = 1;
+                        print $OUT "Auto-rescan enabled (background watcher PID $watcher_pid)\n";
+                    }
+                } else {
+                    print $OUT "Auto-rescan already enabled (PID $watcher_pid)\n";
+                }
+
+            } elsif ($arg eq '-noauto') {
+                # Disable auto-rescan and shutdown watcher
+                if ($watcher_pid) {
+                    print $watcher_socket "SHUTDOWN\n" if $watcher_socket;
+                    waitpid($watcher_pid, 0);
+                    close($watcher_socket) if $watcher_socket;
+                    $watcher_pid = undef;
+                    $watcher_socket = undef;
+                }
+                $auto_rescan_enabled = 0;
+                print $OUT "Auto-rescan disabled.\n";
+
+            } else {
+                # One-time rescan
+                if ($job_server_socket) {
+                    cmd_rescan(\@parts, $job_server_socket);
+                } else {
+                    # Perform immediate scan
+                    my %temp_mtimes;
+                    my $stale_count = perform_auto_rescan(\%temp_mtimes, $OUT);
+                    print $OUT "Rescan complete. Marked $stale_count target(s) as stale.\n";
+                }
+            }
+        }
         elsif ($cmd eq 'vpath') {
             if (@parts < 2) {
                 print $OUT "Usage: vpath <file>\n";
@@ -5190,6 +5687,13 @@ HELP
         }
 
 	last if $exit_after_one;
+    }
+
+    # Cleanup: shutdown watcher process if running
+    if ($watcher_pid) {
+        print $watcher_socket "SHUTDOWN\n" if $watcher_socket;
+        waitpid($watcher_pid, 0);
+        close($watcher_socket) if $watcher_socket;
     }
 }
 
@@ -6614,7 +7118,7 @@ sub run_job_master {
                 print STDERR "Composite target '$comp_target' FAILED because dependency '$failed_target' failed (exit code $exit_code)\n";
                 $in_progress{$comp_target} = "failed";
                 $failed_targets{$comp_target} = $exit_code;
-                if ($comp->{master_socket}) {
+                if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                 }
                 delete $pending_composite{$comp_target};
@@ -7069,7 +7573,7 @@ sub run_job_master {
                                     vprint "All dependencies complete for composite target '$comp_target'\n";
                                     $completed_targets{$comp_target} = 1;
                                     $in_progress{$comp_target} = "done";
-                                    if ($comp->{master_socket}) {
+                                    if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
                                     }
                                     delete $pending_composite{$comp_target};
@@ -7185,7 +7689,7 @@ sub run_job_master {
                                     if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                         print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
                                         $in_progress{$comp_target} = "failed";
-                                        if ($comp->{master_socket}) {
+                                        if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                                             print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                         }
                                         delete $pending_composite{$comp_target};
@@ -7401,11 +7905,11 @@ sub run_job_master {
                                           (keys %running_jobs > 0);
 
                     if ($target_complete && !$work_in_progress) {
-                        print $master_socket "JOB_COMPLETE $target 0\n";
+                        print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket && defined fileno($master_socket);
                         print STDERR "Target '$target' already up-to-date, notified client\n" if $ENV{SMAK_DEBUG};
                     } elsif ($target_failed && !$work_in_progress) {
                         my $exit_code = $failed_targets{$target} || 1;
-                        print $master_socket "JOB_COMPLETE $target $exit_code\n";
+                        print $master_socket "JOB_COMPLETE $target $exit_code\n" if $master_socket && defined fileno($master_socket);
                         print STDERR "Target '$target' already failed, notified client (exit $exit_code)\n" if $ENV{SMAK_DEBUG};
                     }
                     # Otherwise, work is in progress - JOB_COMPLETE will be sent when work finishes
@@ -8478,7 +8982,7 @@ sub run_job_master {
                                 vprint "All dependencies complete for composite target '$comp_target'\n";
                                 $completed_targets{$comp_target} = 1;
                                 $in_progress{$comp_target} = "done";
-                                if ($comp->{master_socket}) {
+                                if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
                                 }
                                 delete $pending_composite{$comp_target};
@@ -8591,7 +9095,7 @@ sub run_job_master {
                                 if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                     print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
                                     $in_progress{$comp_target} = "failed";
-                                    if ($comp->{master_socket}) {
+                                    if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                     }
                                     delete $pending_composite{$comp_target};

@@ -1,0 +1,11 @@
+# Auto-rescan fail test - verify build fails with missing source
+
+# Enable auto-rescan
+rescan -auto
+# expect "Auto-rescan enabled"
+
+# Try to build without source file (should fail)
+build all
+# expect "No such file"
+
+quit

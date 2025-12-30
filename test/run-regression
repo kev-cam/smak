@@ -240,7 +240,8 @@ echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail] [Par/NoCache+fail] [Par/Ca
 echo "Results shown as: PpPpPpPp (all pass + fail tests work in all modes)"
 echo "              or: PxPxPxPx (all pass, no fail test)"
 echo "              or: PpFpPpPp (2nd mode failed, fail tests work), etc."
-echo "  P/F = mode passed/failed, p = fail test failed (correct), x = no fail test"
+echo "  P=pass, F=fail, T=timeout"
+echo "  p=-fail test passed (correctly failed), f=-fail test failed (wrongly succeeded), t=-fail timeout, x=no -fail test"
 echo ""
 
 # Function to run a test script
@@ -454,12 +455,18 @@ WRAPPER_EOF
     fi
 
     # Build result string (PpPpPpPp or PxPxPxPx etc.)
+    # Legend: P=pass, F=fail, T=timeout
+    #         p=-fail test passed (correctly failed), f=-fail test failed (wrongly succeeded), t=-fail test timeout
+    #         x=no -fail test
     local result_str=""
     local all_passed=1
 
     # Mode 1: Sequential + NoCache
     if [ $result_seq_nocache -eq 0 ]; then
         result_str="${result_str}P"
+    elif [ $result_seq_nocache -eq 124 ]; then
+        result_str="${result_str}T"
+        all_passed=0
     else
         result_str="${result_str}F"
         all_passed=0
@@ -467,8 +474,11 @@ WRAPPER_EOF
     if [ $has_fail_test -eq 1 ]; then
         if [ $result_seq_nocache_fail -ne 0 ] && [ $result_seq_nocache_fail -ne 124 ]; then
             result_str="${result_str}p"
+        elif [ $result_seq_nocache_fail -eq 124 ]; then
+            result_str="${result_str}t"
+            all_passed=0
         else
-            result_str="${result_str}F"
+            result_str="${result_str}f"
             all_passed=0
         fi
     else
@@ -478,6 +488,9 @@ WRAPPER_EOF
     # Mode 2: Sequential + Cache
     if [ $result_seq_cache -eq 0 ]; then
         result_str="${result_str}P"
+    elif [ $result_seq_cache -eq 124 ]; then
+        result_str="${result_str}T"
+        all_passed=0
     else
         result_str="${result_str}F"
         all_passed=0
@@ -485,8 +498,11 @@ WRAPPER_EOF
     if [ $has_fail_test -eq 1 ]; then
         if [ $result_seq_cache_fail -ne 0 ] && [ $result_seq_cache_fail -ne 124 ]; then
             result_str="${result_str}p"
+        elif [ $result_seq_cache_fail -eq 124 ]; then
+            result_str="${result_str}t"
+            all_passed=0
         else
-            result_str="${result_str}F"
+            result_str="${result_str}f"
             all_passed=0
         fi
     else
@@ -496,6 +512,9 @@ WRAPPER_EOF
     # Mode 3: Parallel + NoCache
     if [ $result_par_nocache -eq 0 ]; then
         result_str="${result_str}P"
+    elif [ $result_par_nocache -eq 124 ]; then
+        result_str="${result_str}T"
+        all_passed=0
     else
         result_str="${result_str}F"
         all_passed=0
@@ -503,8 +522,11 @@ WRAPPER_EOF
     if [ $has_fail_test -eq 1 ]; then
         if [ $result_par_nocache_fail -ne 0 ] && [ $result_par_nocache_fail -ne 124 ]; then
             result_str="${result_str}p"
+        elif [ $result_par_nocache_fail -eq 124 ]; then
+            result_str="${result_str}t"
+            all_passed=0
         else
-            result_str="${result_str}F"
+            result_str="${result_str}f"
             all_passed=0
         fi
     else
@@ -514,6 +536,9 @@ WRAPPER_EOF
     # Mode 4: Parallel + Cache
     if [ $result_par_cache -eq 0 ]; then
         result_str="${result_str}P"
+    elif [ $result_par_cache -eq 124 ]; then
+        result_str="${result_str}T"
+        all_passed=0
     else
         result_str="${result_str}F"
         all_passed=0
@@ -521,8 +546,11 @@ WRAPPER_EOF
     if [ $has_fail_test -eq 1 ]; then
         if [ $result_par_cache_fail -ne 0 ] && [ $result_par_cache_fail -ne 124 ]; then
             result_str="${result_str}p"
+        elif [ $result_par_cache_fail -eq 124 ]; then
+            result_str="${result_str}t"
+            all_passed=0
         else
-            result_str="${result_str}F"
+            result_str="${result_str}f"
             all_passed=0
         fi
     else

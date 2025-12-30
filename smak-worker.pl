@@ -207,7 +207,10 @@ while (my $line = <$socket>) {
 
                     # Execute smak directly in the subdirectory (reuses parent job server)
                     # The key is NOT using -j flag, which would spawn a new job server
-                    my $smak_cmd = "cd '$abs_subdir' && smak '$subtarget'";
+                    # Use FindBin to locate the smak executable
+                    use FindBin qw($RealBin);
+                    my $smak_path = "$RealBin/smak";
+                    my $smak_cmd = "cd '$abs_subdir' && '$smak_path' '$subtarget'";
                     print $socket "OUTPUT   → $abs_subdir: $subtarget\n";
 
                     my $sub_exit = system($smak_cmd) >> 8;

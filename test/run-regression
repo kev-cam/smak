@@ -15,6 +15,8 @@ CLONE_MODE=""
 SANITY_MODE=0
 LIST_MODE=0
 FILTER_PATTERN=""
+NO_PARALLEL=0
+FAST_MODE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,6 +48,14 @@ while [ $# -gt 0 ]; do
             fi
             shift 2
             ;;
+        --no-parallel)
+            NO_PARALLEL=1
+            shift
+            ;;
+        --fast)
+            FAST_MODE=1
+            shift
+            ;;
         -clone|--clone)
             CLONE_MODE="$2"
             if [ "$CLONE_MODE" != "local" ] && [ "$CLONE_MODE" != "query" ]; then
@@ -74,6 +84,8 @@ Options:
   -t, --tty           Run interactive tests with actual TTY input (not scripted)
   -l, --list          List all tests that would be run and exit
   --filter <pattern>  Run only tests matching pattern (grep -E compatible)
+  --no-parallel       Skip parallel test modes (only test sequential behavior)
+  --fast              Skip remaining modes on first failure (mark skipped with -)
   -clone local        Clone from local repository to /tmp/smak/test-<tag>/ and run tests there
   -clone query        Clone from remote, prompting for branch selection
   -h, --help          Show this help
@@ -165,6 +177,8 @@ if [ -n "$CLONE_MODE" ]; then
     [ $FULL_MODE -eq 1 ] && CMD="$CMD --full"
     [ $VERBOSE -eq 1 ] && CMD="$CMD --verbose"
     [ $TTY_MODE -eq 1 ] && CMD="$CMD --tty"
+    [ $NO_PARALLEL -eq 1 ] && CMD="$CMD --no-parallel"
+    [ $FAST_MODE -eq 1 ] && CMD="$CMD --fast"
 
     # Run the tests
     $CMD
@@ -236,12 +250,22 @@ else
 fi
 echo "======================================"
 echo ""
-echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail] [Par/NoCache+fail] [Par/Cache+fail]"
-echo "Results shown as: PpPpPpPp (all pass + fail tests work in all modes)"
-echo "              or: PxPxPxPx (all pass, no fail test)"
-echo "              or: PpFpPpPp (2nd mode failed, fail tests work), etc."
+if [ $NO_PARALLEL -eq 1 ]; then
+    echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail]"
+    echo "Results shown as: PpPp (all pass + fail tests work in both modes)"
+    echo "              or: PxPx (all pass, no fail test)"
+    echo "              or: PpFp (2nd mode failed, fail tests work), etc."
+else
+    echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail] [Par/NoCache+fail] [Par/Cache+fail]"
+    echo "Results shown as: PpPpPpPp (all pass + fail tests work in all modes)"
+    echo "              or: PxPxPxPx (all pass, no fail test)"
+    echo "              or: PpFpPpPp (2nd mode failed, fail tests work), etc."
+fi
 echo "  P=pass, F=fail, T=timeout"
 echo "  p=-fail test passed (correctly failed), f=-fail test failed (wrongly succeeded), t=-fail timeout, x=no -fail test"
+if [ $FAST_MODE -eq 1 ]; then
+    echo "  -=skipped (fast mode, previous failure)"
+fi
 echo ""
 
 # Function to run a test script
@@ -364,6 +388,10 @@ WRAPPER_EOF
     fi
 
     # Run all 4 modes (and -fail tests if they exist)
+    # Track whether we should skip remaining modes (for --fast)
+    local skip_remaining=0
+
+    # Mode 1: Sequential + NoCache
     run_single_mode "off" "" "$out_seq_nc"
     result_seq_nocache=$?
     local result_seq_nocache_fail=0
@@ -381,55 +409,97 @@ WRAPPER_EOF
         rm -f "$fail_out"
     fi
 
-    run_single_mode "default" "" "$out_seq_c"
-    result_seq_cache=$?
-    local result_seq_cache_fail=0
-    if [ $result_seq_cache -eq 124 ]; then
-        echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
-        ((FAILED++))
-        [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
-        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
-        return
+    # Check if we should skip remaining modes in fast mode
+    if [ $FAST_MODE -eq 1 ] && [ $result_seq_nocache -ne 0 ]; then
+        skip_remaining=1
     fi
-    if [ $has_fail_test -eq 1 ]; then
-        local fail_out="/tmp/smak-test-${test_name}-seq-c-fail-$$.log"
-        timeout 30 env SMAK_CACHE_DIR=default ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null
-        result_seq_cache_fail=$?
-        rm -f "$fail_out"
+    if [ $FAST_MODE -eq 1 ] && [ $has_fail_test -eq 1 ] && [ $result_seq_nocache_fail -eq 0 ]; then
+        skip_remaining=1
     fi
 
-    run_single_mode "off" "-j4" "$out_par_nc"
-    result_par_nocache=$?
-    local result_par_nocache_fail=0
-    if [ $result_par_nocache -eq 124 ]; then
-        echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
-        ((FAILED++))
-        [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
-        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
-        return
-    fi
-    if [ $has_fail_test -eq 1 ]; then
-        local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
-        timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
-        result_par_nocache_fail=$?
-        rm -f "$fail_out"
+    # Mode 2: Sequential + Cache
+    if [ $skip_remaining -eq 0 ]; then
+        run_single_mode "default" "" "$out_seq_c"
+        result_seq_cache=$?
+        local result_seq_cache_fail=0
+        if [ $result_seq_cache -eq 124 ]; then
+            echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+            ((FAILED++))
+            [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+            return
+        fi
+        if [ $has_fail_test -eq 1 ]; then
+            local fail_out="/tmp/smak-test-${test_name}-seq-c-fail-$$.log"
+            timeout 30 env SMAK_CACHE_DIR=default ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null
+            result_seq_cache_fail=$?
+            rm -f "$fail_out"
+        fi
+
+        # Check if we should skip remaining modes in fast mode
+        if [ $FAST_MODE -eq 1 ] && [ $result_seq_cache -ne 0 ]; then
+            skip_remaining=1
+        fi
+        if [ $FAST_MODE -eq 1 ] && [ $has_fail_test -eq 1 ] && [ $result_seq_cache_fail -eq 0 ]; then
+            skip_remaining=1
+        fi
+    else
+        result_seq_cache=-2  # Special marker for skipped
+        local result_seq_cache_fail=-2
     fi
 
-    run_single_mode "default" "-j4" "$out_par_c"
-    result_par_cache=$?
-    local result_par_cache_fail=0
-    if [ $result_par_cache -eq 124 ]; then
-        echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
-        ((FAILED++))
-        [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
-        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
-        return
+    # Mode 3: Parallel + NoCache
+    if [ $NO_PARALLEL -eq 1 ] || [ $skip_remaining -eq 1 ]; then
+        result_par_nocache=-2  # Special marker for skipped
+        local result_par_nocache_fail=-2
+    else
+        run_single_mode "off" "-j4" "$out_par_nc"
+        result_par_nocache=$?
+        local result_par_nocache_fail=0
+        if [ $result_par_nocache -eq 124 ]; then
+            echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+            ((FAILED++))
+            [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+            return
+        fi
+        if [ $has_fail_test -eq 1 ]; then
+            local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
+            timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
+            result_par_nocache_fail=$?
+            rm -f "$fail_out"
+        fi
+
+        # Check if we should skip remaining modes in fast mode
+        if [ $FAST_MODE -eq 1 ] && [ $result_par_nocache -ne 0 ]; then
+            skip_remaining=1
+        fi
+        if [ $FAST_MODE -eq 1 ] && [ $has_fail_test -eq 1 ] && [ $result_par_nocache_fail -eq 0 ]; then
+            skip_remaining=1
+        fi
     fi
-    if [ $has_fail_test -eq 1 ]; then
-        local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
-        timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
-        result_par_cache_fail=$?
-        rm -f "$fail_out"
+
+    # Mode 4: Parallel + Cache
+    if [ $NO_PARALLEL -eq 1 ] || [ $skip_remaining -eq 1 ]; then
+        result_par_cache=-2  # Special marker for skipped
+        local result_par_cache_fail=-2
+    else
+        run_single_mode "default" "-j4" "$out_par_c"
+        result_par_cache=$?
+        local result_par_cache_fail=0
+        if [ $result_par_cache -eq 124 ]; then
+            echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+            ((FAILED++))
+            [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+            return
+        fi
+        if [ $has_fail_test -eq 1 ]; then
+            local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
+            timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
+            result_par_cache_fail=$?
+            rm -f "$fail_out"
+        fi
     fi
 
     # Clean up temp script file
@@ -462,7 +532,9 @@ WRAPPER_EOF
     local all_passed=1
 
     # Mode 1: Sequential + NoCache
-    if [ $result_seq_nocache -eq 0 ]; then
+    if [ $result_seq_nocache -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $result_seq_nocache -eq 0 ]; then
         result_str="${result_str}P"
     elif [ $result_seq_nocache -eq 124 ]; then
         result_str="${result_str}T"
@@ -471,7 +543,9 @@ WRAPPER_EOF
         result_str="${result_str}F"
         all_passed=0
     fi
-    if [ $has_fail_test -eq 1 ]; then
+    if [ $result_seq_nocache_fail -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $has_fail_test -eq 1 ]; then
         if [ $result_seq_nocache_fail -ne 0 ] && [ $result_seq_nocache_fail -ne 124 ]; then
             result_str="${result_str}p"
         elif [ $result_seq_nocache_fail -eq 124 ]; then
@@ -486,7 +560,9 @@ WRAPPER_EOF
     fi
 
     # Mode 2: Sequential + Cache
-    if [ $result_seq_cache -eq 0 ]; then
+    if [ $result_seq_cache -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $result_seq_cache -eq 0 ]; then
         result_str="${result_str}P"
     elif [ $result_seq_cache -eq 124 ]; then
         result_str="${result_str}T"
@@ -495,7 +571,9 @@ WRAPPER_EOF
         result_str="${result_str}F"
         all_passed=0
     fi
-    if [ $has_fail_test -eq 1 ]; then
+    if [ $result_seq_cache_fail -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $has_fail_test -eq 1 ]; then
         if [ $result_seq_cache_fail -ne 0 ] && [ $result_seq_cache_fail -ne 124 ]; then
             result_str="${result_str}p"
         elif [ $result_seq_cache_fail -eq 124 ]; then
@@ -510,7 +588,9 @@ WRAPPER_EOF
     fi
 
     # Mode 3: Parallel + NoCache
-    if [ $result_par_nocache -eq 0 ]; then
+    if [ $result_par_nocache -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $result_par_nocache -eq 0 ]; then
         result_str="${result_str}P"
     elif [ $result_par_nocache -eq 124 ]; then
         result_str="${result_str}T"
@@ -519,7 +599,9 @@ WRAPPER_EOF
         result_str="${result_str}F"
         all_passed=0
     fi
-    if [ $has_fail_test -eq 1 ]; then
+    if [ $result_par_nocache_fail -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $has_fail_test -eq 1 ]; then
         if [ $result_par_nocache_fail -ne 0 ] && [ $result_par_nocache_fail -ne 124 ]; then
             result_str="${result_str}p"
         elif [ $result_par_nocache_fail -eq 124 ]; then
@@ -534,7 +616,9 @@ WRAPPER_EOF
     fi
 
     # Mode 4: Parallel + Cache
-    if [ $result_par_cache -eq 0 ]; then
+    if [ $result_par_cache -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $result_par_cache -eq 0 ]; then
         result_str="${result_str}P"
     elif [ $result_par_cache -eq 124 ]; then
         result_str="${result_str}T"
@@ -543,7 +627,9 @@ WRAPPER_EOF
         result_str="${result_str}F"
         all_passed=0
     fi
-    if [ $has_fail_test -eq 1 ]; then
+    if [ $result_par_cache_fail -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $has_fail_test -eq 1 ]; then
         if [ $result_par_cache_fail -ne 0 ] && [ $result_par_cache_fail -ne 124 ]; then
             result_str="${result_str}p"
         elif [ $result_par_cache_fail -eq 124 ]; then

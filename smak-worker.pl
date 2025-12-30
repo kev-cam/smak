@@ -173,7 +173,8 @@ while (my $line = <$socket>) {
             $part =~ s/^[@-]+//;      # Strip @ (silent) and - (ignore errors) prefixes
             # Match: smak -C <dir> <target> or make -C <dir> <target>
             # Also match relative paths like ../smak or ./smak
-            if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make))\s+-C\s+(\S+)\s+(\S+)}) {
+            # Allow optional flags (like -j4) between smak and -C
+            if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make))(?:\s+-\S+)*\s+-C\s+(\S+)\s+(\S+)}) {
                 push @recursive_calls, { dir => $1, target => $2 };
             } elsif ($part eq 'true' || $part eq ':' || $part eq '') {
                 # Ignore no-op commands and empty parts

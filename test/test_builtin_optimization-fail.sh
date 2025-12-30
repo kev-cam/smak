@@ -52,12 +52,14 @@ result=$?
 # Cleanup
 rm -rf subdir1 subdir2 subdir3 Makefile.builtin-test
 
+# For -fail tests, we expect the assertion to trigger (grep finds it = exit 0)
+# which means the test correctly failed, so we exit non-zero to signal "passed"
 if [ $result -eq 0 ]; then
     echo ""
     echo "✓ Assertion triggered correctly (built-ins disabled)"
-    exit 0
+    exit 1  # Exit non-zero to indicate -fail test passed
 else
     echo ""
     echo "✗ Assertion did NOT trigger (expected failure)"
-    exit 1
+    exit 0  # Exit zero means -fail test actually failed
 fi

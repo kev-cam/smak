@@ -329,6 +329,7 @@ run_test() {
     fi
 
     # Helper function to run a single mode
+    # Runs test in background and waits for it to make Ctrl-C more responsive
     run_single_mode() {
         local mode_cache="$1"  # "off" or "default"
         local mode_jobs="$2"   # "" (sequential) or "-j4" (parallel)
@@ -348,7 +349,10 @@ WRAPPER_EOF
             chmod +x "$wrapper_script"
 
             # Run with script automation using run-with-script.pl (with timeout)
-            timeout 30 env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$script_file" "$wrapper_script" >"$output_file" 2>&1
+            # Run in background and wait to make it interruptible
+            timeout 30 env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$script_file" "$wrapper_script" >"$output_file" 2>&1 &
+            local pid=$!
+            wait $pid
             local result=$?
             rm -f "$wrapper_script"
             return $result
@@ -358,7 +362,9 @@ WRAPPER_EOF
             if [ -n "$mode_jobs" ]; then
                 return 0  # Skip parallel in TTY mode
             fi
-            timeout 60 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1
+            timeout 60 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 &
+            local pid=$!
+            wait $pid
             return $?
 
         else
@@ -366,11 +372,16 @@ WRAPPER_EOF
             # For parallel mode, modify the test script invocation
             if [ -n "$mode_jobs" ]; then
                 # Inject -j4 into smak invocation (handles both $SMAK variable and literal 'smak')
-                timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
+                timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
+                local pid=$!
+                wait $pid
+                return $?
             else
-                timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
+                timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
+                local pid=$!
+                wait $pid
+                return $?
             fi
-            return $?
         fi
     }
 

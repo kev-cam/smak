@@ -630,7 +630,7 @@ sub execute_script_file {
             } elsif ($cmd eq 'reset') {
                 Smak::cmd_reset(\@words, $Smak::job_server_socket);
             } elsif ($cmd eq 'rescan') {
-                Smak::cmd_rescan(\@words, $Smak::job_server_socket);
+                Smak::cmd_rescan(\@words, $Smak::job_server_socket, undef);
             } elsif ($cmd eq 'start') {
                 my %state = (socket => \$Smak::job_server_socket, server_pid => \$Smak::job_server_pid);
                 Smak::cmd_start(\@words, {}, \%state);

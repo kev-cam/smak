@@ -1,3 +1,4 @@
 # Ignore generated test directories
 test-*/
 logs/
+.smak_history

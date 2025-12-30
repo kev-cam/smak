@@ -3559,6 +3559,8 @@ sub unified_cli {
     my $watch_enabled = 0;
     my $exit_requested = 0;
     my $detached = 0;
+    my $watcher_pid;        # Auto-rescan watcher process ID
+    my $watcher_socket;     # Socket for communication with watcher
 
     if (! $quiet) {
 	print "Smak CLI - type 'help' for commands\n";
@@ -3602,23 +3604,52 @@ sub unified_cli {
     # Helper: check for asynchronous notifications and job output
     my %recent_file_notifications;  # Track recent file notifications to avoid spam
     my $check_notifications = sub {
-        return -1 unless defined $socket;
-
         # Handle cancel request from signal handler
         if ($SmakCli::cancel_requested) {
 	    warn "DEBUG: cancel requested ($SmakCli::cancel_requested)\n" if $ENV{SMAK_DEBUG};
-            eval {
-                print $socket "KILL_WORKERS\n";
-		# response checked in main loop
-            };
+            if (defined $socket) {
+                eval {
+                    print $socket "KILL_WORKERS\n";
+                    # response checked in main loop
+                };
+            }
             print "\n^C - Cancelling ongoing builds...\n";
             STDOUT->flush();
             return -2;  # Had output, will trigger prompt redraw
         }
 
-        my $select = IO::Select->new($socket);
         my $had_output = 0;
         my $now = time();
+
+        # Check auto-rescan watcher for file change events
+        if ($watcher_socket) {
+            $watcher_socket->blocking(0);
+            while (my $event = <$watcher_socket>) {
+                chomp $event;
+
+                # Parse event: "OP:PID:PATH"
+                if ($event =~ /^(\w+):\d+:(.+)$/) {
+                    my ($op, $path) = ($1, $2);
+
+                    if ($op eq 'DELETE' || $op eq 'MODIFY' || $op eq 'CREATE') {
+                        # Mark target as stale
+                        $stale_targets_cache{$path} = time();
+                        # Deduplicate: only show each file change once per second
+                        if (!exists $recent_file_notifications{$path} ||
+                            $now - $recent_file_notifications{$path} >= 1) {
+                            print "\r\033[K[auto-rescan] $path $op detected\n";
+                            $recent_file_notifications{$path} = $now;
+                            reprompt();
+                            $had_output = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        return $had_output unless defined $socket;
+
+        my $select = IO::Select->new($socket);
 
         while ($select->can_read(0)) {
             my $notif = <$socket>;
@@ -3757,6 +3788,8 @@ sub unified_cli {
             watch_enabled => \$watch_enabled,
             exit_requested => \$exit_requested,
             detached => \$detached,
+            watcher_pid => \$watcher_pid,
+            watcher_socket => \$watcher_socket,
         });
 
         # Check for async notifications that arrived during command execution
@@ -3771,6 +3804,13 @@ sub unified_cli {
     }
 
     $interactive = 0;
+
+    # Cleanup: shutdown auto-rescan watcher if running
+    if ($watcher_pid) {
+        print $watcher_socket "SHUTDOWN\n" if $watcher_socket;
+        waitpid($watcher_pid, 0);
+        close($watcher_socket) if $watcher_socket;
+    }
 
     # Cleanup on exit
     if ($detached) {
@@ -3909,7 +3949,7 @@ sub dispatch_command {
         cmd_reset($words, $socket);
 
     } elsif ($cmd eq 'rescan') {
-        cmd_rescan($words, $socket);
+        cmd_rescan($words, $socket, $state);
 
     } elsif ($cmd eq 'expect') {
         cmd_expect($words);
@@ -4600,7 +4640,7 @@ sub cmd_reset {
 }
 
 sub cmd_rescan {
-    my ($words, $socket) = @_;
+    my ($words, $socket, $state) = @_;
 
     my $auto = 0;
     my $noauto = 0;
@@ -4620,18 +4660,68 @@ sub cmd_rescan {
         print "$response\n" if $response;
     } else {
         # Job server not running
-        if ($auto || $noauto) {
-            # Auto-rescan flags will be applied when job server starts
-            # Check if FUSE is detected to provide helpful feedback
-            if ($ENV{SMAK_FUSE_DETECTED} && $auto) {
-                print "Note: Auto-rescan is disabled on FUSE filesystems (use 'unwatch' then 'rescan -auto' if needed)\n";
-            } else {
-                # Print confirmation message
-                if ($auto) {
-                    print "Auto-rescan enabled (will activate when job server starts)\n";
-                } elsif ($noauto) {
-                    print "Auto-rescan disabled\n";
+        if ($auto) {
+            # Enable auto-rescan with background watcher (no job server needed)
+            my $watcher_pid_ref = $state->{watcher_pid} if $state;
+            my $watcher_socket_ref = $state->{watcher_socket} if $state;
+
+            if ($watcher_pid_ref && $watcher_socket_ref) {
+                my $watcher_pid = $$watcher_pid_ref;
+                if (!$watcher_pid) {
+                    # Create socketpair for bidirectional communication
+                    use Socket;
+                    socketpair(my $parent_sock, my $child_sock, AF_UNIX, SOCK_STREAM, PF_UNSPEC)
+                        or die "socketpair failed: $!";
+
+                    $parent_sock->autoflush(1);
+                    $child_sock->autoflush(1);
+
+                    $watcher_pid = fork();
+                    die "fork failed: $!" unless defined $watcher_pid;
+
+                    if ($watcher_pid == 0) {
+                        # Child process - run watcher
+                        close($parent_sock);
+                        auto_rescan_watcher($child_sock, \$makefile);
+                        exit 0;  # Should never reach here
+                    } else {
+                        # Parent process - keep parent socket
+                        close($child_sock);
+                        $$watcher_pid_ref = $watcher_pid;
+                        $$watcher_socket_ref = $parent_sock;
+                        print "Auto-rescan enabled (background watcher PID $watcher_pid)\n";
+                    }
+                } else {
+                    print "Auto-rescan already enabled (PID $watcher_pid)\n";
                 }
+            } else {
+                # No state tracking available - fall back to message
+                if ($ENV{SMAK_FUSE_DETECTED}) {
+                    print "Note: Auto-rescan is disabled on FUSE filesystems (use 'unwatch' then 'rescan -auto' if needed)\n";
+                } else {
+                    print "Auto-rescan enabled (will activate when job server starts)\n";
+                }
+            }
+        } elsif ($noauto) {
+            # Disable auto-rescan and shutdown watcher
+            my $watcher_pid_ref = $state->{watcher_pid} if $state;
+            my $watcher_socket_ref = $state->{watcher_socket} if $state;
+
+            if ($watcher_pid_ref && $watcher_socket_ref) {
+                my $watcher_pid = $$watcher_pid_ref;
+                my $watcher_socket = $$watcher_socket_ref;
+                if ($watcher_pid) {
+                    print $watcher_socket "SHUTDOWN\n" if $watcher_socket;
+                    waitpid($watcher_pid, 0);
+                    close($watcher_socket) if $watcher_socket;
+                    $$watcher_pid_ref = undef;
+                    $$watcher_socket_ref = undef;
+                    print "Auto-rescan disabled.\n";
+                } else {
+                    print "Auto-rescan not running.\n";
+                }
+            } else {
+                print "Auto-rescan disabled\n";
             }
         } else {
             # Basic rescan - just note that job server is needed for full functionality
@@ -5632,7 +5722,7 @@ HELP
             } else {
                 # One-time rescan
                 if ($job_server_socket) {
-                    cmd_rescan(\@parts, $job_server_socket);
+                    cmd_rescan(\@parts, $job_server_socket, undef);
                 } else {
                     # Perform immediate scan
                     my %temp_mtimes;

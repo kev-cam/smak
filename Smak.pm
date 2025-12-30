@@ -15,6 +15,21 @@ use Carp 'verbose'; # for debug trace
 
 our $VERSION = '1.0';
 
+# Assertion support - can be disabled for production builds
+# To disable assertions, change this constant to 0
+use constant ASSERTIONS_ENABLED => 1;
+
+# Assert a condition or die with a message
+# These assertions are designed to catch internal logic errors and can be
+# stripped out by setting ASSERTIONS_ENABLED to 0 for production builds
+sub assert_or_die {
+    return unless ASSERTIONS_ENABLED;
+    my ($condition, $message) = @_;
+    unless ($condition) {
+        die "ASSERTION FAILED: $message\n";
+    }
+}
+
 # Helper function to print verbose messages (smak-specific, not GNU make compatible)
 # If SMAK_VERBOSE='w', shows a spinning wheel instead of printing
 my @wheel_chars = qw(/ - \\);
@@ -7271,7 +7286,16 @@ sub run_job_master {
 	    vprint "  ... and " . (@job_queue - 5) . " more\n";
         }
 
-	# can abort here if things are bad
+	# Assertion: Detect deadlock - queued work, available workers, but nothing running
+	# Only check during intermittent checks (not at startup/dispatch where nothing running is normal)
+	if ($label =~ /intermittent/) {
+	    assert_or_die(
+	        !(scalar(@job_queue) > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0),
+	        "Deadlock detected in $label: " . scalar(@job_queue) . " jobs queued, " .
+	        "$ready_workers workers ready, but nothing running. " .
+	        "First queued job: " . ($job_queue[0] ? $job_queue[0]{target} : "unknown")
+	    );
+	}
     }
 
     # Check if a target can be built (has a rule or exists as a source file)

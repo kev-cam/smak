@@ -7287,13 +7287,15 @@ sub run_job_master {
         }
 
 	# Assertion: Detect deadlock - queued work, available workers, but nothing running
-	# This indicates a bug in the job scheduling logic
-	assert_or_die(
-	    !(scalar(@job_queue) > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0),
-	    "Deadlock detected: " . scalar(@job_queue) . " jobs queued, " .
-	    "$ready_workers workers ready, but nothing running. " .
-	    "First queued job: " . ($job_queue[0] ? $job_queue[0]{target} : "unknown")
-	);
+	# Only check during intermittent checks (not at startup/dispatch where nothing running is normal)
+	if ($label =~ /intermittent/) {
+	    assert_or_die(
+	        !(scalar(@job_queue) > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0),
+	        "Deadlock detected in $label: " . scalar(@job_queue) . " jobs queued, " .
+	        "$ready_workers workers ready, but nothing running. " .
+	        "First queued job: " . ($job_queue[0] ? $job_queue[0]{target} : "unknown")
+	    );
+	}
     }
 
     # Check if a target can be built (has a rule or exists as a source file)

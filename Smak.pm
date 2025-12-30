@@ -638,9 +638,27 @@ sub execute_command_sequential {
                             last;
                         }
                     } else {
-                        # Not a built-in, execute via shell
+                        # Not a built-in, execute via fork/pipe to capture output
                         warn "DEBUG[" . __LINE__ . "]: Executing via shell: $cmd_part\n" if $ENV{SMAK_DEBUG};
-                        my $shell_exit = system($cmd_part) >> 8;
+
+                        my $pid = open(my $cmd_fh, '-|', "$cmd_part 2>&1 ; echo EXIT_STATUS=\$?");
+                        if (!defined $pid) {
+                            $error = "Cannot execute command: $!\n";
+                            last;
+                        }
+
+                        # Stream output line by line
+                        my $shell_exit = 0;
+                        while (my $line = <$cmd_fh>) {
+                            if ($line =~ /^EXIT_STATUS=(\d+)$/) {
+                                $shell_exit = $1;
+                                next;
+                            }
+                            print STDOUT $line;
+                            print $log_fh $line if $report_mode && $log_fh;
+                        }
+                        close($cmd_fh);
+
                         if ($shell_exit != 0) {
                             $error = "smak: *** [$target] Error $shell_exit\n";
                             last;

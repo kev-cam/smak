@@ -375,9 +375,27 @@ while (my $line = <$socket>) {
                                 last;
                             }
                         } else {
-                            # Not a built-in, execute via shell
+                            # Not a built-in, execute via fork/pipe to capture output
                             print $socket "OUTPUT [Shell: $cmd_part]\n" if $ENV{SMAK_DEBUG};
-                            my $shell_exit = system("cd '$old_dir' && $cmd_part") >> 8;
+
+                            my $pid = open(my $cmd_fh, '-|', "cd '$old_dir' && $cmd_part 2>&1 ; echo EXIT_STATUS=\$?");
+                            if (!defined $pid) {
+                                print $socket "OUTPUT Cannot execute command: $!\n";
+                                $final_exit = 1;
+                                last;
+                            }
+
+                            # Stream output line by line
+                            my $shell_exit = 0;
+                            while (my $line = <$cmd_fh>) {
+                                if ($line =~ /^EXIT_STATUS=(\d+)$/) {
+                                    $shell_exit = $1;
+                                    next;
+                                }
+                                print $socket "OUTPUT $line";
+                            }
+                            close($cmd_fh);
+
                             if ($shell_exit != 0) {
                                 $final_exit = $shell_exit;
                                 last;

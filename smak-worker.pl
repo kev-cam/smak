@@ -3,6 +3,8 @@ use strict;
 use warnings;
 use IO::Socket::INET;
 use POSIX qw(:sys_wait_h);
+use File::Path qw(make_path remove_tree);
+use File::Copy qw(copy move);
 
 # Analyze command failures and determine if they're acceptable
 sub is_acceptable_failure {
@@ -41,6 +43,135 @@ sub is_transient_failure {
     return 1 if $output =~ /cannot find.*\.o\b/i;
 
     return 0;
+}
+
+# Execute a command using built-in Perl functions instead of shell
+# Returns exit code (0 = success, non-zero = failure)
+sub execute_builtin {
+    my ($cmd, $socket) = @_;
+
+    # Strip leading @ (silent) or - (ignore errors) prefixes
+    my $ignore_errors = 0;
+    my $silent = 0;
+    while ($cmd =~ s/^[@-]//) {
+        $silent = 1 if $& eq '@';
+        $ignore_errors = 1 if $& eq '-';
+    }
+
+    $cmd =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+    # Parse command and arguments
+    my @parts = split(/\s+/, $cmd);
+    my $command = shift @parts;
+
+    return undef unless defined $command;  # Empty command
+
+    # rm [-f] [-r] [-rf] <files...>
+    if ($command eq 'rm') {
+        my $force = 0;
+        my $recursive = 0;
+        my @files;
+
+        for my $arg (@parts) {
+            if ($arg eq '-f') {
+                $force = 1;
+            } elsif ($arg eq '-r' || $arg eq '-R') {
+                $recursive = 1;
+            } elsif ($arg eq '-rf' || $arg eq '-fr') {
+                $force = 1;
+                $recursive = 1;
+            } else {
+                push @files, glob($arg);  # Expand wildcards
+            }
+        }
+
+        for my $file (@files) {
+            if (-d $file) {
+                if ($recursive) {
+                    remove_tree($file, {error => \my $err});
+                    if (@$err && !$force) {
+                        print $socket "OUTPUT rm: cannot remove '$file': $!\n" if $socket;
+                        return 1 unless $ignore_errors;
+                    }
+                } else {
+                    print $socket "OUTPUT rm: cannot remove '$file': Is a directory\n" if $socket && !$silent;
+                    return 1 unless $force || $ignore_errors;
+                }
+            } elsif (-e $file) {
+                unless (unlink($file)) {
+                    print $socket "OUTPUT rm: cannot remove '$file': $!\n" if $socket && !$silent;
+                    return 1 unless $force || $ignore_errors;
+                }
+            } elsif (!$force) {
+                print $socket "OUTPUT rm: cannot remove '$file': No such file or directory\n" if $socket && !$silent;
+                return 1 unless $ignore_errors;
+            }
+        }
+        return 0;
+    }
+
+    # mkdir [-p] <dirs...>
+    elsif ($command eq 'mkdir') {
+        my $parents = 0;
+        my @dirs;
+
+        for my $arg (@parts) {
+            if ($arg eq '-p') {
+                $parents = 1;
+            } else {
+                push @dirs, $arg;
+            }
+        }
+
+        for my $dir (@dirs) {
+            if ($parents) {
+                make_path($dir, {error => \my $err});
+                if (@$err) {
+                    print $socket "OUTPUT mkdir: cannot create directory '$dir': $!\n" if $socket && !$silent;
+                    return 1 unless $ignore_errors;
+                }
+            } else {
+                unless (mkdir($dir)) {
+                    print $socket "OUTPUT mkdir: cannot create directory '$dir': $!\n" if $socket && !$silent;
+                    return 1 unless $ignore_errors;
+                }
+            }
+        }
+        return 0;
+    }
+
+    # echo <text...>
+    elsif ($command eq 'echo') {
+        my $text = join(' ', @parts);
+        # Remove surrounding quotes if present
+        $text =~ s/^"(.*)"$/$1/;
+        $text =~ s/^'(.*)'$/$1/;
+        print $socket "OUTPUT $text\n" if $socket && !$silent;
+        return 0;
+    }
+
+    # true / : (no-op)
+    elsif ($command eq 'true' || $command eq ':') {
+        return 0;
+    }
+
+    # false
+    elsif ($command eq 'false') {
+        return $ignore_errors ? 0 : 1;
+    }
+
+    # cd <dir>
+    elsif ($command eq 'cd') {
+        my $dir = $parts[0] || $ENV{HOME};
+        unless (chdir($dir)) {
+            print $socket "OUTPUT cd: $dir: $!\n" if $socket && !$silent;
+            return 1 unless $ignore_errors;
+        }
+        return 0;
+    }
+
+    # Not a recognized built-in
+    return undef;
 }
 
 # Usage: smak-worker <host:port>
@@ -162,11 +293,12 @@ while (my $line = <$socket>) {
     if ($line =~ /^TASK (\d+)$/) {
 	get_task($1,$env_done);
 
-        # Check if command is entirely composed of recursive smak/make -C calls
-        # This prevents spawning multiple job servers for subdirectories
+        # Check if command has recursive smak/make -C calls
+        # Even if mixed with other commands, we can optimize the recursive parts
         my @command_parts = split(/\s+&&\s+/, $command);
-        my $all_recursive = 1;
         my @recursive_calls;
+        my @non_recursive_parts;
+        my $found_non_recursive = 0;
 
         for my $part (@command_parts) {
             $part =~ s/^\s+|\s+$//g;  # Trim whitespace
@@ -175,24 +307,31 @@ while (my $line = <$socket>) {
             # Also match relative paths like ../smak or ./smak
             # Allow optional flags (like -j4) between smak and -C
             if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make))(?:\s+-\S+)*\s+-C\s+(\S+)\s+(\S+)}) {
-                push @recursive_calls, { dir => $1, target => $2 };
+                if (!$found_non_recursive) {
+                    push @recursive_calls, { dir => $1, target => $2 };
+                } else {
+                    # Recursive call after non-recursive command - can't optimize safely
+                    @recursive_calls = ();
+                    last;
+                }
             } elsif ($part eq 'true' || $part eq ':' || $part eq '') {
-                # Ignore no-op commands and empty parts
+                # Ignore no-op commands - they don't affect optimization
                 next;
             } else {
-                $all_recursive = 0;
-                last;
+                # Non-recursive command found
+                $found_non_recursive = 1;
+                push @non_recursive_parts, $part;
             }
         }
 
-        if ($all_recursive && @recursive_calls > 0) {
+        # If we found recursive calls at the start, optimize them
+        if (@recursive_calls > 0) {
             # Check if built-in optimizations are disabled (for testing)
             if ($ENV{SMAK_NO_BUILTINS}) {
                 print STDERR "DEBUG: SMAK_NO_BUILTINS set - skipping in-process optimization\n" if $ENV{SMAK_VERBOSE};
                 # Fall through to execute command normally
             } else {
                 # Handle recursive calls in-process using existing smak
-                # Instead of spawning new job servers, execute smak directly
                 print $socket "OUTPUT [In-process: " . scalar(@recursive_calls) . " recursive build(s)]\n";
 
                 my $final_exit = 0;
@@ -207,20 +346,81 @@ while (my $line = <$socket>) {
                     }
 
                     # Execute smak directly in the subdirectory (reuses parent job server)
-                    # The key is NOT using -j flag, which would spawn a new job server
-                    # Use FindBin to locate the smak executable
                     use FindBin qw($RealBin);
                     my $smak_path = "$RealBin/smak";
                     my $smak_cmd = "cd '$abs_subdir' && '$smak_path' '$subtarget'";
                     print $socket "OUTPUT   → $abs_subdir: $subtarget\n";
 
-                    my $sub_exit = system($smak_cmd) >> 8;
+                    # Use fork/pipe to capture output and maintain I/O control
+                    my $pid = open(my $smak_fh, '-|', "$smak_cmd 2>&1 ; echo EXIT_STATUS=\$?");
+                    if (!defined $pid) {
+                        print $socket "OUTPUT Cannot execute smak: $!\n";
+                        $final_exit = 1;
+                        last;
+                    }
+
+                    # Stream output line by line
+                    my $sub_exit = 0;
+                    while (my $line = <$smak_fh>) {
+                        if ($line =~ /^EXIT_STATUS=(\d+)$/) {
+                            $sub_exit = $1;
+                            next;
+                        }
+                        # Forward output to master
+                        print $socket "OUTPUT $line";
+                    }
+                    close($smak_fh);
+
                     if ($sub_exit != 0) {
                         print $socket "OUTPUT   ✗ Failed (exit $sub_exit)\n";
                         $final_exit = $sub_exit;
                         last;
                     }
                     print $socket "OUTPUT   ✓ Complete\n";
+                }
+
+                # If there are non-recursive commands after the recursive ones, execute them
+                if ($final_exit == 0 && @non_recursive_parts > 0) {
+                    print $socket "OUTPUT [Executing remaining commands]\n";
+
+                    # Try to execute each command as a built-in first
+                    for my $cmd_part (@non_recursive_parts) {
+                        my $builtin_exit = execute_builtin($cmd_part, $socket);
+
+                        if (defined $builtin_exit) {
+                            # Command was handled as built-in
+                            if ($builtin_exit != 0) {
+                                $final_exit = $builtin_exit;
+                                last;
+                            }
+                        } else {
+                            # Not a built-in, execute via fork/pipe to capture output
+                            print $socket "OUTPUT [Shell: $cmd_part]\n" if $ENV{SMAK_DEBUG};
+
+                            my $pid = open(my $cmd_fh, '-|', "cd '$old_dir' && $cmd_part 2>&1 ; echo EXIT_STATUS=\$?");
+                            if (!defined $pid) {
+                                print $socket "OUTPUT Cannot execute command: $!\n";
+                                $final_exit = 1;
+                                last;
+                            }
+
+                            # Stream output line by line
+                            my $shell_exit = 0;
+                            while (my $line = <$cmd_fh>) {
+                                if ($line =~ /^EXIT_STATUS=(\d+)$/) {
+                                    $shell_exit = $1;
+                                    next;
+                                }
+                                print $socket "OUTPUT $line";
+                            }
+                            close($cmd_fh);
+
+                            if ($shell_exit != 0) {
+                                $final_exit = $shell_exit;
+                                last;
+                            }
+                        }
+                    }
                 }
 
                 print $socket "TASK_END $task_id $final_exit\n";
@@ -231,7 +431,7 @@ while (my $line = <$socket>) {
         }
 
         # Assert that we should be using built-in optimizations (for testing)
-        if ($ENV{SMAK_ASSERT_NO_SPAWN} && $all_recursive && @recursive_calls > 0) {
+        if ($ENV{SMAK_ASSERT_NO_SPAWN} && @recursive_calls > 0) {
             my $error_msg = "SMAK_ASSERT_NO_SPAWN: About to spawn subprocess for recursive build, but built-in should be used\n" .
                 "Command: $command\n" .
                 "Recursive calls detected: " . scalar(@recursive_calls) . "\n" .

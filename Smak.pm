@@ -7117,7 +7117,7 @@ sub run_job_master {
                 print STDERR "Composite target '$comp_target' FAILED because dependency '$failed_target' failed (exit code $exit_code)\n";
                 $in_progress{$comp_target} = "failed";
                 $failed_targets{$comp_target} = $exit_code;
-                if ($comp->{master_socket}) {
+                if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                 }
                 delete $pending_composite{$comp_target};
@@ -7572,7 +7572,7 @@ sub run_job_master {
                                     vprint "All dependencies complete for composite target '$comp_target'\n";
                                     $completed_targets{$comp_target} = 1;
                                     $in_progress{$comp_target} = "done";
-                                    if ($comp->{master_socket}) {
+                                    if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
                                     }
                                     delete $pending_composite{$comp_target};
@@ -7688,7 +7688,7 @@ sub run_job_master {
                                     if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                         print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
                                         $in_progress{$comp_target} = "failed";
-                                        if ($comp->{master_socket}) {
+                                        if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                                             print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                         }
                                         delete $pending_composite{$comp_target};
@@ -7904,11 +7904,11 @@ sub run_job_master {
                                           (keys %running_jobs > 0);
 
                     if ($target_complete && !$work_in_progress) {
-                        print $master_socket "JOB_COMPLETE $target 0\n";
+                        print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket && defined fileno($master_socket);
                         print STDERR "Target '$target' already up-to-date, notified client\n" if $ENV{SMAK_DEBUG};
                     } elsif ($target_failed && !$work_in_progress) {
                         my $exit_code = $failed_targets{$target} || 1;
-                        print $master_socket "JOB_COMPLETE $target $exit_code\n";
+                        print $master_socket "JOB_COMPLETE $target $exit_code\n" if $master_socket && defined fileno($master_socket);
                         print STDERR "Target '$target' already failed, notified client (exit $exit_code)\n" if $ENV{SMAK_DEBUG};
                     }
                     # Otherwise, work is in progress - JOB_COMPLETE will be sent when work finishes
@@ -8981,7 +8981,7 @@ sub run_job_master {
                                 vprint "All dependencies complete for composite target '$comp_target'\n";
                                 $completed_targets{$comp_target} = 1;
                                 $in_progress{$comp_target} = "done";
-                                if ($comp->{master_socket}) {
+                                if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
                                 }
                                 delete $pending_composite{$comp_target};
@@ -9094,7 +9094,7 @@ sub run_job_master {
                                 if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
                                     print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
                                     $in_progress{$comp_target} = "failed";
-                                    if ($comp->{master_socket}) {
+                                    if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                                         print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                                     }
                                     delete $pending_composite{$comp_target};

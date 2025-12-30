@@ -351,7 +351,26 @@ while (my $line = <$socket>) {
                     my $smak_cmd = "cd '$abs_subdir' && '$smak_path' '$subtarget'";
                     print $socket "OUTPUT   → $abs_subdir: $subtarget\n";
 
-                    my $sub_exit = system($smak_cmd) >> 8;
+                    # Use fork/pipe to capture output and maintain I/O control
+                    my $pid = open(my $smak_fh, '-|', "$smak_cmd 2>&1 ; echo EXIT_STATUS=\$?");
+                    if (!defined $pid) {
+                        print $socket "OUTPUT Cannot execute smak: $!\n";
+                        $final_exit = 1;
+                        last;
+                    }
+
+                    # Stream output line by line
+                    my $sub_exit = 0;
+                    while (my $line = <$smak_fh>) {
+                        if ($line =~ /^EXIT_STATUS=(\d+)$/) {
+                            $sub_exit = $1;
+                            next;
+                        }
+                        # Forward output to master
+                        print $socket "OUTPUT $line";
+                    }
+                    close($smak_fh);
+
                     if ($sub_exit != 0) {
                         print $socket "OUTPUT   ✗ Failed (exit $sub_exit)\n";
                         $final_exit = $sub_exit;

@@ -3,6 +3,8 @@ use strict;
 use warnings;
 use IO::Socket::INET;
 use POSIX qw(:sys_wait_h);
+use File::Path qw(make_path remove_tree);
+use File::Copy qw(copy move);
 
 # Analyze command failures and determine if they're acceptable
 sub is_acceptable_failure {
@@ -41,6 +43,135 @@ sub is_transient_failure {
     return 1 if $output =~ /cannot find.*\.o\b/i;
 
     return 0;
+}
+
+# Execute a command using built-in Perl functions instead of shell
+# Returns exit code (0 = success, non-zero = failure)
+sub execute_builtin {
+    my ($cmd, $socket) = @_;
+
+    # Strip leading @ (silent) or - (ignore errors) prefixes
+    my $ignore_errors = 0;
+    my $silent = 0;
+    while ($cmd =~ s/^[@-]//) {
+        $silent = 1 if $& eq '@';
+        $ignore_errors = 1 if $& eq '-';
+    }
+
+    $cmd =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+    # Parse command and arguments
+    my @parts = split(/\s+/, $cmd);
+    my $command = shift @parts;
+
+    return undef unless defined $command;  # Empty command
+
+    # rm [-f] [-r] [-rf] <files...>
+    if ($command eq 'rm') {
+        my $force = 0;
+        my $recursive = 0;
+        my @files;
+
+        for my $arg (@parts) {
+            if ($arg eq '-f') {
+                $force = 1;
+            } elsif ($arg eq '-r' || $arg eq '-R') {
+                $recursive = 1;
+            } elsif ($arg eq '-rf' || $arg eq '-fr') {
+                $force = 1;
+                $recursive = 1;
+            } else {
+                push @files, glob($arg);  # Expand wildcards
+            }
+        }
+
+        for my $file (@files) {
+            if (-d $file) {
+                if ($recursive) {
+                    remove_tree($file, {error => \my $err});
+                    if (@$err && !$force) {
+                        print $socket "OUTPUT rm: cannot remove '$file': $!\n" if $socket;
+                        return 1 unless $ignore_errors;
+                    }
+                } else {
+                    print $socket "OUTPUT rm: cannot remove '$file': Is a directory\n" if $socket && !$silent;
+                    return 1 unless $force || $ignore_errors;
+                }
+            } elsif (-e $file) {
+                unless (unlink($file)) {
+                    print $socket "OUTPUT rm: cannot remove '$file': $!\n" if $socket && !$silent;
+                    return 1 unless $force || $ignore_errors;
+                }
+            } elsif (!$force) {
+                print $socket "OUTPUT rm: cannot remove '$file': No such file or directory\n" if $socket && !$silent;
+                return 1 unless $ignore_errors;
+            }
+        }
+        return 0;
+    }
+
+    # mkdir [-p] <dirs...>
+    elsif ($command eq 'mkdir') {
+        my $parents = 0;
+        my @dirs;
+
+        for my $arg (@parts) {
+            if ($arg eq '-p') {
+                $parents = 1;
+            } else {
+                push @dirs, $arg;
+            }
+        }
+
+        for my $dir (@dirs) {
+            if ($parents) {
+                make_path($dir, {error => \my $err});
+                if (@$err) {
+                    print $socket "OUTPUT mkdir: cannot create directory '$dir': $!\n" if $socket && !$silent;
+                    return 1 unless $ignore_errors;
+                }
+            } else {
+                unless (mkdir($dir)) {
+                    print $socket "OUTPUT mkdir: cannot create directory '$dir': $!\n" if $socket && !$silent;
+                    return 1 unless $ignore_errors;
+                }
+            }
+        }
+        return 0;
+    }
+
+    # echo <text...>
+    elsif ($command eq 'echo') {
+        my $text = join(' ', @parts);
+        # Remove surrounding quotes if present
+        $text =~ s/^"(.*)"$/$1/;
+        $text =~ s/^'(.*)'$/$1/;
+        print $socket "OUTPUT $text\n" if $socket && !$silent;
+        return 0;
+    }
+
+    # true / : (no-op)
+    elsif ($command eq 'true' || $command eq ':') {
+        return 0;
+    }
+
+    # false
+    elsif ($command eq 'false') {
+        return $ignore_errors ? 0 : 1;
+    }
+
+    # cd <dir>
+    elsif ($command eq 'cd') {
+        my $dir = $parts[0] || $ENV{HOME};
+        unless (chdir($dir)) {
+            print $socket "OUTPUT cd: $dir: $!\n" if $socket && !$silent;
+            return 1 unless $ignore_errors;
+        }
+        return 0;
+    }
+
+    # Not a recognized built-in
+    return undef;
 }
 
 # Usage: smak-worker <host:port>
@@ -231,9 +362,28 @@ while (my $line = <$socket>) {
 
                 # If there are non-recursive commands after the recursive ones, execute them
                 if ($final_exit == 0 && @non_recursive_parts > 0) {
-                    my $remaining_cmd = join(' && ', @non_recursive_parts);
                     print $socket "OUTPUT [Executing remaining commands]\n";
-                    $final_exit = system("cd '$old_dir' && $remaining_cmd") >> 8;
+
+                    # Try to execute each command as a built-in first
+                    for my $cmd_part (@non_recursive_parts) {
+                        my $builtin_exit = execute_builtin($cmd_part, $socket);
+
+                        if (defined $builtin_exit) {
+                            # Command was handled as built-in
+                            if ($builtin_exit != 0) {
+                                $final_exit = $builtin_exit;
+                                last;
+                            }
+                        } else {
+                            # Not a built-in, execute via shell
+                            print $socket "OUTPUT [Shell: $cmd_part]\n" if $ENV{SMAK_DEBUG};
+                            my $shell_exit = system("cd '$old_dir' && $cmd_part") >> 8;
+                            if ($shell_exit != 0) {
+                                $final_exit = $shell_exit;
+                                last;
+                            }
+                        }
+                    }
                 }
 
                 print $socket "TASK_END $task_id $final_exit\n";

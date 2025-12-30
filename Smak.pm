@@ -7,6 +7,8 @@ use POSIX ":sys_wait_h";
 use Term::ReadLine;
 use SmakCli qw(:all);
 use Time::HiRes qw(time);
+use File::Path qw(make_path remove_tree);
+use File::Copy qw(copy move);
 
 use Carp 'verbose'; # for debug trace
 	            # print STDERR Carp::confess( @_ ) if $ENV{SMAK_DEBUG};
@@ -397,6 +399,135 @@ sub submit_job {
     return 0;
 }
 
+# Execute a command using built-in Perl functions instead of shell
+# Returns exit code (0 = success, non-zero = failure, undef = not a built-in)
+sub execute_builtin {
+    my ($cmd) = @_;
+
+    # Strip leading @ (silent) or - (ignore errors) prefixes
+    my $ignore_errors = 0;
+    my $silent = 0;
+    while ($cmd =~ s/^[@-]//) {
+        $silent = 1 if $& eq '@';
+        $ignore_errors = 1 if $& eq '-';
+    }
+
+    $cmd =~ s/^\s+|\s+$//g;  # Trim whitespace
+
+    # Parse command and arguments
+    my @parts = split(/\s+/, $cmd);
+    my $command = shift @parts;
+
+    return undef unless defined $command;  # Empty command
+
+    # rm [-f] [-r] [-rf] <files...>
+    if ($command eq 'rm') {
+        my $force = 0;
+        my $recursive = 0;
+        my @files;
+
+        for my $arg (@parts) {
+            if ($arg eq '-f') {
+                $force = 1;
+            } elsif ($arg eq '-r' || $arg eq '-R') {
+                $recursive = 1;
+            } elsif ($arg eq '-rf' || $arg eq '-fr') {
+                $force = 1;
+                $recursive = 1;
+            } else {
+                push @files, glob($arg);  # Expand wildcards
+            }
+        }
+
+        for my $file (@files) {
+            if (-d $file) {
+                if ($recursive) {
+                    remove_tree($file, {error => \my $err});
+                    if (@$err && !$force) {
+                        print STDERR "rm: cannot remove '$file': $!\n" unless $silent;
+                        return 1 unless $ignore_errors;
+                    }
+                } else {
+                    print STDERR "rm: cannot remove '$file': Is a directory\n" unless $silent;
+                    return 1 unless $force || $ignore_errors;
+                }
+            } elsif (-e $file) {
+                unless (unlink($file)) {
+                    print STDERR "rm: cannot remove '$file': $!\n" unless $silent;
+                    return 1 unless $force || $ignore_errors;
+                }
+            } elsif (!$force) {
+                print STDERR "rm: cannot remove '$file': No such file or directory\n" unless $silent;
+                return 1 unless $ignore_errors;
+            }
+        }
+        return 0;
+    }
+
+    # mkdir [-p] <dirs...>
+    elsif ($command eq 'mkdir') {
+        my $parents = 0;
+        my @dirs;
+
+        for my $arg (@parts) {
+            if ($arg eq '-p') {
+                $parents = 1;
+            } else {
+                push @dirs, $arg;
+            }
+        }
+
+        for my $dir (@dirs) {
+            if ($parents) {
+                make_path($dir, {error => \my $err});
+                if (@$err) {
+                    print STDERR "mkdir: cannot create directory '$dir': $!\n" unless $silent;
+                    return 1 unless $ignore_errors;
+                }
+            } else {
+                unless (mkdir($dir)) {
+                    print STDERR "mkdir: cannot create directory '$dir': $!\n" unless $silent;
+                    return 1 unless $ignore_errors;
+                }
+            }
+        }
+        return 0;
+    }
+
+    # echo <text...>
+    elsif ($command eq 'echo') {
+        my $text = join(' ', @parts);
+        # Remove surrounding quotes if present
+        $text =~ s/^"(.*)"$/$1/;
+        $text =~ s/^'(.*)'$/$1/;
+        print "$text\n" unless $silent;
+        return 0;
+    }
+
+    # true / : (no-op)
+    elsif ($command eq 'true' || $command eq ':') {
+        return 0;
+    }
+
+    # false
+    elsif ($command eq 'false') {
+        return $ignore_errors ? 0 : 1;
+    }
+
+    # cd <dir>
+    elsif ($command eq 'cd') {
+        my $dir = $parts[0] || $ENV{HOME};
+        unless (chdir($dir)) {
+            print STDERR "cd: $dir: $!\n" unless $silent;
+            return 1 unless $ignore_errors;
+        }
+        return 0;
+    }
+
+    # Not a recognized built-in
+    return undef;
+}
+
 sub execute_command_sequential {
     my ($target, $command, $dir) = @_;
 
@@ -410,12 +541,12 @@ sub execute_command_sequential {
         chdir($dir) or die "Cannot chdir to $dir: $!\n";
     }
 
-    # Check if command is entirely composed of recursive smak/make -C calls
-    # Pattern: smak -C <dir> <target> [&& smak -C <dir> <target> ...]
-    # Split on && and check if all parts are recursive calls
+    # Check if command has recursive smak/make -C calls
+    # Even if mixed with other commands, we can optimize the recursive parts
     my @command_parts = split(/\s+&&\s+/, $command);
-    my $all_recursive = 1;
     my @recursive_calls;
+    my @non_recursive_parts;
+    my $found_non_recursive = 0;
 
     for my $part (@command_parts) {
         $part =~ s/^\s+|\s+$//g;  # Trim whitespace
@@ -424,17 +555,25 @@ sub execute_command_sequential {
         # Also match relative paths like ../smak or ./smak
         # Allow optional flags (like -j4) between smak and -C
         if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make))(?:\s+-\S+)*\s+-C\s+(\S+)\s+(\S+)}) {
-            push @recursive_calls, { dir => $1, target => $2 };
+            if (!$found_non_recursive) {
+                push @recursive_calls, { dir => $1, target => $2 };
+            } else {
+                # Recursive call after non-recursive command - can't optimize safely
+                @recursive_calls = ();
+                last;
+            }
         } elsif ($part eq 'true' || $part eq ':' || $part eq '') {
-            # Ignore these no-op commands and empty parts
+            # Ignore no-op commands - they don't affect optimization
             next;
         } else {
-            $all_recursive = 0;
-            last;
+            # Non-recursive command found
+            $found_non_recursive = 1;
+            push @non_recursive_parts, $part;
         }
     }
 
-    if ($all_recursive && @recursive_calls > 0) {
+    # If we found recursive calls at the start, optimize them
+    if (@recursive_calls > 0) {
         warn "DEBUG[" . __LINE__ . "]: Detected " . scalar(@recursive_calls) . " recursive build(s) in chain\n" if $ENV{SMAK_DEBUG};
 
         # Check if built-in optimizations are disabled (for testing)
@@ -484,19 +623,45 @@ sub execute_command_sequential {
             chdir($saved_dir);
             $makefile = $saved_makefile;
 
+            # If there are non-recursive commands after recursive ones, execute them
+            if (!$error && @non_recursive_parts > 0) {
+                warn "DEBUG[" . __LINE__ . "]: Executing " . scalar(@non_recursive_parts) . " remaining command(s)\n" if $ENV{SMAK_DEBUG};
+
+                # Try to execute each command as a built-in first
+                for my $cmd_part (@non_recursive_parts) {
+                    my $builtin_exit = execute_builtin($cmd_part);
+
+                    if (defined $builtin_exit) {
+                        # Command was handled as built-in
+                        if ($builtin_exit != 0) {
+                            $error = "smak: *** [$target] Error $builtin_exit\n";
+                            last;
+                        }
+                    } else {
+                        # Not a built-in, execute via shell
+                        warn "DEBUG[" . __LINE__ . "]: Executing via shell: $cmd_part\n" if $ENV{SMAK_DEBUG};
+                        my $shell_exit = system($cmd_part) >> 8;
+                        if ($shell_exit != 0) {
+                            $error = "smak: *** [$target] Error $shell_exit\n";
+                            last;
+                        }
+                    }
+                }
+            }
+
             chdir($old_dir) if $old_dir;
 
             if ($error) {
                 die $error;
             }
 
-            warn "DEBUG[" . __LINE__ . "]: In-process recursive builds complete\n" if $ENV{SMAK_DEBUG};
+            warn "DEBUG[" . __LINE__ . "]: In-process recursive builds and remaining commands complete\n" if $ENV{SMAK_DEBUG};
             return 0;
         }
     }
 
     # Assert that we should be using built-in optimizations (for testing)
-    if ($ENV{SMAK_ASSERT_NO_SPAWN} && $all_recursive && @recursive_calls > 0) {
+    if ($ENV{SMAK_ASSERT_NO_SPAWN} && @recursive_calls > 0) {
         die "SMAK_ASSERT_NO_SPAWN: About to spawn subprocess for recursive build, but built-in should be used\n" .
             "Command: $command\n" .
             "Recursive calls detected: " . scalar(@recursive_calls) . "\n" .

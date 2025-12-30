@@ -1,0 +1,6 @@
+all: test_auto_fail.o
+
+test_auto_fail.o: test_auto_fail.c
+	@echo "Building test_auto_fail.o from test_auto_fail.c"
+	@cp test_auto_fail.c test_auto_fail.o
+	@echo "Built test_auto_fail.o"

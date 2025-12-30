@@ -13,8 +13,8 @@ rm -f test_scan_file.txt
 ../smak -scanner test_scan_file.txt > /tmp/scanner-output-$$.txt 2>&1 &
 SCANNER_PID=$!
 
-# Give scanner time to start
-sleep 1
+# Give scanner time to start (increased for slower systems)
+sleep 2
 
 # Test CREATE event
 echo "Creating file..."

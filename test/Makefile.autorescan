@@ -1,0 +1,9 @@
+all: test_auto.o
+
+test_auto.o: test_auto.c
+	@echo "Building test_auto.o from test_auto.c"
+	@cp test_auto.c test_auto.o
+	@echo "Built test_auto.o"
+
+clean:
+	mv test_auto.o  test_auto.o-old ; exit 0

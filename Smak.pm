@@ -7616,11 +7616,35 @@ sub run_job_master {
                         } elsif (exists $in_progress{$single_dep} &&
                                  $in_progress{$single_dep} ne "done" &&
                                  $in_progress{$single_dep} ne "failed") {
-                            # Dependency is queued or currently building - wait for it
-                            $deps_satisfied = 0;
-                            print STDERR "  Job '$target' waiting for dependency '$single_dep' (queued/building)\n" if $ENV{SMAK_DEBUG};
-                            print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep' in_progress\n" if $ENV{SMAK_DEBUG};
-                            last;
+                            # Check if dependency is actually being built (has a worker) vs just queued
+                            my $dep_status = $in_progress{$single_dep};
+                            # Worker references stringify to "GLOB(0x...)" or are objects
+                            # Status strings are: "queued", "pending", "sibling:..."
+                            my $is_building = ref($dep_status) || $dep_status =~ /^GLOB\(/;
+
+                            if ($is_building) {
+                                # Dependency is currently building on a worker - wait for it
+                                $deps_satisfied = 0;
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (building)\n" if $ENV{SMAK_DEBUG};
+                                print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep' in_progress (building)\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            } elsif ($dep_status =~ /^(queued|pending)$/) {
+                                # Dependency is queued but not yet dispatched
+                                # Don't wait - it should be dispatched in this same dispatch_jobs call
+                                # if its dependencies are satisfied
+                                print STDERR "DEBUG dispatch:     Dep '$single_dep' is queued/pending, will be checked for dispatch\n" if $ENV{SMAK_DEBUG};
+                                # Continue checking other dependencies
+                            } elsif ($dep_status =~ /^sibling:/) {
+                                # Dependency is part of a composite target being built
+                                $deps_satisfied = 0;
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (sibling in progress)\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            } else {
+                                # Unknown status - be conservative and wait
+                                $deps_satisfied = 0;
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (status: $dep_status)\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            }
                         } else {
                             # Dependency not completed and doesn't exist
                             print STDERR "DEBUG dispatch:     Dep '$single_dep' not completed and doesn't exist\n" if $ENV{SMAK_DEBUG};

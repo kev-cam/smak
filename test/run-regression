@@ -13,6 +13,8 @@ VERBOSE=0
 TTY_MODE=0
 CLONE_MODE=""
 SANITY_MODE=0
+LIST_MODE=0
+FILTER_PATTERN=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -31,6 +33,18 @@ while [ $# -gt 0 ]; do
         -s|--sanity)
             SANITY_MODE=1
             shift
+            ;;
+        -l|--list)
+            LIST_MODE=1
+            shift
+            ;;
+        --filter)
+            FILTER_PATTERN="$2"
+            if [ -z "$FILTER_PATTERN" ]; then
+                echo "Error: --filter requires a pattern argument"
+                exit 1
+            fi
+            shift 2
             ;;
         -clone|--clone)
             CLONE_MODE="$2"
@@ -58,6 +72,8 @@ Options:
   -f, --full          Run full test suite including random builds and CLI tests
   -v, --verbose       Show test output
   -t, --tty           Run interactive tests with actual TTY input (not scripted)
+  -l, --list          List all tests that would be run and exit
+  --filter <pattern>  Run only tests matching pattern (grep -E compatible)
   -clone local        Clone from local repository to /tmp/smak/test-<tag>/ and run tests there
   -clone query        Clone from remote, prompting for branch selection
   -h, --help          Show this help
@@ -68,6 +84,9 @@ Examples:
   $0 --full           # Full test suite
   $0 --verbose        # Show all test output
   $0 --tty            # Interactive tests require user input
+  $0 --list           # Show what tests would run
+  $0 --filter autorescan  # Run only tests matching 'autorescan'
+  $0 --filter "debug|builtin"  # Run tests matching 'debug' or 'builtin'
   $0 -clone local     # Test in clean clone of local repo
   $0 -clone query     # Test in clone, choose branch interactively
 
@@ -557,45 +576,77 @@ SANITY_TESTS=(
 )
 SANITY_DEFAULT_TARGET_TEST="test-default-target.sh"
 
-# Run all test_*.sh scripts (non-interactive unit tests)
-echo "Unit Tests:"
-echo "----------"
+# Collect all tests into an array
+TESTS_TO_RUN=()
 
 if [ $SANITY_MODE -eq 1 ]; then
-    # Sanity mode: only run selected tests
+    # Sanity mode: only selected tests
     for test in "${SANITY_TESTS[@]}"; do
         if [ -f "$test" ]; then
-            run_test "$test"
+            TESTS_TO_RUN+=("$test")
         fi
     done
-
-    # Run default target test in sanity mode
     if [ -f "$SANITY_DEFAULT_TARGET_TEST" ]; then
-        echo ""
-        echo "Default Target Tests:"
-        echo "--------------------"
-        run_test "$SANITY_DEFAULT_TARGET_TEST"
+        TESTS_TO_RUN+=("$SANITY_DEFAULT_TARGET_TEST")
     fi
 else
-    # Normal mode: run all tests
+    # Normal mode: all unit tests
     for test in test_*.sh; do
         # Skip -fail.sh tests (they're run as variants of the main test)
         if [[ "$test" == *"-fail.sh" ]]; then
             continue
         fi
         if [ -f "$test" ]; then
-            run_test "$test"
+            TESTS_TO_RUN+=("$test")
         fi
     done
-
-    # Run default target test
-    echo ""
-    echo "Default Target Tests:"
-    echo "--------------------"
+    # Add default target test
     if [ -f "test-default-target.sh" ]; then
-        run_test "test-default-target.sh"
+        TESTS_TO_RUN+=("test-default-target.sh")
     fi
 fi
+
+# Apply filter if specified
+if [ -n "$FILTER_PATTERN" ]; then
+    FILTERED_TESTS=()
+    for test in "${TESTS_TO_RUN[@]}"; do
+        if echo "$test" | grep -qE "$FILTER_PATTERN"; then
+            FILTERED_TESTS+=("$test")
+        fi
+    done
+    TESTS_TO_RUN=("${FILTERED_TESTS[@]}")
+fi
+
+# If list mode, just print tests and exit
+if [ $LIST_MODE -eq 1 ]; then
+    echo "Tests that would be run:"
+    echo ""
+    for test in "${TESTS_TO_RUN[@]}"; do
+        echo "  - $test"
+    done
+    echo ""
+    echo "Total: ${#TESTS_TO_RUN[@]} tests"
+    if [ $FULL_MODE -eq 1 ]; then
+        echo ""
+        echo "Additional tests (full mode):"
+        echo "  - Random build tests (run-tests)"
+    fi
+    exit 0
+fi
+
+# Run all collected tests
+echo "Unit Tests:"
+echo "----------"
+
+for test in "${TESTS_TO_RUN[@]}"; do
+    # Separate default target test into its own section
+    if [ "$test" = "test-default-target.sh" ]; then
+        echo ""
+        echo "Default Target Tests:"
+        echo "--------------------"
+    fi
+    run_test "$test"
+done
 
 # Run generator-based tests if in full mode
 if [ $FULL_MODE -eq 1 ]; then

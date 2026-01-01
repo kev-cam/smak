@@ -1,0 +1,80 @@
+======================================
+SMAK REGRESSION TEST SUITE
+======================================
+
+Test modes: [Seq/NoCache+fail] [Seq/Cache+fail] [Par/NoCache+fail] [Par/Cache+fail]
+Results shown as: PpPpPpPp (all pass + fail tests work in all modes)
+              or: PxPxPxPx (all pass, no fail test)
+              or: PpFpPpPp (2nd mode failed, fail tests work), etc.
+  P=pass, F=fail, T=timeout
+  p=-fail test passed (correctly failed), f=-fail test failed (wrongly succeeded), t=-fail timeout, x=no -fail test
+
+Unit Tests:
+----------
+Running test_autorescan                          ... FpFpFfFf (27s)
+Running test_builtin_optimization                ... TIMEOUT (killed after 30s)
+Running test_categories                          ... TIMEOUT (killed after 30s)
+Running test_debug                               ... TIMEOUT (killed after 30s)
+Running test_debug_simple                        ... TIMEOUT (killed after 30s)
+Running test_dryrun                              ... PxPxPxPx (8s)
+Running test_echo                                ... PxPxPxPx (2s)
+Running test_eval_set                            ... PxPxPxPx (2s)
+Running test_format                              ... PxPxPxPx (4s)
+Running test_gmake_funcs                         ... PxPxPxFx (8s)
+Running test_individual                          ... TIMEOUT (killed after 30s)
+Running test_makecmp                             ... TIMEOUT (killed after 30s)
+Running test_modify                              ... TIMEOUT (killed after 30s)
+Running test_nested                              ... PxPxPxPx (10s)
+Running test_phony_repeat                        ... PxPxPxPx (9s)
+Running test_print                               ... PxPxPxPx (5s)
+Running test_print2                              ... PxPxPxPx (4s)
+Running test_print_fixes                         ... PxPxPxPx (3s)
+Running test_readline                            ... PxPxPxPx (5s)
+Running test_recursive_parallel                  ... TIMEOUT (killed after 30s)
+Running test_scanner                             ... FxFxFxFx (27s)
+Running test_script                              ... TIMEOUT (killed after 30s)
+Running test_timeout                             ... TIMEOUT (killed after 30s)
+Running test_var_translation                     ... TIMEOUT (killed after 30s)
+
+Default Target Tests:
+--------------------
+Running test-default-target                      ... PxPxPxPx (3s)
+
+======================================
+TEST SUMMARY
+======================================
+Total tests:   25
+Passed:        11
+Failed:        14
+Skipped:       0
+
+Failed tests:
+  ✗ test_autorescan
+     Log: /tmp/smak-test-fail-test_autorescan.log
+  ✗ test_gmake_funcs
+     Log: /tmp/smak-test-fail-test_gmake_funcs.log
+  ✗ test_scanner
+     Log: /tmp/smak-test-fail-test_scanner.log
+
+Failed due to timeout (11 tests):
+  - test_builtin_optimization
+  - test_categories
+  - test_debug
+  - test_debug_simple
+  - test_individual
+  - test_makecmp
+  - test_modify
+  - test_recursive_parallel
+  - test_script
+  - test_timeout
+  - test_var_translation
+
+======================================
+NOTES
+======================================
+Date: 2026-01-01
+Commit: f45349d
+Branch: claude/add-file-handling-XFJkI
+
+This is the baseline test report before any functional changes.
+The failures documented here are pre-existing issues.

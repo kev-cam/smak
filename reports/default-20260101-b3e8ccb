@@ -1,0 +1,80 @@
+Running tests before push...
+=============================
+Branch:  claude/fix-tests-ZnpNN
+Commit:  a26c3b0 Additions from Claude
+Time:    Thu Jan  1 19:28:29 UTC 2026
+
+WARNING: You have uncommitted changes
+
+Running regression tests...
+===========================
+
+======================================
+SMAK REGRESSION TEST SUITE
+======================================
+
+Test modes: [Seq/NoCache+fail] [Seq/Cache+fail] [Par/NoCache+fail] [Par/Cache+fail]
+Results shown as: PpPpPpPp (all pass + fail tests work in all modes)
+              or: PxPxPxPx (all pass, no fail test)
+              or: PpFpPpPp (2nd mode failed, fail tests work), etc.
+  P=pass, F=fail, T=timeout
+  p=-fail test passed (correctly failed), f=-fail test failed (wrongly succeeded), t=-fail timeout, x=no -fail test
+
+Unit Tests:
+----------
+Running test_autorescan                          ... [0;31mTIMEOUT[0m (killed after 30s)
+Running test_builtin_optimization                ... [0;32mPpPpPpPp[0m (15s)
+Running test_categories                          ... [0;32mPxPxPxPx[0m (3s)
+Running test_debug                               ... [0;31mTIMEOUT[0m (killed after 30s)
+Running test_debug_simple                        ... [0;31mTIMEOUT[0m (killed after 30s)
+Running test_dryrun                              ... [0;32mPxPxPxPx[0m (2s)
+Running test_echo                                ... [0;32mPxPxPxPx[0m (3s)
+Running test_eval_set                            ... [0;32mPxPxPxPx[0m (2s)
+Running test_format                              ... [0;32mPxPxPxPx[0m (4s)
+Running test_gmake_funcs                         ... [0;32mPxPxPxPx[0m (11s)
+Running test_individual                          ... [0;32mPxPxPxPx[0m (3s)
+Running test_makecmp                             ... [0;32mPxPxPxPx[0m (3s)
+Running test_modify                              ... [0;32mPxPxPxPx[0m (2s)
+Running test_nested                              ... [0;32mPxPxPxPx[0m (4s)
+Running test_phony_repeat                        ... [0;32mPxPxPxPx[0m (9s)
+Running test_print                               ... [0;32mPxPxPxPx[0m (5s)
+Running test_print2                              ... [0;32mPxPxPxPx[0m (4s)
+Running test_print_fixes                         ... [0;32mPxPxPxPx[0m (3s)
+Running test_readline                            ... [0;32mPxPxPxPx[0m (5s)
+Running test_recursive_parallel                  ... [0;32mPxPxPxPx[0m (5s)
+Running test_scanner                             ... [0;31mPxPxPxFx[0m (26s)
+Running test_script                              ... [0;31mTIMEOUT[0m (killed after 30s)
+Running test_timeout                             ... [0;31mTIMEOUT[0m (killed after 30s)
+Running test_var_translation                     ... [0;31mTIMEOUT[0m (killed after 30s)
+
+Default Target Tests:
+--------------------
+Running test-default-target                      ... [0;32mPxPxPxPx[0m (3s)
+
+======================================
+TEST SUMMARY
+======================================
+Total tests:   25
+Passed:        [0;32m18[0m
+Failed:        [0;31m7[0m
+Skipped:       [1;33m0[0m
+
+Failed tests:
+  [0;31m✗[0m test_scanner
+     Log: /tmp/smak-test-fail-test_scanner.log
+
+Tip: Run with --verbose to see test output
+
+[0;31mSome tests failed.[0m
+
+=============================
+Test Summary
+=============================
+Result:  ✗ FAILED
+
+DO NOT PUSH - tests failed!
+
+Check failure logs in test/logs/
+Failure details copied to: test/logs/failures-a26c3b0-20260101-192829/
+
+Log saved to: test/logs/test-claude/fix-tests-ZnpNN-a26c3b0-20260101-192829.log

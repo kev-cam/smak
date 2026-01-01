@@ -5249,9 +5249,10 @@ sub run_standalone_scanner {
     }
 
     # Check for FUSE monitoring
-    my %fuse_sockets;  # mountpoint => socket
-    my %fuse_paths;    # path => mountpoint
-    my %polling_paths; # Paths that need polling
+    my %fuse_sockets;      # mountpoint => socket
+    my %fuse_mountpoints;  # mountpoint => mountpoint (for path conversion)
+    my %fuse_paths;        # path => mountpoint
+    my %polling_paths;     # Paths that need polling
 
     for my $abs_path (@abs_paths) {
         my $dir = -d $abs_path ? $abs_path : dirname($abs_path);
@@ -5268,6 +5269,7 @@ sub run_standalone_scanner {
                 if ($socket) {
                     $socket->autoflush(1);
                     $fuse_sockets{$mountpoint} = $socket;
+                    $fuse_mountpoints{$mountpoint} = $mountpoint;
                     print STDERR "Connected to FUSE monitor for $mountpoint (port $fuse_port)\n";
                 } else {
                     warn "Warning: Could not connect to FUSE monitor on port $fuse_port: $!\n";
@@ -5280,7 +5282,7 @@ sub run_standalone_scanner {
         }
     }
 
-    # Track file mtimes for polling paths
+    # Track file mtimes for polling paths (same as auto_rescan_watcher)
     my %last_mtimes;
     for my $abs_path (keys %polling_paths) {
         if (-e $abs_path) {
@@ -5296,8 +5298,9 @@ sub run_standalone_scanner {
         $select->add($socket);
     }
 
-    # Track inode to path mapping for FUSE events
+    # Track inode to path mapping for FUSE events (same protocol as job server)
     my %inode_to_path;
+    my %pending_path_requests;
 
     # Main scanner loop (runs until interrupted)
     while (1) {
@@ -5323,33 +5326,74 @@ sub run_standalone_scanner {
             }
             chomp $line;
 
-            # Parse FUSE event: OP:PID:INODE or INO:INODE:PATH
+            # Parse FUSE event: OP:PID:INODE or INO:INODE:PATH (same protocol as job server)
             if ($line =~ /^(\w+):(\d+):(.+)$/) {
                 my ($op, $arg1, $arg2) = ($1, $2, $3);
 
                 if ($op eq 'INO') {
-                    # Inode-to-path mapping
+                    # Path resolution response: INO:inode:path
                     my ($inode, $fuse_path) = ($arg1, $arg2);
-                    $inode_to_path{$inode} = $fuse_path;
-                } elsif ($op =~ /^(DELETE|MODIFY|CREATE)$/) {
-                    my $inode = $arg2;
-                    my $fuse_path = $inode_to_path{$inode} || "inode:$inode";
 
-                    # Check if this path is in our watch list
+                    # Find the mountpoint for this socket
+                    my $mountpoint;
+                    for my $mp (keys %fuse_sockets) {
+                        if ($fuse_sockets{$mp} == $socket) {
+                            $mountpoint = $mp;
+                            last;
+                        }
+                    }
+
+                    # Convert mount-relative path to full path (same as job server)
+                    my $full_path = $fuse_path;
+                    if ($mountpoint && $fuse_path =~ m{^/}) {
+                        # Remove leading slash and prepend mountpoint
+                        $fuse_path =~ s{^/}{};
+                        $full_path = "$mountpoint/$fuse_path";
+                    }
+
+                    $inode_to_path{$inode} = $full_path;
+                    delete $pending_path_requests{$inode};
+
+                } elsif ($op =~ /^(DELETE|MODIFY|CREATE|WRITE|RENAME)$/) {
+                    # File operation: OP:pid:inode (same format as job server)
+                    my ($event_pid, $inode) = ($arg1, $arg2);
+
+                    # Request path if we don't have it cached (same as job server)
+                    if (!exists $inode_to_path{$inode} && !exists $pending_path_requests{$inode}) {
+                        print $socket "PATH:$inode\n";
+                        $pending_path_requests{$inode} = 1;
+                        next;
+                    }
+
+                    # Skip if we don't have the path yet
+                    next unless exists $inode_to_path{$inode};
+
+                    my $full_path = $inode_to_path{$inode};
+
+                    # Check if this path matches any of our watched files
                     for my $abs_path (keys %fuse_paths) {
-                        # Simple check - if the FUSE path ends with our watched file
-                        my $watch_file = File::Spec->abs2rel($abs_path, '/');
-                        if ($fuse_path =~ /\Q$watch_file\E$/ || $abs_path eq $fuse_path) {
-                            my $orig_path = $path_map{$abs_path};
-                            print "$op:$pid:$orig_path (via FUSE)\n";
+                        my $orig_path = $path_map{$abs_path};
+
+                        # Match by full path or basename
+                        my $abs_basename = basename($abs_path);
+                        my $full_basename = basename($full_path);
+
+                        if ($full_path eq $abs_path || $full_basename eq $abs_basename) {
+                            # Normalize operation names (WRITE -> MODIFY, RENAME -> DELETE)
+                            my $normalized_op = $op;
+                            $normalized_op = 'MODIFY' if $op eq 'WRITE';
+                            $normalized_op = 'DELETE' if $op eq 'RENAME';
+
+                            print "$normalized_op:$pid:$orig_path (via FUSE)\n";
                             STDOUT->flush();
+                            last;
                         }
                     }
                 }
             }
         }
 
-        # Poll non-FUSE paths
+        # Poll non-FUSE paths (same logic as auto_rescan_watcher)
         for my $abs_path (keys %polling_paths) {
             my $orig_path = $path_map{$abs_path};
             if (!-e $abs_path) {
@@ -5380,8 +5424,8 @@ sub run_standalone_scanner {
             }
         }
 
-        # Sleep briefly if we're only polling (FUSE has already waited in select)
-        sleep 0.5 if keys %polling_paths;
+        # Sleep briefly between scans (same as auto_rescan_watcher)
+        sleep 1;
     }
 }
 

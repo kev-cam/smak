@@ -189,7 +189,7 @@ if ($reconnect || $kill_old_js) {
                 }
             }
         }
-    } elsif ($reconnect) {
+    } elsif ($reconnect && $ENV{SMAK_VERBOSE}) {
         warn "Cannot reconnect: .smak.connect not found\n";
     }
 }

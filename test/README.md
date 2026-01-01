@@ -126,3 +126,39 @@ These tests appear to have issues with PTY-based interactive automation.
 With `libio-pty-perl` installed:
 - **18/25 tests passing (72%)**
 - 7 tests failing (pre-existing issues, not regressions)
+
+## Testing Real-World Makefiles
+
+The `projects/` directory contains Makefiles from real-world projects to ensure SMAK parses them correctly.
+
+### Adding a Project Makefile
+
+1. Copy the Makefile to `projects/<project-name>/Makefile`
+2. Verify it parses correctly: `smak --dry-run -f projects/<project-name>/Makefile`
+3. Generate reference output: `cd test && ./update-project-references.sh`
+4. Add to git: `git add projects/<project-name>/`
+
+### Running Project Tests
+
+```bash
+cd test
+./test_projects.sh
+```
+
+This test:
+- Finds all Makefiles in `projects/`
+- Runs `smak --dry-run` on each
+- Compares output with saved `.smak-dry` reference files
+- Reports any parsing errors or output changes
+
+### Updating Reference Outputs
+
+When you've verified a Makefile change is correct:
+
+```bash
+cd test
+./update-project-references.sh
+git add projects/**/*.smak-dry
+```
+
+This updates all `.smak-dry` reference files with current dry-run output.

@@ -1345,7 +1345,7 @@ sub parse_makefile {
         }
 
         # Handle include directives
-        if ($line =~ /^-?include\s+(.+)$/) {
+        if ($line =~ /^-?include\s+(.+?)(?:\s*#.*)?$/) {
             $save_current_rule->();
             my $include_files = $1;
             # Expand variables and functions in the include filename
@@ -1641,7 +1641,7 @@ sub parse_included_makefile {
         }
 
         # Handle include directives (nested includes)
-        if ($line =~ /^-?include\s+(.+)$/) {
+        if ($line =~ /^-?include\s+(.+?)(?:\s*#.*)?$/) {
             $save_current_rule->();
             my $include_files = $1;
             # Expand variables and functions in the include filename

@@ -736,7 +736,8 @@ sub execute_command_sequential {
             $exit_code = $1;
             next;  # Don't print the marker
         }
-        print STDOUT $line unless $cmd_silent;
+        # Always print command output - @ prefix only affects command echo, not output
+        print STDOUT $line;
         print $log_fh $line if $report_mode && $log_fh;
     }
 

@@ -1,0 +1,5 @@
+all:
+	../smak -C subdir1 all && ../smak -C subdir2 all && ../smak -C subdir3 all
+
+clean:
+	../smak -C subdir1 clean && ../smak -C subdir2 clean && ../smak -C subdir3 clean

@@ -40,6 +40,14 @@ cd test
 
 This runs the full regression suite and logs results to `test/logs/`.
 
+**Important:** Before committing changes, copy the regression report to the reports directory:
+```bash
+# After running tests, save the baseline report
+cp test/logs/test-<branch>-<sha>-<timestamp>.log reports/default-<date>-<sha>
+```
+
+This maintains a baseline record of test results for tracking regressions.
+
 ### Full Test Suite
 ```bash
 cd test

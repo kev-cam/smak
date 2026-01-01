@@ -1,0 +1,8 @@
+# Test that inline comments on include directives are handled properly
+
+-include foo.mk # this is a comment
+include bar.mk # another comment
+-include ./test.mk # am--include-marker
+
+all:
+	@echo "Test passed"

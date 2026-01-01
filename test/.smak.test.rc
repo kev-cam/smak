@@ -1,0 +1,5 @@
+# Minimal SMAK configuration for regression testing
+# This file provides a clean baseline configuration for tests
+# Usage: SMAK_RCFILE=test/.smak.test.rc ./run-regression
+
+# Keep defaults - no custom user tweaks

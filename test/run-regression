@@ -93,6 +93,11 @@ Options:
 
 Any unrecognized options are passed through to smak (e.g., -norc, -K, etc.)
 
+Isolating tests from user configuration:
+  1. Pass -norc flag:              $0 -norc
+  2. Use SMAK_RCFILE env var:      SMAK_RCFILE=/dev/null $0
+  3. Use test rc file:             SMAK_RCFILE=.smak.test.rc $0
+
 Examples:
   $0                  # All tests with scripted automation (default)
   $0 --sanity         # Quick sanity check (2 non-interactive tests)
@@ -106,6 +111,8 @@ Examples:
   $0 -clone query     # Test in clone, choose branch interactively
   $0 -norc            # Run tests with smak -norc (ignore user config)
   $0 -- -norc -K      # Pass -norc and -K to smak
+  SMAK_RCFILE=/dev/null $0      # Use empty rc file
+  SMAK_RCFILE=.smak.test.rc $0  # Use minimal test rc file
 
 EOF
             exit 0

@@ -414,6 +414,23 @@ sub submit_job {
     return 0;
 }
 
+# Strip command prefixes (@ for silent, - for ignore errors) and return flags
+# Returns: ($cleaned_cmd, $silent, $ignore_errors)
+sub strip_command_prefixes {
+    my ($cmd) = @_;
+
+    my $ignore_errors = 0;
+    my $silent = 0;
+
+    # Strip leading @ (silent) or - (ignore errors) prefixes
+    while ($cmd =~ s/^[@-]//) {
+        $silent = 1 if $& eq '@';
+        $ignore_errors = 1 if $& eq '-';
+    }
+
+    return ($cmd, $silent, $ignore_errors);
+}
+
 # Execute a command using built-in Perl functions instead of shell
 # Returns exit code (0 = success, non-zero = failure, undef = not a built-in)
 sub execute_builtin {
@@ -422,10 +439,7 @@ sub execute_builtin {
     # Strip leading @ (silent) or - (ignore errors) prefixes
     my $ignore_errors = 0;
     my $silent = 0;
-    while ($cmd =~ s/^[@-]//) {
-        $silent = 1 if $& eq '@';
-        $ignore_errors = 1 if $& eq '-';
-    }
+    ($cmd, $silent, $ignore_errors) = strip_command_prefixes($cmd);
 
     $cmd =~ s/^\s+|\s+$//g;  # Trim whitespace
 
@@ -704,9 +718,12 @@ sub execute_command_sequential {
     # Execute command
     warn "DEBUG[" . __LINE__ . "]: About to execute command\n" if $ENV{SMAK_DEBUG};
 
+    # Strip command prefixes (@ for silent, - for ignore errors)
+    my ($clean_command, $cmd_silent, $ignore_errors) = strip_command_prefixes($command);
+
     # Execute command as a pipe to stream output in real-time
     # Redirect stderr to stdout and append exit status marker
-    my $pid = open(my $cmd_fh, '-|', "$command 2>&1 ; echo EXIT_STATUS=\$?");
+    my $pid = open(my $cmd_fh, '-|', "$clean_command 2>&1 ; echo EXIT_STATUS=\$?");
     if (!defined $pid) {
         die "Cannot execute command: $!\n";
     }
@@ -719,7 +736,7 @@ sub execute_command_sequential {
             $exit_code = $1;
             next;  # Don't print the marker
         }
-        print STDOUT $line;
+        print STDOUT $line unless $cmd_silent;
         print $log_fh $line if $report_mode && $log_fh;
     }
 
@@ -727,7 +744,7 @@ sub execute_command_sequential {
 
     warn "DEBUG[" . __LINE__ . "]: Command executed, exit_code=$exit_code\n" if $ENV{SMAK_DEBUG};
 
-    if ($exit_code != 0) {
+    if ($exit_code != 0 && !$ignore_errors) {
         my $err_msg = "smak: *** [$target] Error $exit_code\n";
         tee_print($err_msg);
         chdir($old_dir) if $old_dir;
@@ -3150,14 +3167,23 @@ sub build_target {
             next unless $cmd_line =~ /\S/;  # Skip empty lines
 
             warn "DEBUG[" . __LINE__ . "]:     Command: $cmd_line\n" if $ENV{SMAK_DEBUG};
-            # Check if command starts with @ (silent mode)
-            my $silent = ($cmd_line =~ s/^\s*@//);
+
+            # Strip command prefixes @ (silent) and - (ignore errors) for display/flags
+            # Extract leading whitespace first
+            my $leading_space = '';
+            my $cmd_for_parsing = $cmd_line;
+            if ($cmd_for_parsing =~ /^(\s+)/) {
+                $leading_space = $1;
+                $cmd_for_parsing =~ s/^\s+//;
+            }
+            my ($clean_cmd, $silent, $ignore_errors) = strip_command_prefixes($cmd_for_parsing);
+            my $display_cmd = $leading_space . $clean_cmd;
 
             # In dry-run mode, handle recursive make invocations or print commands
             if ($dry_run_mode) {
                 warn "DEBUG[" . __LINE__ . "]:     In dry-run mode\n" if $ENV{SMAK_DEBUG};
                 # Check if this is a recursive make/smak invocation
-                if ($cmd_line =~ /\b(make|smak)\s/ || $cmd_line =~ m{/smak(?:\s|$)}) {
+                if ($display_cmd =~ /\b(make|smak)\s/ || $display_cmd =~ m{/smak(?:\s|$)}) {
                     # Debug: show what we detected
                     warn "DEBUG[" . __LINE__ . "]: Detected recursive make/smak: $cmd_line\n" if $ENV{SMAK_DEBUG};
 
@@ -3206,7 +3232,7 @@ sub build_target {
                 }
 
                 # Not a recursive make, just print the command
-                print "$cmd_line\n";
+                print "$display_cmd\n";
                 next;
             }
 
@@ -3220,8 +3246,8 @@ sub build_target {
             } else {
                 warn "DEBUG[" . __LINE__ . "]:     Sequential execution\n" if $ENV{SMAK_DEBUG};
                 # Sequential mode - echo command here, then execute directly
-                unless ($silent_mode) {
-                    print "$cmd_line\n";
+                unless ($silent_mode || $silent) {
+                    print "$display_cmd\n";
                 }
                 execute_command_sequential($target, $cmd_line, $cwd);
                 warn "DEBUG[" . __LINE__ . "]:     Command completed\n" if $ENV{SMAK_DEBUG};
@@ -3395,7 +3421,27 @@ sub dry_run_target {
         my $converted = format_output($rule);
         # Expand variables
         my $expanded = expand_vars($converted);
-        print $expanded;
+
+        # Strip command prefixes from each line for display
+        # (@ means silent, - means ignore errors - both should be removed for dry-run output)
+        my @lines = split(/\n/, $expanded);
+        for my $line (@lines) {
+            # Only strip prefixes from command lines (not empty lines)
+            if ($line =~ /\S/) {
+                # Extract leading whitespace
+                my $leading_space = '';
+                if ($line =~ /^(\s+)/) {
+                    $leading_space = $1;
+                    $line =~ s/^\s+//;  # Remove leading whitespace temporarily
+                }
+                my ($clean_line, $silent, $ignore_errors) = strip_command_prefixes($line);
+                # In dry-run mode, show all commands even if marked silent
+                # (unlike real execution where @ suppresses output)
+                print $leading_space, $clean_line, "\n";
+            } else {
+                print $line, "\n";
+            }
+        }
     }
 }
 

@@ -1,5 +1,12 @@
 # SMAK Test Suite
 
+## Quick Setup
+
+Run the setup script to install all test dependencies:
+```bash
+sudo ./setup-test-deps.sh
+```
+
 ## Dependencies
 
 ### System Packages (Debian/Ubuntu)
@@ -12,6 +19,11 @@ sudo apt-get install libio-pty-perl
 - IO::Select - Standard library
 - POSIX - Standard library
 - Time::HiRes - Standard library
+
+**Note:** Without `libio-pty-perl`, most tests will fail with:
+```
+Can't locate IO/Pty.pm in @INC
+```
 
 ## Running Tests
 
@@ -27,6 +39,14 @@ cd test
 ```
 
 This runs the full regression suite and logs results to `test/logs/`.
+
+**Important:** Before committing changes, copy the regression report to the reports directory:
+```bash
+# After running tests, save the baseline report
+cp test/logs/test-<branch>-<sha>-<timestamp>.log reports/default-<date>-<sha>
+```
+
+This maintains a baseline record of test results for tracking regressions.
 
 ### Full Test Suite
 ```bash
@@ -59,3 +79,24 @@ Each test also runs its `-fail` variant to verify error handling.
 Some tests use interactive debug mode (`-Kd` flag). These are automated using script files in `scripts/*.script` that define the commands to send and expected responses.
 
 The `run-with-script.pl` tool uses PTY (pseudo-terminal) to simulate interactive input for these tests.
+
+## Known Issues
+
+### Timeout Failures (6 tests)
+The following interactive tests currently timeout after 30s:
+- test_autorescan (partial failure - only Sequential/NoCache passes)
+- test_debug
+- test_debug_simple
+- test_script
+- test_timeout
+- test_var_translation
+
+These tests appear to have issues with PTY-based interactive automation.
+
+### Race Condition (1 test)
+- test_scanner: Fails only in Parallel/Cache mode - file system events not all detected
+
+### Current Test Status
+With `libio-pty-perl` installed:
+- **18/25 tests passing (72%)**
+- 7 tests failing (pre-existing issues, not regressions)

@@ -17,6 +17,7 @@ LIST_MODE=0
 FILTER_PATTERN=""
 NO_PARALLEL=0
 FAST_MODE=0
+SMAK_EXTRA_ARGS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -66,7 +67,7 @@ while [ $# -gt 0 ]; do
             ;;
         -h|--help)
             cat << EOF
-Usage: $0 [OPTIONS]
+Usage: $0 [OPTIONS] [-- SMAK_OPTIONS]
 
 Run smak regression test suite.
 
@@ -90,6 +91,8 @@ Options:
   -clone query        Clone from remote, prompting for branch selection
   -h, --help          Show this help
 
+Any unrecognized options are passed through to smak (e.g., -norc, -K, etc.)
+
 Examples:
   $0                  # All tests with scripted automation (default)
   $0 --sanity         # Quick sanity check (2 non-interactive tests)
@@ -101,17 +104,27 @@ Examples:
   $0 --filter "debug|builtin"  # Run tests matching 'debug' or 'builtin'
   $0 -clone local     # Test in clean clone of local repo
   $0 -clone query     # Test in clone, choose branch interactively
+  $0 -norc            # Run tests with smak -norc (ignore user config)
+  $0 -- -norc -K      # Pass -norc and -K to smak
 
 EOF
             exit 0
             ;;
+        --)
+            shift
+            SMAK_EXTRA_ARGS="$*"
+            break
+            ;;
         *)
-            echo "Unknown option: $1"
-            echo "Run '$0 --help' for usage information"
-            exit 1
+            # Unrecognized options are passed to smak
+            SMAK_EXTRA_ARGS="$SMAK_EXTRA_ARGS $1"
+            shift
             ;;
     esac
 done
+
+# Export extra args for test scripts to use
+export SMAK_EXTRA_ARGS
 
 # Handle clone mode
 if [ -n "$CLONE_MODE" ]; then
@@ -343,7 +356,7 @@ run_test() {
             cat > "$wrapper_script" << WRAPPER_EOF
 #!/bin/bash
 cd "$SCRIPT_DIR"
-exec ../smak $smak_args $mode_jobs -Kd
+exec ../smak $smak_args $mode_jobs $SMAK_EXTRA_ARGS -Kd
 WRAPPER_EOF
             chmod +x "$wrapper_script"
 
@@ -364,9 +377,10 @@ WRAPPER_EOF
         else
             # Default: non-interactive tests, redirect stdin (with timeout)
             # For parallel mode, modify the test script invocation
-            if [ -n "$mode_jobs" ]; then
-                # Inject -j4 into smak invocation (handles both $SMAK variable and literal 'smak')
-                timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
+            if [ -n "$mode_jobs" ] || [ -n "$SMAK_EXTRA_ARGS" ]; then
+                # Inject -j4 and extra args into smak invocation (handles both $SMAK variable and literal 'smak')
+                local inject_args="$mode_jobs $SMAK_EXTRA_ARGS"
+                timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
             else
                 timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}"
             fi
@@ -465,7 +479,8 @@ WRAPPER_EOF
         fi
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
-            timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
+            local inject_args="-j4 $SMAK_EXTRA_ARGS"
+            timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
             result_par_nocache_fail=$?
             rm -f "$fail_out"
         fi
@@ -496,7 +511,8 @@ WRAPPER_EOF
         fi
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
-            timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 -j4\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
+            local inject_args="-j4 $SMAK_EXTRA_ARGS"
+            timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null
             result_par_cache_fail=$?
             rm -f "$fail_out"
         fi

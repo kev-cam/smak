@@ -64,6 +64,32 @@ Includes random build tests and CLI tests.
 ./run-regression --filter debug  # Run only matching tests
 ```
 
+### Isolating Tests from User Configuration
+
+To prevent user's `~/.smak.rc` from affecting test results:
+
+**Method 1: Using -norc flag**
+```bash
+./run-regression -norc           # Pass -norc to smak
+```
+
+**Method 2: Using SMAK_RCFILE environment variable**
+```bash
+# Point to empty/minimal rc file
+export SMAK_RCFILE=/dev/null
+./run-regression
+
+# Or inline
+SMAK_RCFILE=/dev/null ./run-regression
+```
+
+**Method 3: Using a test-specific rc file**
+```bash
+# Create a minimal test rc file
+echo "# Test configuration" > test/.smak.test.rc
+SMAK_RCFILE=test/.smak.test.rc ./run-regression
+```
+
 ## Test Results
 
 Tests are run in 4 modes:

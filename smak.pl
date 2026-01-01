@@ -46,30 +46,35 @@ for my $arg (@ARGV) {
 }
 
 # Read .smak.rc if it exists (before any other configuration)
-# Search upward from current directory for .smak.rc, fall back to ~/.smak.rc
+# Priority: SMAK_RCFILE env var, then search upward for .smak.rc, then ~/.smak.rc
 my $smakrc = '';
 if (!$norc) {
-    # Search upward from current directory for .smak.rc
-    my $dir = abs_path('.');
-    while (1) {
-        my $rc = File::Spec->catfile($dir, '.smak.rc');
-        if (-f $rc) {
-            $smakrc = $rc;
-            last;
+    # Check for SMAK_RCFILE environment variable first
+    if ($ENV{SMAK_RCFILE}) {
+        $smakrc = $ENV{SMAK_RCFILE};
+    } else {
+        # Search upward from current directory for .smak.rc
+        my $dir = abs_path('.');
+        while (1) {
+            my $rc = File::Spec->catfile($dir, '.smak.rc');
+            if (-f $rc) {
+                $smakrc = $rc;
+                last;
+            }
+
+            # Move to parent directory
+            my $parent = File::Spec->catdir($dir, File::Spec->updir());
+            $parent = abs_path($parent);
+
+            # Stop if we've reached the root
+            last if $parent eq $dir;
+            $dir = $parent;
         }
 
-        # Move to parent directory
-        my $parent = File::Spec->catdir($dir, File::Spec->updir());
-        $parent = abs_path($parent);
-
-        # Stop if we've reached the root
-        last if $parent eq $dir;
-        $dir = $parent;
-    }
-
-    # Fall back to ~/.smak.rc if no .smak.rc found in directory tree
-    if (!$smakrc && $ENV{HOME} && -f "$ENV{HOME}/.smak.rc") {
-        $smakrc = "$ENV{HOME}/.smak.rc";
+        # Fall back to ~/.smak.rc if no .smak.rc found in directory tree
+        if (!$smakrc && $ENV{HOME} && -f "$ENV{HOME}/.smak.rc") {
+            $smakrc = "$ENV{HOME}/.smak.rc";
+        }
     }
 }
 

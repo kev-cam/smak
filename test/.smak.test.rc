@@ -3,3 +3,6 @@
 # Usage: SMAK_RCFILE=test/.smak.test.rc ./run-regression
 
 # Keep defaults - no custom user tweaks
+
+# Print message to verify this rc file is being loaded (Perl code)
+print "Using SMAK_RCFILE: $ENV{SMAK_RCFILE}\n" if $ENV{SMAK_RCFILE};

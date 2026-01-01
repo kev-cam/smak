@@ -1,0 +1,5 @@
+all:
+	../smak -C test-rec-1 all && ../smak -C test-rec-2 all
+
+clean:
+	../smak -C test-rec-1 clean && ../smak -C test-rec-2 clean

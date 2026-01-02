@@ -315,11 +315,9 @@ run_test() {
     fi
 
     # Check if test uses interactive debug mode (-Kd flag)
-    # Treat as interactive if test uses 'exec smak -Kd' OR 'cat <<EOF | smak -Kd'
-    # These need PTY automation to work properly
+    # These tests need PTY automation to work properly
     local is_interactive=0
-    if grep -q "exec.*smak.*-Kd" "$test_script" 2>/dev/null || \
-       grep -q "cat.*<<.*|.*smak.*-Kd" "$test_script" 2>/dev/null; then
+    if grep -q "smak.*-Kd" "$test_script" 2>/dev/null; then
         is_interactive=1
     fi
 

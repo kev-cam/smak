@@ -1944,8 +1944,8 @@ sub parse_included_makefile {
         warn "DEBUG: Skipping pattern detection - inactive_patterns already populated\n" if $ENV{SMAK_DEBUG};
     }
 
-    # Save state to cache for faster startup next time
-    save_state_cache($makefile);
+    # Don't save state here - let the main parse_makefile save it after everything is parsed
+    # Saving here causes incomplete cache if recursive make runs before main Makefile finishes
 }
 
 sub get_default_target {

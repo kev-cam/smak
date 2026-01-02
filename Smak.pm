@@ -1445,6 +1445,22 @@ sub parse_makefile {
                 # := ? or = operators all do simple assignment
                 $MV{$var} = $value;
             }
+
+            # Handle VPATH variable specially
+            # VPATH is equivalent to "vpath % <directories>"
+            if ($var eq 'VPATH') {
+                # Split directories by whitespace or colon
+                my @dirs = split /[\s:]+/, $value;
+                @dirs = grep { $_ ne '' } @dirs;
+                # VPATH applies to all files (% pattern)
+                if (exists $vpath{'%'}) {
+                    push @{$vpath{'%'}}, @dirs;
+                } else {
+                    $vpath{'%'} = \@dirs;
+                }
+                warn "DEBUG: VPATH set to " . join(", ", @dirs) . " (vpath % pattern)\n" if $ENV{SMAK_DEBUG};
+            }
+
             next;
         }
 

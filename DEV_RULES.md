@@ -14,8 +14,15 @@
 # Run full regression suite
 cd test && ./run-regression
 
+# Run tests in parallel (faster)
+cd test && ./run-regression -j 4
+
 # Or use the test-before-push script
 ./test/test-before-push
+
+# Test committed changes before pushing (tests in a clean clone)
+# Useful for verifying that your commits work correctly in isolation
+cd test && ./run-regression -clone local
 ```
 
 ## Development Workflow

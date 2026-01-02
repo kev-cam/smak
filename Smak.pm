@@ -106,6 +106,11 @@ our %pattern_deps;
 our %pseudo_rule;
 our %pseudo_deps;
 
+# Suffix rules
+our @suffixes;  # List of suffixes from .SUFFIXES directive
+our %suffix_rule;  # Suffix rules keyed by "$makefile\t$source_suffix\t$target_suffix"
+our %suffix_deps;  # Suffix dependencies (usually empty)
+
 # Track multi-output pattern rules (e.g., parse%cc parse%h: parse%y)
 # Maps a canonical rule key to array of all target patterns in the group
 # Key format: "makefile\tprereqs\tcommand"
@@ -1224,6 +1229,11 @@ sub parse_makefile {
     @modifications = ();
     %parsed_file_mtimes = ();
 
+    # Reset suffix rules
+    @suffixes = ();
+    %suffix_rule = ();
+    %suffix_deps = ();
+
     # Set default built-in make variables
     # Use the actual invocation command for recursive makes
     # Check environment variable set by wrapper script, otherwise use $0
@@ -1264,8 +1274,24 @@ sub parse_makefile {
     my $current_rule = '';
     my $current_type;  # 'fixed', 'pattern', or 'pseudo'
     my @current_deps;  # Track current dependencies for multi-output detection
+    my @current_suffix_targets;  # Track suffix rule targets separately
 
     my $save_current_rule = sub {
+        # Save suffix rules first
+        for my $suffix_target (@current_suffix_targets) {
+            if ($suffix_target =~ /^(\.[^.]+)(\.[^.]+)$/) {
+                my ($source_suffix, $target_suffix) = ($1, $2);
+                my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                $suffix_rule{$suffix_key} = $current_rule;
+                if ($ENV{SMAK_DEBUG}) {
+                    my $preview = $current_rule;
+                    $preview =~ s/\n/\\n/g;  # Show newlines
+                    $preview = substr($preview, 0, 100);
+                    warn "DEBUG: Saved suffix rule $suffix_target: '$preview' (length=" . length($current_rule) . ")\n";
+                }
+            }
+        }
+
         return unless @current_targets;
 
         # Detect multi-output pattern rules
@@ -1484,15 +1510,56 @@ sub parse_makefile {
             my @targets = split /\s+/, $targets_str;
             @targets = grep { $_ ne '' } @targets;
 
+            # Handle .SUFFIXES: directive
+            if ($targets_str eq '.SUFFIXES') {
+                # Replace suffix list with the specified suffixes
+                @suffixes = @deps;
+                # Remove $MV{} wrappers from suffixes since they're literal strings
+                @suffixes = map {
+                    my $s = $_;
+                    $s =~ s/\$MV\{([^}]+)\}/$1/g;  # Strip $MV{} wrapper
+                    $s;
+                } @suffixes;
+                warn "DEBUG: .SUFFIXES set to: " . join(' ', @suffixes) . "\n" if $ENV{SMAK_DEBUG};
+                # Continue processing to store in pseudo_deps as normal
+            }
+
+            # Check for suffix rules and handle them specially
+            # A suffix rule looks like .source.target: (e.g., .c.o:)
+            # Store it separately to avoid pattern rule collision
+            my @suffix_targets = ();
+            my @non_suffix_targets = ();
+            for my $target (@targets) {
+                if ($target =~ /^(\.[^.]+)(\.[^.]+)$/) {
+                    my ($source_suffix, $target_suffix) = ($1, $2);
+                    # Check if both suffixes are in the suffix list
+                    my $has_source = grep { $_ eq $source_suffix } @suffixes;
+                    my $has_target = grep { $_ eq $target_suffix } @suffixes;
+                    if (@suffixes && $has_source && $has_target) {
+                        # This is a suffix rule
+                        push @suffix_targets, $target;
+                        my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                        # Store dependencies (usually empty for suffix rules)
+                        $suffix_deps{$suffix_key} = [@deps];
+                        warn "DEBUG: Found suffix rule $target ($source_suffix -> $target_suffix)\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        push @non_suffix_targets, $target;
+                    }
+                } else {
+                    push @non_suffix_targets, $target;
+                }
+            }
+
             # Store all targets for rule accumulation
-            @current_targets = @targets;
+            @current_targets = @non_suffix_targets;  # Only non-suffix targets go to normal processing
+            @current_suffix_targets = @suffix_targets;  # Track suffix targets separately
             @current_deps = @deps;  # Store dependencies for multi-output detection
             $current_type = classify_target($current_targets[0]) if @current_targets;
             $current_rule = '';
 
             # For pattern rules, check if ALL dependencies would be filtered
             # If so, discard the entire rule by clearing @current_targets
-            if ($current_type eq 'pattern' && @deps) {
+            if ($current_type && $current_type eq 'pattern' && @deps) {
                 my $all_deps_filtered = 1;
                 for my $dep (@deps) {
                     if (!should_filter_dependency($dep)) {
@@ -1580,7 +1647,7 @@ sub parse_makefile {
         }
 
         # Rule command (starts with tab)
-        if ($line =~ /^\t(.*)$/ && @current_targets) {
+        if ($line =~ /^\t(.*)$/ && (@current_targets || @current_suffix_targets)) {
             my $cmd = $1;
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
             $cmd = transform_make_vars($cmd);
@@ -1617,8 +1684,19 @@ sub parse_included_makefile {
     my $current_rule = '';
     my $current_type;
     my @current_deps;  # Track current dependencies for multi-output detection
+    my @current_suffix_targets;  # Track suffix rule targets separately
 
     my $save_current_rule = sub {
+        # Save suffix rules first
+        for my $suffix_target (@current_suffix_targets) {
+            if ($suffix_target =~ /^(\.[^.]+)(\.[^.]+)$/) {
+                my ($source_suffix, $target_suffix) = ($1, $2);
+                my $suffix_key = "$saved_makefile\t$source_suffix\t$target_suffix";
+                $suffix_rule{$suffix_key} = $current_rule;
+                warn "DEBUG: Saved suffix rule $suffix_target (from include): " . substr($current_rule, 0, 50) . "...\n" if $ENV{SMAK_DEBUG};
+            }
+        }
+
         return unless @current_targets;
 
         # Detect multi-output pattern rules (same as in main parse_makefile)
@@ -1764,13 +1842,47 @@ sub parse_included_makefile {
             my @targets = split /\s+/, $targets_str;
             @targets = grep { $_ ne '' } @targets;
 
-            @current_targets = @targets;
+            # Handle .SUFFIXES: directive in included files
+            if ($targets_str eq '.SUFFIXES') {
+                @suffixes = @deps;
+                # Remove $MV{} wrappers from suffixes since they're literal strings
+                @suffixes = map {
+                    my $s = $_;
+                    $s =~ s/\$MV\{([^}]+)\}/$1/g;
+                    $s;
+                } @suffixes;
+                warn "DEBUG: .SUFFIXES set to (in include): " . join(' ', @suffixes) . "\n" if $ENV{SMAK_DEBUG};
+            }
+
+            # Check for suffix rules in included files
+            my @suffix_targets = ();
+            my @non_suffix_targets = ();
+            for my $target (@targets) {
+                if ($target =~ /^(\.[^.]+)(\.[^.]+)$/) {
+                    my ($source_suffix, $target_suffix) = ($1, $2);
+                    my $has_source = grep { $_ eq $source_suffix } @suffixes;
+                    my $has_target = grep { $_ eq $target_suffix } @suffixes;
+                    if (@suffixes && $has_source && $has_target) {
+                        push @suffix_targets, $target;
+                        my $suffix_key = "$saved_makefile\t$source_suffix\t$target_suffix";
+                        $suffix_deps{$suffix_key} = [@deps];
+                        warn "DEBUG: Found suffix rule $target (in include) ($source_suffix -> $target_suffix)\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        push @non_suffix_targets, $target;
+                    }
+                } else {
+                    push @non_suffix_targets, $target;
+                }
+            }
+
+            @current_targets = @non_suffix_targets;
+            @current_suffix_targets = @suffix_targets;
             @current_deps = @deps;  # Store dependencies for multi-output detection
             $current_type = classify_target($current_targets[0]) if @current_targets;
             $current_rule = '';
 
-            # Store dependencies for all targets
-            for my $target (@targets) {
+            # Store dependencies for all non-suffix targets
+            for my $target (@non_suffix_targets) {
                 my $key = "$saved_makefile\t$target";
                 my $type = classify_target($target);
 
@@ -1799,7 +1911,7 @@ sub parse_included_makefile {
         }
 
         # Rule command
-        if ($line =~ /^\t(.*)$/ && @current_targets) {
+        if ($line =~ /^\t(.*)$/ && (@current_targets || @current_suffix_targets)) {
             my $cmd = $1;
             $cmd = transform_make_vars($cmd);
             $current_rule .= "$cmd\n";
@@ -3002,6 +3114,51 @@ sub build_target {
             }
         }
 
+        # If still no rule found, try suffix rules
+        if (!$rule || $rule !~ /\S/) {
+            # Extract target suffix (e.g., .o from foo.o)
+            if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+                my $base = $1;
+                my $target_suffix = $2;
+
+                # Try each possible source suffix in order
+                for my $source_suffix (@suffixes) {
+                    # Skip if this is the target suffix itself
+                    next if $source_suffix eq $target_suffix;
+
+                    # Check if a suffix rule exists for this source->target combination
+                    my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                    if (exists $suffix_rule{$suffix_key}) {
+                        # Check if source file exists
+                        my $source = "$base$source_suffix";
+                        # Resolve source through vpath
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        my $resolved_source = resolve_vpath($source, $cwd);
+
+                        if (-f $resolved_source) {
+                            # Found matching suffix rule and source file
+                            $stem = $base;
+                            @deps = ($source);  # Store unresolved path, will be resolved later
+                            $rule = $suffix_rule{$suffix_key};
+                            my $suffix_deps_ref = $suffix_deps{$suffix_key};
+                            if ($suffix_deps_ref && @$suffix_deps_ref) {
+                                # Expand % in suffix rule dependencies (rare but possible)
+                                my @suffix_deps_expanded = map {
+                                    my $d = $_;
+                                    $d =~ s/%/$stem/g;
+                                    $d;
+                                } @$suffix_deps_ref;
+                                push @deps, @suffix_deps_expanded;
+                            }
+                            warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target from $source\n" if $ENV{SMAK_DEBUG};
+                            last;
+                        }
+                    }
+                }
+            }
+        }
+
         # If still no rule found, try built-in implicit rules (like Make's built-in rules)
         if (!$rule || $rule !~ /\S/) {
             # Check for object file (.o) targets
@@ -3400,6 +3557,51 @@ sub dry_run_target {
                     my $cwd = getcwd();
                     @deps = map { resolve_vpath($_, $cwd) } @deps;
                     last;
+                }
+            }
+        }
+
+        # If still no rule found, try suffix rules
+        if (!$rule || $rule !~ /\S/) {
+            # Extract target suffix (e.g., .o from foo.o)
+            if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+                my $base = $1;
+                my $target_suffix = $2;
+
+                # Try each possible source suffix in order
+                for my $source_suffix (@suffixes) {
+                    # Skip if this is the target suffix itself
+                    next if $source_suffix eq $target_suffix;
+
+                    # Check if a suffix rule exists for this source->target combination
+                    my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                    if (exists $suffix_rule{$suffix_key}) {
+                        # Check if source file exists
+                        my $source = "$base$source_suffix";
+                        # Resolve source through vpath
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        my $resolved_source = resolve_vpath($source, $cwd);
+
+                        if (-f $resolved_source) {
+                            # Found matching suffix rule and source file
+                            $stem = $base;
+                            @deps = ($source);  # Store unresolved path, will be resolved later
+                            $rule = $suffix_rule{$suffix_key};
+                            my $suffix_deps_ref = $suffix_deps{$suffix_key};
+                            if ($suffix_deps_ref && @$suffix_deps_ref) {
+                                # Expand % in suffix rule dependencies (rare but possible)
+                                my @suffix_deps_expanded = map {
+                                    my $d = $_;
+                                    $d =~ s/%/$stem/g;
+                                    $d;
+                                } @$suffix_deps_ref;
+                                push @deps, @suffix_deps_expanded;
+                            }
+                            warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target from $source\n" if $ENV{SMAK_DEBUG};
+                            last;
+                        }
+                    }
                 }
             }
         }

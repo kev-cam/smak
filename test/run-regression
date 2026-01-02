@@ -370,7 +370,9 @@ WRAPPER_EOF
 
             # Run with script automation using run-with-script.pl (with timeout)
             timeout 30 env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$script_file" "$wrapper_script" >"$output_file" 2>&1 &
-	    wait
+
+            local pid=$!
+            wait $pid
             local result=$?
             rm -f "$wrapper_script"
             return $result
@@ -381,7 +383,8 @@ WRAPPER_EOF
                 return 0  # Skip parallel in TTY mode
             fi
             timeout 60 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 &
-	    wait
+            local pid=$!
+            wait $pid
             return $?
 
         else
@@ -394,7 +397,8 @@ WRAPPER_EOF
             else
                 timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
             fi
-	    wait
+            local pid=$!
+            wait $pid
             return $?
         fi
     }
@@ -430,7 +434,8 @@ WRAPPER_EOF
     if [ $has_fail_test -eq 1 ]; then
         local fail_out="/tmp/smak-test-${test_name}-seq-nc-fail-$$.log"
         timeout 30 env SMAK_CACHE_DIR=off ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null &
-	wait
+        local pid=$!
+        wait $pid
         result_seq_nocache_fail=$?
         rm -f "$fail_out"
     fi
@@ -458,7 +463,8 @@ WRAPPER_EOF
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="/tmp/smak-test-${test_name}-seq-c-fail-$$.log"
             timeout 30 env SMAK_CACHE_DIR=default ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null &
-	    wait
+            local pid=$!
+            wait $pid
             result_seq_cache_fail=$?
             rm -f "$fail_out"
         fi
@@ -494,7 +500,8 @@ WRAPPER_EOF
             local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
             local inject_args="-j4 $SMAK_EXTRA_ARGS"
             timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null &
-	    wait
+            local pid=$!
+            wait $pid
             result_par_nocache_fail=$?
             rm -f "$fail_out"
         fi
@@ -527,7 +534,8 @@ WRAPPER_EOF
             local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
             local inject_args="-j4 $SMAK_EXTRA_ARGS"
             timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null &
-	    wait
+            local pid=$!
+            wait $pid
             result_par_cache_fail=$?
             rm -f "$fail_out"
         fi

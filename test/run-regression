@@ -17,10 +17,19 @@ LIST_MODE=0
 FILTER_PATTERN=""
 NO_PARALLEL=0
 FAST_MODE=0
+PARALLEL_JOBS=1
 SMAK_EXTRA_ARGS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        -j)
+            PARALLEL_JOBS="$2"
+            if ! [[ "$PARALLEL_JOBS" =~ ^[0-9]+$ ]] || [ "$PARALLEL_JOBS" -lt 1 ]; then
+                echo "Error: -j requires a positive integer argument"
+                exit 1
+            fi
+            shift 2
+            ;;
         -f|--full)
             FULL_MODE=1
             shift
@@ -79,6 +88,7 @@ Each test's -fail variant is also run in all 4 modes to verify error handling.
 
 Options:
   (none)              Run all tests including scripted interactive tests
+  -j <N>              Run N tests in parallel (default: 1)
   -s, --sanity        Run quick sanity check (2 basic non-interactive tests)
   -f, --full          Run full test suite including random builds and CLI tests
   -v, --verbose       Show test output
@@ -100,6 +110,7 @@ Isolating tests from user configuration:
 
 Examples:
   $0                  # All tests with scripted automation (default)
+  $0 -j 4             # Run 4 tests in parallel for faster execution
   $0 --sanity         # Quick sanity check (2 non-interactive tests)
   $0 --full           # Full test suite
   $0 --verbose        # Show all test output
@@ -791,15 +802,90 @@ fi
 echo "Unit Tests:"
 echo "----------"
 
-for test in "${TESTS_TO_RUN[@]}"; do
-    # Separate default target test into its own section
-    if [ "$test" = "test-default-target.sh" ]; then
-        echo ""
-        echo "Default Target Tests:"
-        echo "--------------------"
-    fi
-    run_test "$test"
-done
+if [ $PARALLEL_JOBS -gt 1 ]; then
+    # Parallel execution mode
+    declare -a test_results=()
+
+    # Process tests in batches
+    idx=0
+    total_tests=${#TESTS_TO_RUN[@]}
+
+    while [ $idx -lt $total_tests ]; do
+        # Launch a batch of up to PARALLEL_JOBS tests
+        batch_pids=()
+        batch_end=$((idx + PARALLEL_JOBS))
+        if [ $batch_end -gt $total_tests ]; then
+            batch_end=$total_tests
+        fi
+
+        while [ $idx -lt $batch_end ]; do
+            test="${TESTS_TO_RUN[$idx]}"
+            result_file="/tmp/smak-regtest-$$-$(basename "$test" .sh).result"
+            test_results+=("$result_file")
+
+            (
+                # Redirect stdout/stderr to result file, stdin from /dev/null
+                exec > "$result_file" 2>&1 < /dev/null
+                run_test "$test"
+                echo "EXIT_CODE=$?"
+            ) &
+            batch_pids+=($!)
+            ((idx++))
+        done
+
+        # Wait for this batch to complete
+        for pid in "${batch_pids[@]}"; do
+            wait $pid
+        done
+    done
+
+    # Now display results in original order and collect counters
+    idx=0
+    for test in "${TESTS_TO_RUN[@]}"; do
+        # Separate default target test into its own section
+        if [ "$test" = "test-default-target.sh" ]; then
+            echo ""
+            echo "Default Target Tests:"
+            echo "--------------------"
+        fi
+
+        result_file="${test_results[$idx]}"
+        if [ -f "$result_file" ]; then
+            # Extract and display the output
+            result_output=$(grep -v "^EXIT_CODE=" "$result_file" || true)
+            echo "$result_output"
+
+            # Count this test
+            ((TOTAL++))
+
+            # Check if test passed or failed based on output
+            # Look for color codes: GREEN='\033[0;32m' RED='\033[0;31m' YELLOW='\033[1;33m'
+            if echo "$result_output" | grep -q "\[0;32m"; then
+                ((PASSED++))
+                PASSED_TESTS+=("$(basename "$test" .sh)")
+            elif echo "$result_output" | grep -q "SKIP"; then
+                ((SKIPPED++))
+            elif echo "$result_output" | grep -q "\[0;31m"; then
+                ((FAILED++))
+                FAILED_TESTS+=("$(basename "$test" .sh)")
+            fi
+
+            rm -f "$result_file"
+        fi
+        ((idx++))
+    done
+else
+    # Sequential execution mode (original behavior)
+    for test in "${TESTS_TO_RUN[@]}"; do
+        # Separate default target test into its own section
+        if [ "$test" = "test-default-target.sh" ]; then
+            echo ""
+            echo "Default Target Tests:"
+            echo "--------------------"
+        fi
+        run_test "$test"
+    done
+fi
 
 # Run generator-based tests if in full mode
 if [ $FULL_MODE -eq 1 ]; then

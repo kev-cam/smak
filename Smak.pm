@@ -1224,6 +1224,9 @@ sub parse_makefile {
     @modifications = ();
     %parsed_file_mtimes = ();
 
+    # Track suffixes for suffix rule support
+    my @suffixes = ();
+
     # Set default built-in make variables
     # Use the actual invocation command for recursive makes
     # Check environment variable set by wrapper script, otherwise use $0
@@ -1463,10 +1466,49 @@ sub parse_makefile {
             my @deps = split /\s+/, $deps_str;
             @deps = grep { $_ ne '' } @deps;
 
+            # Handle .SUFFIXES: directive
+            if ($targets_str eq '.SUFFIXES') {
+                # Replace suffix list with the specified suffixes
+                @suffixes = @deps;
+                warn "DEBUG: .SUFFIXES set to: " . join(' ', @suffixes) . "\n" if $ENV{SMAK_DEBUG};
+                # Continue processing to store in pseudo_deps as normal
+            }
+
             # Handle multiple targets (e.g., "target1 target2: deps")
             # Make creates the same rule for each target
             my @targets = split /\s+/, $targets_str;
             @targets = grep { $_ ne '' } @targets;
+
+            # Check for suffix rules and convert to pattern rules
+            # A suffix rule looks like .source.target: (e.g., .c.o:)
+            # Convert it to %.target: %.source (e.g., %.o: %.c)
+            my @converted_targets;
+            for my $target (@targets) {
+                if ($target =~ /^(\.[^.]+)(\.[^.]+)$/) {
+                    my ($source_suffix, $target_suffix) = ($1, $2);
+                    # Check if both suffixes are in the suffix list
+                    my $has_source = grep { $_ eq $source_suffix } @suffixes;
+                    my $has_target = grep { $_ eq $target_suffix } @suffixes;
+                    if (@suffixes && $has_source && $has_target) {
+                        # Convert suffix rule to pattern rule
+                        my $pattern_target = "%$target_suffix";
+                        push @converted_targets, $pattern_target;
+
+                        # For suffix rules, the dependency is implicitly %.source_suffix
+                        # Add it to deps if deps is empty
+                        if (!@deps) {
+                            @deps = ("%$source_suffix");
+                        }
+
+                        warn "DEBUG: Converting suffix rule $target to pattern rule $pattern_target with dep %$source_suffix\n" if $ENV{SMAK_DEBUG};
+                    } else {
+                        push @converted_targets, $target;
+                    }
+                } else {
+                    push @converted_targets, $target;
+                }
+            }
+            @targets = @converted_targets;
 
             # Store all targets for rule accumulation
             @current_targets = @targets;

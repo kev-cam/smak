@@ -2953,10 +2953,44 @@ sub build_target {
     my $rule = '';
     my $stem = '';  # Track stem for $* automatic variable
 
+    # Helper function to find a rule key by trying variable expansion
+    # Needed because rules are stored with unexpanded variables like $(EXEEXT)
+    my $find_rule_key = sub {
+        my ($hash_ref, $target_key) = @_;
+
+        # Try exact match first
+        return $target_key if exists $hash_ref->{$target_key};
+
+        # Try expanding variables in stored keys
+        for my $stored_key (keys %$hash_ref) {
+            # Only check keys from the same makefile
+            next unless $stored_key =~ /^\Q$makefile\E\t(.+)$/;
+            my $stored_target = $1;
+
+            # Expand variables in the stored target name
+            # Note: target names use $(VAR) syntax, not $MV{VAR}
+            my $expanded = $stored_target;
+            while ($expanded =~ /\$\(([^)]+)\)/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $expanded =~ s/\$\(\Q$var\E\)/$val/;
+            }
+
+            # If expanded form matches the target, return the original stored key
+            if ($expanded eq $target) {
+                warn "DEBUG[" . __LINE__ . "]: Matched rule key '$stored_key' (expands to '$expanded') for target '$target'\n" if $ENV{SMAK_DEBUG};
+                return $stored_key;
+            }
+        }
+
+        return undef;
+    };
+
     # Find target in fixed, pattern, or pseudo rules
-    if (exists $fixed_deps{$key}) {
-        @deps = @{$fixed_deps{$key} || []};
-        $rule = $fixed_rule{$key} || '';
+    my $matched_key = $find_rule_key->(\%fixed_deps, $key);
+    if ($matched_key) {
+        @deps = @{$fixed_deps{$matched_key} || []};
+        $rule = $fixed_rule{$matched_key} || '';
 
         # If fixed rule has no command, try to find pattern rule
         if (!$rule || $rule !~ /\S/) {

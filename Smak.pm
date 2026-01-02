@@ -3042,12 +3042,14 @@ sub build_target {
             my $stored_target = $1;
 
             # Expand variables in the stored target name
-            # Note: target names use $(VAR) syntax, not $MV{VAR}
+            # First convert $(VAR) to $MV{VAR}, then expand $MV{VAR} references
             my $expanded = $stored_target;
-            while ($expanded =~ /\$\(([^)]+)\)/) {
+            $expanded = transform_make_vars($expanded);
+            # Expand $MV{VAR} references recursively
+            while ($expanded =~ /\$MV\{([^}]+)\}/) {
                 my $var = $1;
                 my $val = $MV{$var} // '';
-                $expanded =~ s/\$\(\Q$var\E\)/$val/;
+                $expanded =~ s/\$MV\{\Q$var\E\}/$val/;
             }
 
             # If expanded form matches the target, return the original stored key
@@ -3065,6 +3067,7 @@ sub build_target {
     if ($matched_key) {
         @deps = @{$fixed_deps{$matched_key} || []};
         $rule = $fixed_rule{$matched_key} || '';
+        warn "DEBUG[" . __LINE__ . "]: Matched fixed rule key='$matched_key' for target='$target'\n" if $ENV{SMAK_DEBUG};
 
         # If fixed rule has no command, try to find pattern rule
         if (!$rule || $rule !~ /\S/) {

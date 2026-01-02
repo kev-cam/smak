@@ -803,14 +803,18 @@ sub expand_vars {
     return $text if $depth > 10;  # Prevent infinite recursion
 
     # Prevent infinite loops from unsupported functions
-    my $max_iterations = 100;
+    # Note: Large Makefiles (like automake-generated ones) can have hundreds of
+    # variable references in a single command line, so we need a high limit
+    my $max_iterations = 500;
     my $iterations = 0;
 
     # Expand $(function args) and $(VAR) references
     while ($text =~ /\$\(/) {
         if (++$iterations > $max_iterations) {
-            warn "Warning: expand_vars hit iteration limit, stopping expansion\n";
+            warn "Warning: expand_vars hit iteration limit ($max_iterations), stopping expansion\n";
+            warn "         This may indicate circular variable references or an unsupported make function\n";
             warn "         Remaining unexpanded: " . substr($text, 0, 200) . "...\n" if length($text) > 200;
+            warn "         Iteration count: $iterations\n";
             last;
         }
 

@@ -3650,7 +3650,7 @@ sub build_target {
             }
         }
     } elsif (exists $pattern_deps{$key}) {
-        # Exact pattern match - use first variant
+        # Exact pattern match - check all variants and use the one whose source exists
         my $rules_ref = $pattern_rule{$key};
         my $deps_ref = $pattern_deps{$key};
 
@@ -3658,9 +3658,44 @@ sub build_target {
         my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
         my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
 
-        # Use first variant for exact matches
-        @deps = @{$deps_list[0] || []};
-        $rule = $rules[0] || '';
+        # Try to find a variant whose source files exist
+        my $best_variant = 0;  # Default to first variant
+
+        for (my $i = 0; $i < @rules; $i++) {
+            my @variant_deps = @{$deps_list[$i] || []};
+
+            # Check if all prerequisites exist
+            my $all_exist = 1;
+            for my $dep (@variant_deps) {
+                # Note: dependencies might have %, need to expand if this is a pattern
+                my $dep_to_check = $dep;
+                if ($dep =~ /%/ && $target =~ /^(.+)\.([^.]+)$/) {
+                    # Extract stem from target and expand dependency
+                    my $stem = $1;
+                    $dep_to_check =~ s/%/$stem/g;
+                }
+
+                use Cwd 'getcwd';
+                my $cwd = getcwd();
+                my $dep_path = $dep_to_check =~ m{^/} ? $dep_to_check : "$cwd/$dep_to_check";
+
+                unless (-e $dep_path) {
+                    $all_exist = 0;
+                    last;
+                }
+            }
+
+            if ($all_exist && @variant_deps > 0) {
+                $best_variant = $i;
+                warn "DEBUG: Found existing source for variant $i of $target\n" if $ENV{SMAK_DEBUG};
+                last;
+            }
+        }
+
+        # Use best variant
+        @deps = @{$deps_list[$best_variant] || []};
+        $rule = $rules[$best_variant] || '';
+        warn "DEBUG: Using variant $best_variant for exact pattern match $target\n" if $ENV{SMAK_DEBUG};
     } elsif (exists $pseudo_deps{$key}) {
         @deps = @{$pseudo_deps{$key} || []};
         $rule = $pseudo_rule{$key} || '';
@@ -3682,12 +3717,43 @@ sub build_target {
                     my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
                     my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
 
-                    # Use first variant
-                    @deps = @{$deps_list[0] || []};
-                    $rule = $rules[0] || '';
+                    # Try to find a variant whose source file exists
+                    # If none exist, fall back to first variant (like GNU make)
+                    my $best_variant = 0;  # Default to first variant
 
-                    # Expand % in dependencies
-                    @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                    for (my $i = 0; $i < @rules; $i++) {
+                        my @variant_deps = @{$deps_list[$i] || []};
+
+                        # Expand % in dependencies with the stem
+                        my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+
+                        # Resolve dependencies through vpath
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
+
+                        # Check if all prerequisites exist
+                        my $all_prereqs_ok = 1;
+                        for my $prereq (@expanded_deps) {
+                            my $prereq_path = $prereq =~ m{^/} ? $prereq : "$cwd/$prereq";
+                            unless (-e $prereq_path) {
+                                $all_prereqs_ok = 0;
+                                last;
+                            }
+                        }
+
+                        if ($all_prereqs_ok) {
+                            # Found a variant whose prerequisites all exist - use it
+                            $best_variant = $i;
+                            last;
+                        }
+                    }
+
+                    # Use the best variant (either one with existing prereqs, or the first one)
+                    my @variant_deps = @{$deps_list[$best_variant] || []};
+                    @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+                    $rule = $rules[$best_variant] || '';
+
                     # Resolve dependencies through vpath
                     use Cwd 'getcwd';
                     my $cwd = getcwd();
@@ -4212,7 +4278,7 @@ sub dry_run_target {
             }
         }
     } elsif (exists $pattern_deps{$key}) {
-        # Exact pattern match - use first variant
+        # Exact pattern match - check all variants and use the one whose source exists
         my $rules_ref = $pattern_rule{$key};
         my $deps_ref = $pattern_deps{$key};
 
@@ -4220,9 +4286,44 @@ sub dry_run_target {
         my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
         my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
 
-        # Use first variant for exact matches
-        @deps = @{$deps_list[0] || []};
-        $rule = $rules[0] || '';
+        # Try to find a variant whose source files exist
+        my $best_variant = 0;  # Default to first variant
+
+        for (my $i = 0; $i < @rules; $i++) {
+            my @variant_deps = @{$deps_list[$i] || []};
+
+            # Check if all prerequisites exist
+            my $all_exist = 1;
+            for my $dep (@variant_deps) {
+                # Note: dependencies might have %, need to expand if this is a pattern
+                my $dep_to_check = $dep;
+                if ($dep =~ /%/ && $target =~ /^(.+)\.([^.]+)$/) {
+                    # Extract stem from target and expand dependency
+                    my $stem = $1;
+                    $dep_to_check =~ s/%/$stem/g;
+                }
+
+                use Cwd 'getcwd';
+                my $cwd = getcwd();
+                my $dep_path = $dep_to_check =~ m{^/} ? $dep_to_check : "$cwd/$dep_to_check";
+
+                unless (-e $dep_path) {
+                    $all_exist = 0;
+                    last;
+                }
+            }
+
+            if ($all_exist && @variant_deps > 0) {
+                $best_variant = $i;
+                warn "DEBUG: Found existing source for variant $i of $target\n" if $ENV{SMAK_DEBUG};
+                last;
+            }
+        }
+
+        # Use best variant
+        @deps = @{$deps_list[$best_variant] || []};
+        $rule = $rules[$best_variant] || '';
+        warn "DEBUG: Using variant $best_variant for exact pattern match $target\n" if $ENV{SMAK_DEBUG};
     } elsif (exists $pseudo_deps{$key}) {
         @deps = @{$pseudo_deps{$key} || []};
         $rule = $pseudo_rule{$key} || '';
@@ -4244,12 +4345,43 @@ sub dry_run_target {
                     my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
                     my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
 
-                    # Use first variant
-                    @deps = @{$deps_list[0] || []};
-                    $rule = $rules[0] || '';
+                    # Try to find a variant whose source file exists
+                    # If none exist, fall back to first variant (like GNU make)
+                    my $best_variant = 0;  # Default to first variant
 
-                    # Expand % in dependencies
-                    @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                    for (my $i = 0; $i < @rules; $i++) {
+                        my @variant_deps = @{$deps_list[$i] || []};
+
+                        # Expand % in dependencies with the stem
+                        my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+
+                        # Resolve dependencies through vpath
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
+
+                        # Check if all prerequisites exist
+                        my $all_prereqs_ok = 1;
+                        for my $prereq (@expanded_deps) {
+                            my $prereq_path = $prereq =~ m{^/} ? $prereq : "$cwd/$prereq";
+                            unless (-e $prereq_path) {
+                                $all_prereqs_ok = 0;
+                                last;
+                            }
+                        }
+
+                        if ($all_prereqs_ok) {
+                            # Found a variant whose prerequisites all exist - use it
+                            $best_variant = $i;
+                            last;
+                        }
+                    }
+
+                    # Use the best variant (either one with existing prereqs, or the first one)
+                    my @variant_deps = @{$deps_list[$best_variant] || []};
+                    @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+                    $rule = $rules[$best_variant] || '';
+
                     # Resolve dependencies through vpath
                     use Cwd 'getcwd';
                     my $cwd = getcwd();

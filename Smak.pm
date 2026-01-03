@@ -3493,9 +3493,16 @@ sub build_target {
             }
         }
 
+        # Resolve source prerequisite through VPATH to get actual file path
+        # This ensures gcc receives the correct path (e.g., ../nvc/src/vlog/vlog-pp.c not src/vlog/vlog-pp.c)
+        use Cwd 'getcwd';
+        my $cwd = getcwd();
+        my $resolved_source_prereq = resolve_vpath($source_prereq, $cwd);
+        warn "DEBUG[" . __LINE__ . "]:   source_prereq='$source_prereq', resolved='$resolved_source_prereq'\n" if $ENV{SMAK_DEBUG};
+
         # Expand automatic variables
         $expanded =~ s/\$@/$target/g;                     # $@ = target name
-        $expanded =~ s/\$</$source_prereq/g;              # $< = first real prerequisite (not .dirstamp)
+        $expanded =~ s/\$</$resolved_source_prereq/g;     # $< = VPATH-resolved source file
         $expanded =~ s/\$\^/join(' ', @deps)/ge;          # $^ = all prerequisites
         $expanded =~ s/\$\*/$stem/g;                      # $* = stem (part matching %)
 

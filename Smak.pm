@@ -6058,11 +6058,6 @@ sub interactive_debug {
     my $watcher_pid;
     my $watcher_socket;
 
-    # Declare package variables used in CLI commands
-    our %rules;
-    our %rule_deps;
-    our %pattern_rules;
-
     print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
     $OUT->flush() if $OUT->can('flush');
 
@@ -6192,27 +6187,46 @@ HELP
             } else {
                 my $target = $parts[1];
 
-                # Look for explicit rules
+                # Look for explicit fixed rules
                 my $found = 0;
-                for my $makefile (keys %rules) {
-                    my $key = "$makefile\t$target";
-                    if (exists $rules{$key}) {
+                for my $key (keys %fixed_deps) {
+                    if ($key =~ /^([^\t]+)\t\Q$target\E$/) {
+                        my $mf = $1;
                         $found = 1;
-                        print $OUT "Explicit rule in $makefile:\n";
+                        print $OUT "Explicit rule in $mf:\n";
                         print $OUT "  Target: $target\n";
 
                         # Show dependencies
-                        if (exists $rule_deps{$key}) {
-                            my @deps = @{$rule_deps{$key}};
-                            print $OUT "  Dependencies: " . join(' ', @deps) . "\n";
+                        if (exists $fixed_deps{$key}) {
+                            my @deps = @{$fixed_deps{$key}};
+                            # Convert $MV{VAR} back to $(VAR) for display
+                            my @display_deps = map {
+                                my $d = $_;
+                                $d =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+                                $d;
+                            } @deps;
+                            print $OUT "  Dependencies: " . join(' ', @display_deps) . "\n";
+                        }
+
+                        # Show order-only prerequisites if any
+                        if (exists $fixed_order_only{$key}) {
+                            my @order_only = @{$fixed_order_only{$key}};
+                            my @display_order = map {
+                                my $d = $_;
+                                $d =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+                                $d;
+                            } @order_only;
+                            print $OUT "  Order-only prerequisites: " . join(' ', @display_order) . "\n";
                         }
 
                         # Show commands
-                        my $cmds = $rules{$key};
-                        if ($cmds && @$cmds) {
+                        my $rule = $fixed_rule{$key} || '';
+                        if ($rule && $rule =~ /\S/) {
+                            # Convert $MV{VAR} back to $(VAR) for display
+                            $rule =~ s/\$MV\{([^}]+)\}/\$($1)/g;
                             print $OUT "  Commands:\n";
-                            for my $cmd (@$cmds) {
-                                print $OUT "    $cmd\n";
+                            for my $line (split /\n/, $rule) {
+                                print $OUT "  $line\n";
                             }
                         } else {
                             print $OUT "  Commands: (none)\n";
@@ -6221,33 +6235,37 @@ HELP
                 }
 
                 # Check for pattern rules that might match
-                for my $makefile (keys %pattern_rules) {
-                    for my $pattern_key (keys %{$pattern_rules{$makefile}}) {
-                        my ($prereqs_pattern, $target_pattern) = split(/\t/, $pattern_key, 2);
-
-                        # Simple pattern matching (handle % wildcard)
-                        my $pattern_re = $target_pattern;
+                for my $key (keys %pattern_rule) {
+                    if ($key =~ /^([^\t]+)\t(.+)$/) {
+                        my ($mf, $pattern) = ($1, $2);
+                        my $pattern_re = $pattern;
                         $pattern_re =~ s/%/(.*)/;
                         $pattern_re = "^$pattern_re\$";
 
                         if ($target =~ /$pattern_re/) {
                             my $stem = $1 // '';
-                            print $OUT "Pattern rule in $makefile:\n";
-                            print $OUT "  Pattern: $target_pattern\n";
+                            print $OUT "Pattern rule in $mf:\n";
+                            print $OUT "  Pattern: $pattern\n";
                             print $OUT "  Matches: $target (stem='$stem')\n";
 
-                            if ($prereqs_pattern) {
-                                my $prereq = $prereqs_pattern;
-                                $prereq =~ s/%/$stem/g;
-                                print $OUT "  Prereqs pattern: $prereqs_pattern\n";
-                                print $OUT "  Expanded prereqs: $prereq\n";
+                            if (exists $pattern_deps{$key}) {
+                                my @deps = @{$pattern_deps{$key}};
+                                my @display_deps = map {
+                                    my $d = $_;
+                                    $d =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+                                    $d =~ s/%/$stem/g;
+                                    $d;
+                                } @deps;
+                                print $OUT "  Prereqs pattern: " . join(' ', @{$pattern_deps{$key}}) . "\n";
+                                print $OUT "  Expanded prereqs: " . join(' ', @display_deps) . "\n";
                             }
 
-                            my $cmds = $pattern_rules{$makefile}{$pattern_key};
-                            if ($cmds && @$cmds) {
+                            my $rule = $pattern_rule{$key} || '';
+                            if ($rule && $rule =~ /\S/) {
+                                $rule =~ s/\$MV\{([^}]+)\}/\$($1)/g;
                                 print $OUT "  Commands:\n";
-                                for my $cmd (@$cmds) {
-                                    print $OUT "    $cmd\n";
+                                for my $line (split /\n/, $rule) {
+                                    print $OUT "  $line\n";
                                 }
                             }
                             $found = 1;

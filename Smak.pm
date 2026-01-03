@@ -3069,7 +3069,7 @@ sub build_target {
         $rule = $fixed_rule{$matched_key} || '';
         warn "DEBUG[" . __LINE__ . "]: Matched fixed rule key='$matched_key' for target='$target'\n" if $ENV{SMAK_DEBUG};
 
-        # If fixed rule has no command, try to find pattern rule
+        # If fixed rule has no command, try to find pattern rule or suffix rule
         if (!$rule || $rule !~ /\S/) {
             for my $pkey (keys %pattern_rule) {
                 if ($pkey =~ /^[^\t]+\t(.+)$/) {
@@ -3089,6 +3089,45 @@ sub build_target {
                         @pattern_deps = map { resolve_vpath($_, $cwd) } @pattern_deps;
                         push @deps, @pattern_deps;
                         last;
+                    }
+                }
+            }
+
+            # If still no rule found, try suffix rules
+            # This is needed when .deps/*.Po files define dependencies but no rule
+            if (!$rule || $rule !~ /\S/) {
+                if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+                    my $base = $1;
+                    my $target_suffix = $2;
+
+                    for my $source_suffix (@suffixes) {
+                        next if $source_suffix eq $target_suffix;
+
+                        my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                        if (exists $suffix_rule{$suffix_key}) {
+                            my $source = "$base$source_suffix";
+                            use Cwd 'getcwd';
+                            my $cwd = getcwd();
+                            my $resolved_source = resolve_vpath($source, $cwd);
+
+                            if (-f $resolved_source) {
+                                $stem = $base;
+                                # Keep existing deps from .deps/*.Po, add source if not present
+                                push @deps, $source unless grep { $_ eq $source } @deps;
+                                $rule = $suffix_rule{$suffix_key};
+                                my $suffix_deps_ref = $suffix_deps{$suffix_key};
+                                if ($suffix_deps_ref && @$suffix_deps_ref) {
+                                    my @suffix_deps_expanded = map {
+                                        my $d = $_;
+                                        $d =~ s/%/$stem/g;
+                                        $d;
+                                    } @$suffix_deps_ref;
+                                    push @deps, @suffix_deps_expanded;
+                                }
+                                warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (with fixed deps)\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            }
+                        }
                     }
                 }
             }

@@ -2949,6 +2949,35 @@ sub needs_rebuild {
     return 0;
 }
 
+sub preprocess_automake_suffix_rule {
+    my ($rule, $target) = @_;
+
+    warn "DEBUG[preprocess]: Input rule:\n$rule\n" if $ENV{SMAK_DEBUG};
+
+    # Calculate depbase: target (e.g. src/sem.o) -> src/.deps/sem
+    # This mimics: depbase=`echo $@ | sed 's|[^/]*$|$(DEPDIR)/&|;s|\.o$||'`
+    # where DEPDIR=.deps
+    my $depbase = $target;
+    $depbase =~ s|([^/]*)$|.deps/$1|;  # Add .deps/ before filename
+    $depbase =~ s|\.o$||;               # Remove .o extension
+
+    warn "DEBUG[preprocess]: Calculated depbase='$depbase'\n" if $ENV{SMAK_DEBUG};
+
+    # Replace all $depbase references with the calculated value (both $ and $$ forms)
+    $rule =~ s/\$\$depbase/$depbase/g;  # Replace $$depbase
+    $rule =~ s/\$depbase/$depbase/g;     # Replace $depbase
+
+    # Remove the depbase assignment line (we've calculated it in Perl)
+    $rule =~ s/depbase=`[^`]+`;\s*//g;
+
+    # Handle mv command as built-in (for now, just keep it - we'll implement parsing later)
+    # The mv -f $depbase.Tpo $depbase.Po will now have $depbase already substituted
+
+    warn "DEBUG[preprocess]: Output rule:\n$rule\n" if $ENV{SMAK_DEBUG};
+
+    return $rule;
+}
+
 sub build_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
@@ -3042,12 +3071,14 @@ sub build_target {
             my $stored_target = $1;
 
             # Expand variables in the stored target name
-            # Note: target names use $(VAR) syntax, not $MV{VAR}
+            # First convert $(VAR) to $MV{VAR}, then expand $MV{VAR} references
             my $expanded = $stored_target;
-            while ($expanded =~ /\$\(([^)]+)\)/) {
+            $expanded = transform_make_vars($expanded);
+            # Expand $MV{VAR} references recursively
+            while ($expanded =~ /\$MV\{([^}]+)\}/) {
                 my $var = $1;
                 my $val = $MV{$var} // '';
-                $expanded =~ s/\$\(\Q$var\E\)/$val/;
+                $expanded =~ s/\$MV\{\Q$var\E\}/$val/;
             }
 
             # If expanded form matches the target, return the original stored key
@@ -3065,8 +3096,9 @@ sub build_target {
     if ($matched_key) {
         @deps = @{$fixed_deps{$matched_key} || []};
         $rule = $fixed_rule{$matched_key} || '';
+        warn "DEBUG[" . __LINE__ . "]: Matched fixed rule key='$matched_key' for target='$target'\n" if $ENV{SMAK_DEBUG};
 
-        # If fixed rule has no command, try to find pattern rule
+        # If fixed rule has no command, try to find pattern rule or suffix rule
         if (!$rule || $rule !~ /\S/) {
             for my $pkey (keys %pattern_rule) {
                 if ($pkey =~ /^[^\t]+\t(.+)$/) {
@@ -3086,6 +3118,57 @@ sub build_target {
                         @pattern_deps = map { resolve_vpath($_, $cwd) } @pattern_deps;
                         push @deps, @pattern_deps;
                         last;
+                    }
+                }
+            }
+
+            # If still no rule found, try suffix rules
+            # This is needed when .deps/*.Po files define dependencies but no rule
+            if (!$rule || $rule !~ /\S/) {
+                warn "DEBUG[" . __LINE__ . "]: No rule found in fixed_rule, trying suffix rules for '$target'\n" if $ENV{SMAK_DEBUG};
+                if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+                    my $base = $1;
+                    my $target_suffix = $2;
+                    warn "DEBUG[" . __LINE__ . "]:   base='$base', target_suffix='$target_suffix'\n" if $ENV{SMAK_DEBUG};
+                    warn "DEBUG[" . __LINE__ . "]:   suffixes: @suffixes\n" if $ENV{SMAK_DEBUG};
+
+                    for my $source_suffix (@suffixes) {
+                        next if $source_suffix eq $target_suffix;
+
+                        my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                        warn "DEBUG[" . __LINE__ . "]:   trying suffix_key='$suffix_key'\n" if $ENV{SMAK_DEBUG};
+                        if (exists $suffix_rule{$suffix_key}) {
+                            warn "DEBUG[" . __LINE__ . "]:     suffix rule exists!\n" if $ENV{SMAK_DEBUG};
+                            my $source = "$base$source_suffix";
+                            use Cwd 'getcwd';
+                            my $cwd = getcwd();
+                            my $resolved_source = resolve_vpath($source, $cwd);
+                            warn "DEBUG[" . __LINE__ . "]:     source='$source', resolved='$resolved_source'\n" if $ENV{SMAK_DEBUG};
+
+                            # Check if source file exists (need to check relative to Makefile's directory)
+                            use File::Basename;
+                            my $makefile_dir = dirname($makefile);
+                            my $source_path = "$makefile_dir/$resolved_source";
+                            warn "DEBUG[" . __LINE__ . "]:     checking existence of '$source_path'\n" if $ENV{SMAK_DEBUG};
+
+                            if (-f $source_path) {
+                                $stem = $base;
+                                # Keep existing deps from .deps/*.Po, add source if not present
+                                push @deps, $source unless grep { $_ eq $source } @deps;
+                                $rule = $suffix_rule{$suffix_key};
+                                my $suffix_deps_ref = $suffix_deps{$suffix_key};
+                                if ($suffix_deps_ref && @$suffix_deps_ref) {
+                                    my @suffix_deps_expanded = map {
+                                        my $d = $_;
+                                        $d =~ s/%/$stem/g;
+                                        $d;
+                                    } @$suffix_deps_ref;
+                                    push @deps, @suffix_deps_expanded;
+                                }
+                                warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (with fixed deps)\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            }
+                        }
                     }
                 }
             }
@@ -3366,13 +3449,38 @@ sub build_target {
         my $expanded = expand_vars($converted);
         warn "DEBUG[" . __LINE__ . "]:   After expand_vars\n" if $ENV{SMAK_DEBUG};
 
+        # Detect automake-style suffix rule patterns
+        # These contain: depbase=`echo $@ | sed ...`; ... -MF $depbase.Tpo ... && mv ... $depbase.Tpo $depbase.Po
+        # Note: After variable expansion, $$depbase becomes $depbase (single $)
+        my $is_automake_suffix = ($expanded =~ /depbase=.*sed.*\$depbase\.Tpo.*\$depbase\.Po/s);
+
+        # For suffix rules, $< should be the source file, not .dirstamp or other deps
+        my $source_prereq = $deps[0] || '';
+        if ($stem && @deps > 0) {
+            # In suffix rule context, find the actual source file (not .dirstamp)
+            for my $dep (@deps) {
+                next if $dep =~ /dirstamp$/;  # Skip .dirstamp files
+                next if $dep =~ /\.deps\//;    # Skip .deps/ directory markers
+                $source_prereq = $dep;
+                last;
+            }
+        }
+
         # Expand automatic variables
         $expanded =~ s/\$@/$target/g;                     # $@ = target name
-        $expanded =~ s/\$</$deps[0] || ''/ge;            # $< = first prerequisite
-        $expanded =~ s/\$\^/join(' ', @deps)/ge;         # $^ = all prerequisites
-        $expanded =~ s/\$\*/$stem/g;                     # $* = stem (part matching %)
+        $expanded =~ s/\$</$source_prereq/g;              # $< = first real prerequisite (not .dirstamp)
+        $expanded =~ s/\$\^/join(' ', @deps)/ge;          # $^ = all prerequisites
+        $expanded =~ s/\$\*/$stem/g;                      # $* = stem (part matching %)
 
         warn "DEBUG[" . __LINE__ . "]:   About to execute commands\n" if $ENV{SMAK_DEBUG};
+
+        # If this is an automake suffix rule, preprocess it
+        if ($is_automake_suffix) {
+            warn "DEBUG[" . __LINE__ . "]:   Detected automake suffix rule, preprocessing...\n" if $ENV{SMAK_DEBUG};
+            $expanded = preprocess_automake_suffix_rule($expanded, $target);
+            warn "DEBUG[" . __LINE__ . "]:   After preprocessing:\n$expanded\n" if $ENV{SMAK_DEBUG};
+        }
+
         # Execute each command line
         for my $cmd_line (split /\n/, $expanded) {
             warn "DEBUG[" . __LINE__ . "]:     Processing command line\n" if $ENV{SMAK_DEBUG};

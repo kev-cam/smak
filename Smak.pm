@@ -1339,11 +1339,18 @@ sub parse_makefile {
             }
 
             if ($type eq 'fixed') {
-                $fixed_rule{$key} = $current_rule;
+                # Only overwrite if no rule exists or existing rule is empty (GNU make: first rule with commands wins)
+                if (!exists $fixed_rule{$key} || !defined $fixed_rule{$key} || $fixed_rule{$key} !~ /\S/) {
+                    $fixed_rule{$key} = $current_rule;
+                }
             } elsif ($type eq 'pattern') {
-                $pattern_rule{$key} = $current_rule;
+                if (!exists $pattern_rule{$key} || !defined $pattern_rule{$key} || $pattern_rule{$key} !~ /\S/) {
+                    $pattern_rule{$key} = $current_rule;
+                }
             } elsif ($type eq 'pseudo') {
-                $pseudo_rule{$key} = $current_rule;
+                if (!exists $pseudo_rule{$key} || !defined $pseudo_rule{$key} || $pseudo_rule{$key} !~ /\S/) {
+                    $pseudo_rule{$key} = $current_rule;
+                }
             }
         }
 
@@ -1725,11 +1732,18 @@ sub parse_included_makefile {
             my $type = classify_target($target);
 
             if ($type eq 'fixed') {
-                $fixed_rule{$key} = $current_rule;
+                # Only overwrite if no rule exists or existing rule is empty (GNU make: first rule with commands wins)
+                if (!exists $fixed_rule{$key} || !defined $fixed_rule{$key} || $fixed_rule{$key} !~ /\S/) {
+                    $fixed_rule{$key} = $current_rule;
+                }
             } elsif ($type eq 'pattern') {
-                $pattern_rule{$key} = $current_rule;
+                if (!exists $pattern_rule{$key} || !defined $pattern_rule{$key} || $pattern_rule{$key} !~ /\S/) {
+                    $pattern_rule{$key} = $current_rule;
+                }
             } elsif ($type eq 'pseudo') {
-                $pseudo_rule{$key} = $current_rule;
+                if (!exists $pseudo_rule{$key} || !defined $pseudo_rule{$key} || $pseudo_rule{$key} !~ /\S/) {
+                    $pseudo_rule{$key} = $current_rule;
+                }
             }
         }
 

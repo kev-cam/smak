@@ -2,11 +2,9 @@
 
 # Build the target first
 build all
-# expect "Built test_auto.o"
 
 # Enable auto-rescan
 rescan -auto
-# expect "Auto-rescan enabled"
 
 # Delete the built file
 ! mv test_auto.o test_auto.o-old
@@ -16,7 +14,6 @@ rescan -auto
 
 # Build again - should rebuild test_auto.o
 build all
-#expect "Built test_auto.o"
 
 # Don't clean up test_auto.o here - the bash script needs to check it exists
 ! rm -f test_auto.o-old

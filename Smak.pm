@@ -1339,11 +1339,18 @@ sub parse_makefile {
             }
 
             if ($type eq 'fixed') {
-                $fixed_rule{$key} = $current_rule;
+                # Only overwrite if no rule exists or existing rule is empty (GNU make: first rule with commands wins)
+                if (!exists $fixed_rule{$key} || !defined $fixed_rule{$key} || $fixed_rule{$key} !~ /\S/) {
+                    $fixed_rule{$key} = $current_rule;
+                }
             } elsif ($type eq 'pattern') {
-                $pattern_rule{$key} = $current_rule;
+                if (!exists $pattern_rule{$key} || !defined $pattern_rule{$key} || $pattern_rule{$key} !~ /\S/) {
+                    $pattern_rule{$key} = $current_rule;
+                }
             } elsif ($type eq 'pseudo') {
-                $pseudo_rule{$key} = $current_rule;
+                if (!exists $pseudo_rule{$key} || !defined $pseudo_rule{$key} || $pseudo_rule{$key} !~ /\S/) {
+                    $pseudo_rule{$key} = $current_rule;
+                }
             }
         }
 
@@ -1725,11 +1732,18 @@ sub parse_included_makefile {
             my $type = classify_target($target);
 
             if ($type eq 'fixed') {
-                $fixed_rule{$key} = $current_rule;
+                # Only overwrite if no rule exists or existing rule is empty (GNU make: first rule with commands wins)
+                if (!exists $fixed_rule{$key} || !defined $fixed_rule{$key} || $fixed_rule{$key} !~ /\S/) {
+                    $fixed_rule{$key} = $current_rule;
+                }
             } elsif ($type eq 'pattern') {
-                $pattern_rule{$key} = $current_rule;
+                if (!exists $pattern_rule{$key} || !defined $pattern_rule{$key} || $pattern_rule{$key} !~ /\S/) {
+                    $pattern_rule{$key} = $current_rule;
+                }
             } elsif ($type eq 'pseudo') {
-                $pseudo_rule{$key} = $current_rule;
+                if (!exists $pseudo_rule{$key} || !defined $pseudo_rule{$key} || $pseudo_rule{$key} !~ /\S/) {
+                    $pseudo_rule{$key} = $current_rule;
+                }
             }
         }
 
@@ -2949,6 +2963,52 @@ sub needs_rebuild {
     return 0;
 }
 
+sub can_build_from_suffix_rule {
+    my ($target, $makefile, $visited) = @_;
+    $visited ||= {};
+
+    # Avoid infinite recursion
+    return 0 if $visited->{$target};
+    $visited->{$target} = 1;
+
+    # Extract base and target suffix
+    if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+        my $base = $1;
+        my $target_suffix = $2;
+
+        # Try each source suffix to see if we can build this target
+        for my $source_suffix (@suffixes) {
+            next if $source_suffix eq $target_suffix;
+
+            my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+            if (exists $suffix_rule{$suffix_key}) {
+                my $source = "$base$source_suffix";
+
+                # Check if source exists via VPATH
+                use Cwd 'getcwd';
+                my $cwd = getcwd();
+                my $resolved = resolve_vpath($source, $cwd);
+                use File::Basename;
+                my $makefile_dir = dirname($makefile);
+                my $source_path = "$makefile_dir/$resolved";
+
+                if (-f $source_path) {
+                    # Source file exists, we can build target
+                    return 1;
+                }
+
+                # Recursively check if source can be built via suffix rules
+                if (can_build_from_suffix_rule($source, $makefile, $visited)) {
+                    # Source can be built, so target can be built
+                    return 1;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
 sub preprocess_automake_suffix_rule {
     my ($rule, $target) = @_;
 
@@ -3178,7 +3238,11 @@ sub build_target {
                             my $source_path = "$makefile_dir/$resolved_source";
                             warn "DEBUG[" . __LINE__ . "]:     checking existence of '$source_path'\n" if $ENV{SMAK_DEBUG};
 
-                            if (-f $source_path) {
+                            # Source file can be used if it exists OR can be built via another suffix rule
+                            my $source_exists = -f $source_path;
+                            my $source_can_build = !$source_exists && can_build_from_suffix_rule($source, $makefile);
+
+                            if ($source_exists || $source_can_build) {
                                 $stem = $base;
                                 # Keep existing deps from .deps/*.Po, add source if not present
                                 push @deps, $source unless grep { $_ eq $source } @deps;
@@ -3192,7 +3256,11 @@ sub build_target {
                                     } @$suffix_deps_ref;
                                     push @deps, @suffix_deps_expanded;
                                 }
-                                warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (with fixed deps)\n" if $ENV{SMAK_DEBUG};
+                                if ($source_can_build) {
+                                    warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (source can be built from suffix rule)\n" if $ENV{SMAK_DEBUG};
+                                } else {
+                                    warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (with fixed deps)\n" if $ENV{SMAK_DEBUG};
+                                }
                                 last;
                             }
                         }

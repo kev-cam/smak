@@ -421,9 +421,51 @@ WRAPPER_EOF
     # Check if fail test exists
     local fail_test="${test_script%.sh}-fail.sh"
     local has_fail_test=0
+    local is_fail_interactive=0
+    local fail_script_file=""
     if [ -f "$fail_test" ] && [ -x "$fail_test" ]; then
         has_fail_test=1
+        # Check if fail test is also interactive
+        if grep -q "smak.*-Kd" "$fail_test" 2>/dev/null; then
+            is_fail_interactive=1
+            # Check for corresponding script file
+            local fail_script_path="scripts/${test_name}-fail.script"
+            if [ -f "$fail_script_path" ]; then
+                fail_script_file="$fail_script_path"
+            fi
+        fi
     fi
+
+    # Helper to run fail test with appropriate automation
+    run_fail_test() {
+        local mode_cache="$1"
+        local mode_jobs="$2"
+        local fail_out="$3"
+
+        if [ $is_fail_interactive -eq 1 ] && [ -n "$fail_script_file" ] && [ $TTY_MODE -eq 0 ]; then
+            # Use PTY automation for interactive fail tests
+            local smak_args=$(grep -oP '(?<=smak ).*(?=-Kd)' "$fail_test" | head -1)
+            local wrapper_script="/tmp/smak-fail-wrapper-${test_name}-$$.sh"
+            cat > "$wrapper_script" << WRAPPER_EOF
+#!/bin/bash
+cd "$SCRIPT_DIR"
+exec ../smak $smak_args $mode_jobs $SMAK_EXTRA_ARGS -Kd
+WRAPPER_EOF
+            chmod +x "$wrapper_script"
+            timeout 30 env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$fail_script_file" "$wrapper_script" >"$fail_out" 2>&1 &
+            local pid=$!
+            wait $pid
+            local result=$?
+            rm -f "$wrapper_script"
+            return $result
+        else
+            # Run fail test directly
+            timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null &
+            local pid=$!
+            wait $pid
+            return $?
+        fi
+    }
 
     # Run all 4 modes (and -fail tests if they exist)
     # Track whether we should skip remaining modes (for --fast)
@@ -442,9 +484,7 @@ WRAPPER_EOF
     fi
     if [ $has_fail_test -eq 1 ]; then
         local fail_out="/tmp/smak-test-${test_name}-seq-nc-fail-$$.log"
-        timeout 30 env SMAK_CACHE_DIR=off ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null &
-        local pid=$!
-        wait $pid
+        run_fail_test "off" "" "$fail_out"
         result_seq_nocache_fail=$?
         rm -f "$fail_out"
     fi
@@ -471,9 +511,7 @@ WRAPPER_EOF
         fi
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="/tmp/smak-test-${test_name}-seq-c-fail-$$.log"
-            timeout 30 env SMAK_CACHE_DIR=default ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null &
-            local pid=$!
-            wait $pid
+            run_fail_test "default" "" "$fail_out"
             result_seq_cache_fail=$?
             rm -f "$fail_out"
         fi
@@ -507,10 +545,7 @@ WRAPPER_EOF
         fi
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
-            local inject_args="-j4 $SMAK_EXTRA_ARGS"
-            timeout 30 env SMAK_CACHE_DIR=off bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null &
-            local pid=$!
-            wait $pid
+            run_fail_test "off" "-j4" "$fail_out"
             result_par_nocache_fail=$?
             rm -f "$fail_out"
         fi
@@ -541,10 +576,7 @@ WRAPPER_EOF
         fi
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
-            local inject_args="-j4 $SMAK_EXTRA_ARGS"
-            timeout 30 env SMAK_CACHE_DIR=default bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$fail_test' | bash" >"$fail_out" 2>&1 < /dev/null &
-            local pid=$!
-            wait $pid
+            run_fail_test "default" "-j4" "$fail_out"
             result_par_cache_fail=$?
             rm -f "$fail_out"
         fi

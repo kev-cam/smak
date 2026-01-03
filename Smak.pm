@@ -7508,18 +7508,29 @@ sub run_job_master {
         return '' unless defined $cmd;
 
         # Process each line of multi-line commands
-        my @lines;
+        my @processed;
         for my $line (split /\n/, $cmd) {
             next unless $line =~ /\S/;  # Skip empty lines
+
+            # Check for - (ignore errors) prefix before stripping
+            my $ignore_errors = ($line =~ /^\s*-/);
 
             # Strip @ (silent) and - (ignore errors) prefixes
             $line =~ s/^\s*[@-]+//;
 
-            push @lines, $line if $line =~ /\S/;
+            next unless $line =~ /\S/;
+
+            # If command had -, wrap it so errors don't stop the chain
+            if ($ignore_errors) {
+                push @processed, "($line || true)";
+            } else {
+                push @processed, $line;
+            }
         }
 
-        # Join multiple commands with && so they execute as one line
-        return join(" && ", @lines);
+        # Join multiple commands with && so they execute sequentially
+        # Commands with - prefix are wrapped in (cmd || true) to not break the chain
+        return join(" && ", @processed);
     }
 
     sub expand_job_command {
@@ -8008,6 +8019,21 @@ sub run_job_master {
             if ($stem) {
                 $rule =~ s/\$\*/$stem/g;
             }
+
+            # Check if any command line has @ prefix (silent mode)
+            # In parallel mode we join commands, so if ANY line has @, we suppress
+            # printing the entire combined command to avoid exposing @ prefixed lines
+            my $any_silent = 0;
+            for my $line (split /\n/, $rule) {
+                next unless $line =~ /\S/;  # Skip empty lines
+                my $trimmed = $line;
+                $trimmed =~ s/^\s+//;  # Remove leading whitespace
+                if ($trimmed =~ /^@/) {
+                    $any_silent = 1;
+                    last;
+                }
+            }
+
             my $processed_rule = process_command($rule);
             $processed_rule = expand_job_command($processed_rule, $target, \@deps);
 
@@ -8048,6 +8074,7 @@ sub run_job_master {
                 target => $target,
                 dir => $dir,
                 command => $processed_rule,
+                silent => $any_silent,  # Track if any command has @ prefix
                 siblings => [@sibling_targets],  # Track siblings that will also be created
             };
             $in_progress{$target} = "queued";
@@ -8638,10 +8665,13 @@ sub run_job_master {
 
             vprint "Dispatched task $task_id to worker\n";
 
-	    if (! $silent_mode) {
+	    # Check if command should be echoed (based on @ prefix detection before processing)
+	    my $silent = $job->{silent} || 0;
+
+	    if (!$silent_mode && !$silent) {
 		print $stomp_prompt,"$job->{command}\n";
 	    }
-	    
+
             broadcast_observers("DISPATCHED $task_id $job->{target}");
 
             if ($block) {
@@ -8891,6 +8921,7 @@ sub run_job_master {
                                     target => $job->{target},
                                     dir => $job->{dir},
                                     command => $job->{command},
+                                    silent => $job->{silent} || 0,
                                 };
 
                                 # Try to dispatch immediately
@@ -10084,10 +10115,23 @@ sub run_job_master {
                                     $sub_cmd = "cd $job->{dir} && make $subtarget";
                                 }
 
+                                # Check if any command line has @ prefix
+                                my $sub_silent = 0;
+                                for my $line (split /\n/, $sub_cmd) {
+                                    next unless $line =~ /\S/;
+                                    my $trimmed = $line;
+                                    $trimmed =~ s/^\s+//;
+                                    if ($trimmed =~ /^@/) {
+                                        $sub_silent = 1;
+                                        last;
+                                    }
+                                }
+
                                 push @job_queue, {
                                     target => $subtarget,
                                     dir => $job->{dir},
                                     command => $sub_cmd,
+                                    silent => $sub_silent,
                                 };
                                 print STDERR "    Queued: $subtarget\n";
                             }
@@ -10297,6 +10341,7 @@ sub run_job_master {
                                 target => $job->{target},
                                 dir => $job->{dir},
                                 command => $job->{command},
+                                silent => $job->{silent} || 0,
                             };
 
                             # Try to dispatch immediately

@@ -3479,7 +3479,8 @@ sub build_target {
         # Detect automake-style suffix rule patterns
         # These contain: depbase=`echo $@ | sed ...`; ... -MF $depbase.Tpo ... && mv ... $depbase.Tpo $depbase.Po
         # Note: After variable expansion, $$depbase becomes $depbase (single $)
-        my $is_automake_suffix = ($expanded =~ /depbase=.*sed.*\$depbase\.Tpo.*\$depbase\.Po/s);
+        # Use non-greedy matching to avoid catastrophic backtracking
+        my $is_automake_suffix = ($expanded =~ /depbase=`[^`]+`.*?\$depbase\.Tpo.*?\$depbase\.Po/);
 
         # For suffix rules, $< should be the source file, not .dirstamp or other deps
         my $source_prereq = $deps[0] || '';
@@ -3493,12 +3494,15 @@ sub build_target {
             }
         }
 
-        # Resolve source prerequisite through VPATH to get actual file path
-        # This ensures gcc receives the correct path (e.g., ../nvc/src/vlog/vlog-pp.c not src/vlog/vlog-pp.c)
-        use Cwd 'getcwd';
-        my $cwd = getcwd();
-        my $resolved_source_prereq = resolve_vpath($source_prereq, $cwd);
-        warn "DEBUG[" . __LINE__ . "]:   source_prereq='$source_prereq', resolved='$resolved_source_prereq'\n" if $ENV{SMAK_DEBUG};
+        # Resolve source prerequisite through VPATH only if $< is actually used in the command
+        # This avoids expensive getcwd() and resolve_vpath() calls for rules that don't need it
+        my $resolved_source_prereq = $source_prereq;
+        if ($expanded =~ /\$</ && $source_prereq) {
+            use Cwd 'getcwd';
+            my $cwd = getcwd();
+            $resolved_source_prereq = resolve_vpath($source_prereq, $cwd);
+            warn "DEBUG[" . __LINE__ . "]:   source_prereq='$source_prereq', resolved='$resolved_source_prereq'\n" if $ENV{SMAK_DEBUG};
+        }
 
         # Expand automatic variables
         $expanded =~ s/\$@/$target/g;                     # $@ = target name

@@ -6058,15 +6058,23 @@ sub interactive_debug {
     my $watcher_pid;
     my $watcher_socket;
 
-    print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
-    $OUT->flush() if $OUT->can('flush');
+    # Check if stdin is a TTY (interactive) or piped (scripted)
+    my $is_tty = -t STDIN;
+
+    # Only show welcome message if interactive
+    if ($is_tty) {
+        print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
+        $OUT->flush() if $OUT->can('flush');
+    }
 
     while (1) {
         if (!$have_input) {
-            # Print prompt before waiting for input
-            print $OUT $prompt;
-            $OUT->flush() if $OUT->can('flush');
-            STDOUT->flush();
+            # Print prompt before waiting for input (only in TTY mode)
+            if ($is_tty) {
+                print $OUT $prompt;
+                $OUT->flush() if $OUT->can('flush');
+                STDOUT->flush();
+            }
             # Use select() with timeout to allow periodic checks
             my $rin = '';
             vec($rin, fileno(STDIN), 1) = 1;
@@ -6103,7 +6111,7 @@ sub interactive_debug {
                 # Check if STDIN has input
                 if (vec($rout, fileno(STDIN), 1)) {
                     # Input available - read it directly from STDIN
-                    print $OUT $prompt if $echo;
+                    print $OUT $prompt if ($echo && $is_tty);
                     $input = <STDIN>;
                     unless (defined $input) {
                         # EOF (Ctrl-D) or Ctrl-C
@@ -6129,8 +6137,8 @@ sub interactive_debug {
         # Skip comment lines (but not empty lines, those are handled below)
         next if $input =~ /^\s*#/;
 
-        # Echo the line if echo mode is enabled
-        if ($echo && $input ne '') {
+        # Echo the line if echo mode is enabled (only in TTY mode)
+        if ($echo && $input ne '' && $is_tty) {
             print "$prompt$input\n";
         }
 

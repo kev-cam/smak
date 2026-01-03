@@ -1347,8 +1347,15 @@ sub parse_makefile {
                     $fixed_rule{$key} = $current_rule;
                 }
             } elsif ($type eq 'pattern') {
-                if (!exists $pattern_rule{$key} || !defined $pattern_rule{$key} || $pattern_rule{$key} !~ /\S/) {
-                    $pattern_rule{$key} = $current_rule;
+                # Pattern rules can have multiple variants (e.g., %.o from %.c, %.cc, %.cpp)
+                # Store each variant as a separate entry in the arrays
+                # Only add if the rule has commands
+                if ($current_rule && $current_rule =~ /\S/) {
+                    # Initialize arrays if this is the first pattern rule for this target
+                    $pattern_rule{$key} = [] unless exists $pattern_rule{$key};
+                    # Append this rule variant
+                    push @{$pattern_rule{$key}}, $current_rule;
+                    warn "DEBUG: Added pattern rule variant for $key (now have " . scalar(@{$pattern_rule{$key}}) . " variants)\n" if $ENV{SMAK_DEBUG};
                 }
             } elsif ($type eq 'pseudo') {
                 if (!exists $pseudo_rule{$key} || !defined $pseudo_rule{$key} || $pseudo_rule{$key} !~ /\S/) {
@@ -1769,20 +1776,15 @@ sub parse_makefile {
                         }
                     }
                 } elsif ($type eq 'pattern') {
-                    # Append dependencies if target already exists (like gmake)
-                    if (exists $pattern_deps{$key}) {
-                        push @{$pattern_deps{$key}}, @deps;
-                    } else {
-                        $pattern_deps{$key} = \@deps;
-                    }
-                    # Store order-only prerequisites
-                    if (@order_only_deps) {
-                        if (exists $pattern_order_only{$key}) {
-                            push @{$pattern_order_only{$key}}, @order_only_deps;
-                        } else {
-                            $pattern_order_only{$key} = \@order_only_deps;
-                        }
-                    }
+                    # Pattern rules can have multiple variants with different dependencies
+                    # Store each variant's dependencies as a separate arrayref
+                    # Initialize arrays if this is the first pattern rule for this target
+                    $pattern_deps{$key} = [] unless exists $pattern_deps{$key};
+                    $pattern_order_only{$key} = [] unless exists $pattern_order_only{$key};
+                    # Append this variant's dependencies
+                    push @{$pattern_deps{$key}}, \@deps;
+                    push @{$pattern_order_only{$key}}, \@order_only_deps;
+                    warn "DEBUG: Added pattern deps variant for $key (now have " . scalar(@{$pattern_deps{$key}}) . " variants)\n" if $ENV{SMAK_DEBUG};
                 } elsif ($type eq 'pseudo') {
                     # Append dependencies if target already exists (like gmake)
                     if (exists $pseudo_deps{$key}) {
@@ -1847,25 +1849,33 @@ sub parse_makefile {
     # Save the last rule if any
     $save_current_rule->();
 
-    # Add built-in pattern rule for C compilation if not already defined (like GNU make)
-    # Note: Smak's current pattern rule implementation allows only one rule per target pattern
-    # so we can't add multiple rules for %.o (%.c, %.cc, %.cpp). For now, add only %.c which
-    # is the most common case. Projects needing %.cc compilation should define their own rules.
+    # Add built-in pattern rules for compilation if not already defined (like GNU make)
+    # Multiple rules can now be defined for the same target pattern
     {
         my $target_pattern = "%.o";
         my $key = "$makefile\t$target_pattern";
 
-        # Only add if not already defined
+        # Define built-in rules in priority order (C first, then C++)
+        my @builtin_variants = (
+            {dep => "%.c",   command => "\$(CC) \$(CFLAGS) \$(CPPFLAGS) \$(TARGET_ARCH) -c -o \$@ \$<"},
+            {dep => "%.cc",  command => "\$(CXX) \$(CXXFLAGS) \$(CPPFLAGS) \$(TARGET_ARCH) -c -o \$@ \$<"},
+            {dep => "%.cpp", command => "\$(CXX) \$(CXXFLAGS) \$(CPPFLAGS) \$(TARGET_ARCH) -c -o \$@ \$<"},
+            {dep => "%.C",   command => "\$(CXX) \$(CXXFLAGS) \$(CPPFLAGS) \$(TARGET_ARCH) -c -o \$@ \$<"},
+        );
+
+        # Only add built-in rules if no user-defined rules exist for this pattern
         unless (exists $pattern_rule{$key}) {
-            my $command = "\$(CC) \$(CFLAGS) \$(CPPFLAGS) \$(TARGET_ARCH) -c -o \$@ \$<";
-            my $dep_pattern = "%.c";
+            $pattern_rule{$key} = [];
+            $pattern_deps{$key} = [];
+            $pattern_order_only{$key} = [];
 
-            # Transform make variables to internal format
-            $command = transform_make_vars($command);
-
-            $pattern_rule{$key} = $command;
-            $pattern_deps{$key} = [$dep_pattern];
-            warn "DEBUG: Added built-in pattern rule: $target_pattern: $dep_pattern\n" if $ENV{SMAK_DEBUG};
+            for my $variant (@builtin_variants) {
+                my $command = transform_make_vars($variant->{command});
+                push @{$pattern_rule{$key}}, $command;
+                push @{$pattern_deps{$key}}, [$variant->{dep}];
+                push @{$pattern_order_only{$key}}, [];
+                warn "DEBUG: Added built-in pattern rule: $target_pattern: $variant->{dep}\n" if $ENV{SMAK_DEBUG};
+            }
         }
     }
 
@@ -3506,24 +3516,74 @@ sub build_target {
 
         # If fixed rule has no command, try to find pattern rule or suffix rule
         if (!$rule || $rule !~ /\S/) {
-            for my $pkey (keys %pattern_rule) {
+            PATTERN_SEARCH: for my $pkey (keys %pattern_rule) {
                 if ($pkey =~ /^[^\t]+\t(.+)$/) {
                     my $pattern = $1;
                     my $pattern_re = $pattern;
                     $pattern_re =~ s/%/(.+)/g;
                     if ($target =~ /^$pattern_re$/) {
-                        # Use pattern rule's command
-                        $rule = $pattern_rule{$pkey} || '';
-                        # Add pattern rule's dependencies to fixed dependencies
-                        my @pattern_deps = @{$pattern_deps{$pkey} || []};
                         $stem = $1;  # Save stem for $* expansion
-                        @pattern_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @pattern_deps;
-                        # Resolve dependencies through vpath
+
+                        # Pattern rules can now have multiple variants
+                        # Try each variant and use the first one whose prerequisites exist
+                        my $rules_ref = $pattern_rule{$pkey};
+                        my $deps_ref = $pattern_deps{$pkey};
+
+                        warn "DEBUG: Trying pattern $pkey, rules_ref type=" . ref($rules_ref) . "\n" if $ENV{SMAK_DEBUG};
+
+                        # Handle both old single-rule format and new array format
+                        my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
+                        my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
+
+                        warn "DEBUG: Have " . scalar(@rules) . " rule variants to try\n" if $ENV{SMAK_DEBUG};
+
+                        # Try to find a variant whose source file exists
+                        # If none exist, fall back to first variant (like GNU make)
+                        my $best_variant = 0;  # Default to first variant
+
+                        for (my $i = 0; $i < @rules; $i++) {
+                            my @variant_deps = @{$deps_list[$i] || []};
+
+                            # Expand % in dependencies with the stem
+                            my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+
+                            # Resolve dependencies through vpath
+                            use Cwd 'getcwd';
+                            my $cwd = getcwd();
+                            @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
+
+                            warn "DEBUG: Variant $i deps: @expanded_deps\n" if $ENV{SMAK_DEBUG};
+
+                            # Check if all prerequisites exist
+                            my $all_prereqs_ok = 1;
+                            for my $prereq (@expanded_deps) {
+                                my $prereq_path = $prereq =~ m{^/} ? $prereq : "$cwd/$prereq";
+                                warn "DEBUG:   Checking prereq $prereq_path: " . (-e $prereq_path ? "exists" : "missing") . "\n" if $ENV{SMAK_DEBUG};
+                                unless (-e $prereq_path) {
+                                    $all_prereqs_ok = 0;
+                                    last;
+                                }
+                            }
+
+                            if ($all_prereqs_ok) {
+                                # Found a variant whose prerequisites all exist - use it
+                                $best_variant = $i;
+                                warn "DEBUG: Found existing prerequisites for variant $i\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            }
+                        }
+
+                        # Use the best variant (either one with existing prereqs, or the first one)
+                        my @variant_deps = @{$deps_list[$best_variant] || []};
+                        my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
                         use Cwd 'getcwd';
                         my $cwd = getcwd();
-                        @pattern_deps = map { resolve_vpath($_, $cwd) } @pattern_deps;
-                        push @deps, @pattern_deps;
-                        last;
+                        @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
+
+                        $rule = $rules[$best_variant];
+                        push @deps, @expanded_deps;
+                        warn "DEBUG: Using pattern rule variant $best_variant for $target (deps: @expanded_deps)\n" if $ENV{SMAK_DEBUG};
+                        last PATTERN_SEARCH;
                     }
                 }
             }

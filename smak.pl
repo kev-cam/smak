@@ -646,6 +646,62 @@ sub execute_script_file {
                 Smak::cmd_kill($Smak::job_server_socket);
             } elsif ($cmd eq 'restart') {
                 Smak::cmd_restart(\@words, $Smak::job_server_socket, {});
+            } elsif ($cmd eq 'add-rule') {
+                # Parse: add-rule <target> : <deps> : <rule>
+                if ($script_line =~ /^\s*add-rule\s+(.+?)\s*:\s*(.+?)\s*:\s*(.+)$/i) {
+                    my ($target, $deps, $rule_text) = ($1, $2, $3);
+
+                    # Handle escape sequences
+                    $rule_text =~ s/\\n/\n/g;
+                    $rule_text =~ s/\\t/\t/g;
+
+                    # Ensure each line starts with a tab
+                    $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
+
+                    Smak::add_rule($target, $deps, $rule_text);
+                } else {
+                    print "[$script_file:$line_num] Usage: add-rule <target> : <deps> : <rule>\n";
+                }
+            } elsif ($cmd eq 'mod-rule') {
+                # Parse: mod-rule <target> : <rule>
+                if ($script_line =~ /^\s*mod-rule\s+(.+?)\s*:\s*(.+)$/i) {
+                    my ($target, $rule_text) = ($1, $2);
+
+                    # Handle escape sequences
+                    $rule_text =~ s/\\n/\n/g;
+                    $rule_text =~ s/\\t/\t/g;
+
+                    # Ensure each line starts with a tab
+                    $rule_text = join("\n", map { /^\t/ ? $_ : "\t$_" } split(/\n/, $rule_text));
+
+                    Smak::modify_rule($target, $rule_text);
+                } else {
+                    print "[$script_file:$line_num] Usage: mod-rule <target> : <rule>\n";
+                }
+            } elsif ($cmd eq 'mod-deps') {
+                # Parse: mod-deps <target> : <deps>
+                if ($script_line =~ /^\s*mod-deps\s+(.+?)\s*:\s*(.+)$/i) {
+                    my ($target, $deps) = ($1, $2);
+                    Smak::modify_deps($target, $deps);
+                } else {
+                    print "[$script_file:$line_num] Usage: mod-deps <target> : <deps>\n";
+                }
+            } elsif ($cmd eq 'del-rule') {
+                # Parse: del-rule <target>
+                if (@words >= 1) {
+                    my $target = $words[0];
+                    Smak::delete_rule($target);
+                } else {
+                    print "[$script_file:$line_num] Usage: del-rule <target>\n";
+                }
+            } elsif ($cmd eq 'save') {
+                # Parse: save <filename>
+                if (@words >= 1) {
+                    my $filename = $words[0];
+                    Smak::save_modifications($filename);
+                } else {
+                    print "[$script_file:$line_num] Usage: save <filename>\n";
+                }
             } else {
                 print "[$script_file:$line_num] Unknown command: $cmd\n";
             }

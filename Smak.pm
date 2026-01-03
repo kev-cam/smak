@@ -101,10 +101,13 @@ our %EXPORT_TAGS = (
 # Separate hashes for different rule types
 our %fixed_rule;
 our %fixed_deps;
+our %fixed_order_only;  # Order-only prerequisites (after |) - don't affect rebuild timestamp checking
 our %pattern_rule;
 our %pattern_deps;
+our %pattern_order_only;  # Order-only prerequisites for pattern rules
 our %pseudo_rule;
 our %pseudo_deps;
+our %pseudo_order_only;  # Order-only prerequisites for pseudo rules
 
 # Suffix rules
 our @suffixes;  # List of suffixes from .SUFFIXES directive
@@ -1360,6 +1363,11 @@ sub parse_makefile {
         $current_type = undef;
     };
 
+    # Conditional stack: each entry is {active => 0/1, seen_else => 0/1}
+    # active=1 means we're processing lines in this branch
+    # seen_else=1 means we've seen the else for this if
+    my @cond_stack = ({active => 1, seen_else => 0});  # Start with active top level
+
     while (my $line = <$fh>) {
         chomp $line;
 
@@ -1370,6 +1378,134 @@ sub parse_makefile {
             last unless defined $next;
             chomp $next;
             $line .= $next;
+        }
+
+        # Handle conditional directives (ifeq, ifdef, ifndef, ifneq, else, endif)
+        # These must be processed even when skipping lines
+        if ($line =~ /^\s*ifeq\s+(.+)$/) {
+            my $args = $1;
+            my $result = 0;
+
+            # Parse ifeq: ifeq (arg1,arg2) or ifeq "arg1" "arg2"
+            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
+                my ($arg1, $arg2) = ($1, $2);
+                # Expand variables in arguments
+                $arg1 = transform_make_vars($arg1);
+                $arg2 = transform_make_vars($arg2);
+                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                # Trim whitespace
+                $arg1 =~ s/^\s+|\s+$//g;
+                $arg2 =~ s/^\s+|\s+$//g;
+                $result = ($arg1 eq $arg2);
+                warn "DEBUG: ifeq('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
+            }
+
+            # Push new conditional state
+            # Active if parent is active AND condition is true
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*ifneq\s+(.+)$/) {
+            my $args = $1;
+            my $result = 0;
+
+            # Parse ifneq: ifneq (arg1,arg2) or ifneq "arg1" "arg2"
+            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
+                my ($arg1, $arg2) = ($1, $2);
+                # Expand variables in arguments
+                $arg1 = transform_make_vars($arg1);
+                $arg2 = transform_make_vars($arg2);
+                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                # Trim whitespace
+                $arg1 =~ s/^\s+|\s+$//g;
+                $arg2 =~ s/^\s+|\s+$//g;
+                $result = ($arg1 ne $arg2);  # ifneq is true when NOT equal
+                warn "DEBUG: ifneq('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
+            }
+
+            # Push new conditional state
+            # Active if parent is active AND condition is true
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*ifdef\s+(\S+)$/) {
+            my $var = $1;
+            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            warn "DEBUG: ifdef $var => defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
+
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*ifndef\s+(\S+)$/) {
+            my $var = $1;
+            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            $result = !$result;  # invert for ifndef
+            warn "DEBUG: ifndef $var => defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
+
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*else\s*$/) {
+            if (@cond_stack <= 1) {
+                warn "Warning: else without matching if in $makefile\n";
+                next;
+            }
+            my $cond = $cond_stack[-1];
+            if ($cond->{seen_else}) {
+                warn "Warning: duplicate else in $makefile\n";
+                next;
+            }
+            $cond->{seen_else} = 1;
+            # Toggle active state if parent is active
+            my $parent_active = $cond_stack[-2]{active};
+            $cond->{active} = $parent_active && !$cond->{active};
+            warn "DEBUG: else => active now " . $cond->{active} . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+        elsif ($line =~ /^\s*endif\s*$/) {
+            if (@cond_stack <= 1) {
+                warn "Warning: endif without matching if in $makefile\n";
+                next;
+            }
+            pop @cond_stack;
+            warn "DEBUG: endif => stack depth now " . scalar(@cond_stack) . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+
+        # Skip lines if we're in an inactive conditional branch
+        unless ($cond_stack[-1]{active}) {
+            # Still need to track current targets to properly handle rule continuations
+            if ($line =~ /^\t/ && !@current_targets) {
+                # Recipe line but no target - skip
+            } elsif ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
+                # New rule while skipping - clear current targets
+                @current_targets = ();
+                @current_suffix_targets = ();
+                $current_rule = '';
+            }
+            next;
         }
 
         # Skip comments and empty lines (but not inside rules)
@@ -1513,8 +1649,22 @@ sub parse_makefile {
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X} in dependencies
             $deps_str = transform_make_vars($deps_str);
 
-            my @deps = split /\s+/, $deps_str;
+            # Handle order-only prerequisites (after |)
+            # Syntax: target: normal-prereqs | order-only-prereqs
+            my @deps;
+            my @order_only_deps;
+            if ($deps_str =~ /^(.*?)\s*\|\s*(.*)$/) {
+                # Has order-only prerequisites
+                my $normal_deps_str = $1;
+                my $order_only_str = $2;
+                @deps = split /\s+/, $normal_deps_str;
+                @order_only_deps = split /\s+/, $order_only_str;
+            } else {
+                # No order-only prerequisites
+                @deps = split /\s+/, $deps_str;
+            }
             @deps = grep { $_ ne '' } @deps;
+            @order_only_deps = grep { $_ ne '' } @order_only_deps;
 
             # Handle multiple targets (e.g., "target1 target2: deps")
             # Make creates the same rule for each target
@@ -1610,6 +1760,14 @@ sub parse_makefile {
                     } else {
                         $fixed_deps{$key} = \@deps;
                     }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $fixed_order_only{$key}) {
+                            push @{$fixed_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $fixed_order_only{$key} = \@order_only_deps;
+                        }
+                    }
                 } elsif ($type eq 'pattern') {
                     # Append dependencies if target already exists (like gmake)
                     if (exists $pattern_deps{$key}) {
@@ -1617,12 +1775,28 @@ sub parse_makefile {
                     } else {
                         $pattern_deps{$key} = \@deps;
                     }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $pattern_order_only{$key}) {
+                            push @{$pattern_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $pattern_order_only{$key} = \@order_only_deps;
+                        }
+                    }
                 } elsif ($type eq 'pseudo') {
                     # Append dependencies if target already exists (like gmake)
                     if (exists $pseudo_deps{$key}) {
                         push @{$pseudo_deps{$key}}, @deps;
                     } else {
                         $pseudo_deps{$key} = \@deps;
+                    }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $pseudo_order_only{$key}) {
+                            push @{$pseudo_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $pseudo_order_only{$key} = \@order_only_deps;
+                        }
                     }
                 }
 
@@ -1753,6 +1927,9 @@ sub parse_included_makefile {
         $current_type = undef;
     };
 
+    # Conditional stack for included files
+    my @cond_stack = ({active => 1, seen_else => 0});
+
     while (my $line = <$fh>) {
         chomp $line;
 
@@ -1763,6 +1940,87 @@ sub parse_included_makefile {
             last unless defined $next;
             chomp $next;
             $line .= $next;
+        }
+
+        # Handle conditional directives (same as in parse_makefile)
+        if ($line =~ /^\s*ifeq\s+(.+)$/ || $line =~ /^\s*ifneq\s+(.+)$/) {
+            my $is_ifeq = ($line =~ /ifeq/);
+            my $args = $1;
+            my $result = 0;
+
+            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
+                my ($arg1, $arg2) = ($1, $2);
+                $arg1 = transform_make_vars($arg1);
+                $arg2 = transform_make_vars($arg2);
+                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                $arg1 =~ s/^\s+|\s+$//g;
+                $arg2 =~ s/^\s+|\s+$//g;
+                $result = ($arg1 eq $arg2);
+                $result = !$result if !$is_ifeq;
+                warn "DEBUG(include): $line => $is_ifeq('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
+            }
+
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*ifdef\s+(\S+)$/ || $line =~ /^\s*ifndef\s+(\S+)$/) {
+            my $is_ifdef = ($line =~ /ifdef/);
+            my $var = $1;
+            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            $result = !$result if !$is_ifdef;
+            warn "DEBUG(include): $line => $var defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
+
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*else\s*$/) {
+            if (@cond_stack <= 1) {
+                warn "Warning: else without matching if in $include_path\n";
+                next;
+            }
+            my $cond = $cond_stack[-1];
+            if ($cond->{seen_else}) {
+                warn "Warning: duplicate else in $include_path\n";
+                next;
+            }
+            $cond->{seen_else} = 1;
+            my $parent_active = $cond_stack[-2]{active};
+            $cond->{active} = $parent_active && !$cond->{active};
+            warn "DEBUG(include): else => active now " . $cond->{active} . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+        elsif ($line =~ /^\s*endif\s*$/) {
+            if (@cond_stack <= 1) {
+                warn "Warning: endif without matching if in $include_path\n";
+                next;
+            }
+            pop @cond_stack;
+            warn "DEBUG(include): endif => stack depth now " . scalar(@cond_stack) . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+
+        # Skip lines if in inactive conditional branch
+        unless ($cond_stack[-1]{active}) {
+            if ($line =~ /^\t/ && !@current_targets) {
+                # Recipe line but no target - skip
+            } elsif ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
+                # New rule while skipping - clear current targets
+                @current_targets = ();
+                @current_suffix_targets = ();
+                $current_rule = '';
+            }
+            next;
         }
 
         # Skip comments and empty lines
@@ -1853,8 +2111,21 @@ sub parse_included_makefile {
             $deps_str =~ s/^\s+|\s+$//g;
             $deps_str = transform_make_vars($deps_str);
 
-            my @deps = split /\s+/, $deps_str;
+            # Handle order-only prerequisites (after |)
+            my @deps;
+            my @order_only_deps;
+            if ($deps_str =~ /^(.*?)\s*\|\s*(.*)$/) {
+                # Has order-only prerequisites
+                my $normal_deps_str = $1;
+                my $order_only_str = $2;
+                @deps = split /\s+/, $normal_deps_str;
+                @order_only_deps = split /\s+/, $order_only_str;
+            } else {
+                # No order-only prerequisites
+                @deps = split /\s+/, $deps_str;
+            }
             @deps = grep { $_ ne '' } @deps;
+            @order_only_deps = grep { $_ ne '' } @order_only_deps;
 
             # Handle multiple targets
             my @targets = split /\s+/, $targets_str;
@@ -1910,17 +2181,41 @@ sub parse_included_makefile {
                     } else {
                         $fixed_deps{$key} = \@deps;
                     }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $fixed_order_only{$key}) {
+                            push @{$fixed_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $fixed_order_only{$key} = \@order_only_deps;
+                        }
+                    }
                 } elsif ($type eq 'pattern') {
                     if (exists $pattern_deps{$key}) {
                         push @{$pattern_deps{$key}}, @deps;
                     } else {
                         $pattern_deps{$key} = \@deps;
                     }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $pattern_order_only{$key}) {
+                            push @{$pattern_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $pattern_order_only{$key} = \@order_only_deps;
+                        }
+                    }
                 } elsif ($type eq 'pseudo') {
                     if (exists $pseudo_deps{$key}) {
                         push @{$pseudo_deps{$key}}, @deps;
                     } else {
                         $pseudo_deps{$key} = \@deps;
+                    }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $pseudo_order_only{$key}) {
+                            push @{$pseudo_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $pseudo_order_only{$key} = \@order_only_deps;
+                        }
                     }
                 }
             }
@@ -3180,8 +3475,10 @@ sub build_target {
 
     # Find target in fixed, pattern, or pseudo rules
     my $matched_key = $find_rule_key->(\%fixed_deps, $key);
+    my @order_only_prereqs;  # Order-only prerequisites (checked for existence but not timestamps)
     if ($matched_key) {
         @deps = @{$fixed_deps{$matched_key} || []};
+        @order_only_prereqs = @{$fixed_order_only{$matched_key} || []};
         $rule = $fixed_rule{$matched_key} || '';
         warn "DEBUG[" . __LINE__ . "]: Matched fixed rule key='$matched_key' for target='$target'\n" if $ENV{SMAK_DEBUG};
 
@@ -3388,10 +3685,29 @@ sub build_target {
     # Flatten and filter empty strings
     @deps = grep { $_ ne '' } @deps;
 
+    # Process order-only prerequisites the same way as normal dependencies
+    @order_only_prereqs = map {
+        my $dep = $_;
+        # Expand $MV{VAR} references
+        while ($dep =~ /\$MV\{([^}]+)\}/) {
+            my $var = $1;
+            my $val = $MV{$var} // '';
+            $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+        }
+        # If expansion resulted in multiple space-separated values, split them
+        if ($dep =~ /\s/) {
+            split /\s+/, $dep;
+        } else {
+            $dep;
+        }
+    } @order_only_prereqs;
+    @order_only_prereqs = grep { $_ ne '' } @order_only_prereqs;
+
     # Apply vpath resolution to all dependencies
     use Cwd 'getcwd';
     my $cwd = getcwd();
     @deps = map { resolve_vpath($_, $cwd) } @deps;
+    @order_only_prereqs = map { resolve_vpath($_, $cwd) } @order_only_prereqs;
 
     # Filter out dependencies in ignored directories
     # Keep them separate for sanity checks and reporting
@@ -3511,6 +3827,18 @@ sub build_target {
         warn "DEBUG[" . __LINE__ . "]:   Target needs rebuilding\n" if $ENV{SMAK_DEBUG};
         # Track this target as stale (needs rebuilding)
         $stale_targets_cache{$target} = time();
+    }
+
+    # Recursively build order-only prerequisites first (they must exist before normal prerequisites)
+    # Order-only prerequisites don't affect timestamp checking, but must be built before the target
+    unless ($job_server_socket) {
+        if (@order_only_prereqs) {
+            warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@order_only_prereqs) . " order-only prerequisites...\n" if $ENV{SMAK_DEBUG};
+            for my $prereq (@order_only_prereqs) {
+                warn "DEBUG[" . __LINE__ . "]:     Building order-only prerequisite: $prereq\n" if $ENV{SMAK_DEBUG};
+                build_target($prereq, $visited, $depth + 1);
+            }
+        }
     }
 
     # Recursively build dependencies
@@ -5947,20 +6275,23 @@ sub interactive_debug {
     my $watcher_pid;
     my $watcher_socket;
 
-    # Declare package variables used in CLI commands
-    our %rules;
-    our %rule_deps;
-    our %pattern_rules;
+    # Check if stdin is a TTY (interactive) or piped (scripted)
+    my $is_tty = -t STDIN;
 
-    print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
-    $OUT->flush() if $OUT->can('flush');
+    # Only show welcome message if interactive
+    if ($is_tty) {
+        print $OUT "Interactive smak debugger. Type 'help' for commands.\n";
+        $OUT->flush() if $OUT->can('flush');
+    }
 
     while (1) {
         if (!$have_input) {
-            # Print prompt before waiting for input
-            print $OUT $prompt;
-            $OUT->flush() if $OUT->can('flush');
-            STDOUT->flush();
+            # Print prompt before waiting for input (only in TTY mode)
+            if ($is_tty) {
+                print $OUT $prompt;
+                $OUT->flush() if $OUT->can('flush');
+                STDOUT->flush();
+            }
             # Use select() with timeout to allow periodic checks
             my $rin = '';
             vec($rin, fileno(STDIN), 1) = 1;
@@ -5997,7 +6328,7 @@ sub interactive_debug {
                 # Check if STDIN has input
                 if (vec($rout, fileno(STDIN), 1)) {
                     # Input available - read it directly from STDIN
-                    print $OUT $prompt if $echo;
+                    print $OUT $prompt if ($echo && $is_tty);
                     $input = <STDIN>;
                     unless (defined $input) {
                         # EOF (Ctrl-D) or Ctrl-C
@@ -6023,8 +6354,8 @@ sub interactive_debug {
         # Skip comment lines (but not empty lines, those are handled below)
         next if $input =~ /^\s*#/;
 
-        # Echo the line if echo mode is enabled
-        if ($echo && $input ne '') {
+        # Echo the line if echo mode is enabled (only in TTY mode)
+        if ($echo && $input ne '' && $is_tty) {
             print "$prompt$input\n";
         }
 
@@ -6046,6 +6377,7 @@ sub interactive_debug {
 Commands:
   list, l              - List all rules
   rules <target>       - Show rules for a specific target
+  show <target>        - Alias for 'rules <target>'
   build <target>       - Build a target
   progress	       - Show work in progress
   rescan               - Rescan timestamps
@@ -6074,33 +6406,52 @@ HELP
         elsif ($cmd eq 'list' || $cmd eq 'l') {
             print_rules();
         }
-        elsif ($cmd eq 'rules') {
+        elsif ($cmd eq 'rules' || $cmd eq 'show') {
             if (@parts < 2) {
                 print $OUT "Usage: rules <target>\n";
             } else {
                 my $target = $parts[1];
 
-                # Look for explicit rules
+                # Look for explicit fixed rules
                 my $found = 0;
-                for my $makefile (keys %rules) {
-                    my $key = "$makefile\t$target";
-                    if (exists $rules{$key}) {
+                for my $key (keys %fixed_deps) {
+                    if ($key =~ /^([^\t]+)\t\Q$target\E$/) {
+                        my $mf = $1;
                         $found = 1;
-                        print $OUT "Explicit rule in $makefile:\n";
+                        print $OUT "Explicit rule in $mf:\n";
                         print $OUT "  Target: $target\n";
 
                         # Show dependencies
-                        if (exists $rule_deps{$key}) {
-                            my @deps = @{$rule_deps{$key}};
-                            print $OUT "  Dependencies: " . join(' ', @deps) . "\n";
+                        if (exists $fixed_deps{$key}) {
+                            my @deps = @{$fixed_deps{$key}};
+                            # Convert $MV{VAR} back to $(VAR) for display
+                            my @display_deps = map {
+                                my $d = $_;
+                                $d =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+                                $d;
+                            } @deps;
+                            print $OUT "  Dependencies: " . join(' ', @display_deps) . "\n";
+                        }
+
+                        # Show order-only prerequisites if any
+                        if (exists $fixed_order_only{$key}) {
+                            my @order_only = @{$fixed_order_only{$key}};
+                            my @display_order = map {
+                                my $d = $_;
+                                $d =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+                                $d;
+                            } @order_only;
+                            print $OUT "  Order-only prerequisites: " . join(' ', @display_order) . "\n";
                         }
 
                         # Show commands
-                        my $cmds = $rules{$key};
-                        if ($cmds && @$cmds) {
+                        my $rule = $fixed_rule{$key} || '';
+                        if ($rule && $rule =~ /\S/) {
+                            # Convert $MV{VAR} back to $(VAR) for display
+                            $rule =~ s/\$MV\{([^}]+)\}/\$($1)/g;
                             print $OUT "  Commands:\n";
-                            for my $cmd (@$cmds) {
-                                print $OUT "    $cmd\n";
+                            for my $line (split /\n/, $rule) {
+                                print $OUT "  $line\n";
                             }
                         } else {
                             print $OUT "  Commands: (none)\n";
@@ -6109,33 +6460,37 @@ HELP
                 }
 
                 # Check for pattern rules that might match
-                for my $makefile (keys %pattern_rules) {
-                    for my $pattern_key (keys %{$pattern_rules{$makefile}}) {
-                        my ($prereqs_pattern, $target_pattern) = split(/\t/, $pattern_key, 2);
-
-                        # Simple pattern matching (handle % wildcard)
-                        my $pattern_re = $target_pattern;
+                for my $key (keys %pattern_rule) {
+                    if ($key =~ /^([^\t]+)\t(.+)$/) {
+                        my ($mf, $pattern) = ($1, $2);
+                        my $pattern_re = $pattern;
                         $pattern_re =~ s/%/(.*)/;
                         $pattern_re = "^$pattern_re\$";
 
                         if ($target =~ /$pattern_re/) {
                             my $stem = $1 // '';
-                            print $OUT "Pattern rule in $makefile:\n";
-                            print $OUT "  Pattern: $target_pattern\n";
+                            print $OUT "Pattern rule in $mf:\n";
+                            print $OUT "  Pattern: $pattern\n";
                             print $OUT "  Matches: $target (stem='$stem')\n";
 
-                            if ($prereqs_pattern) {
-                                my $prereq = $prereqs_pattern;
-                                $prereq =~ s/%/$stem/g;
-                                print $OUT "  Prereqs pattern: $prereqs_pattern\n";
-                                print $OUT "  Expanded prereqs: $prereq\n";
+                            if (exists $pattern_deps{$key}) {
+                                my @deps = @{$pattern_deps{$key}};
+                                my @display_deps = map {
+                                    my $d = $_;
+                                    $d =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+                                    $d =~ s/%/$stem/g;
+                                    $d;
+                                } @deps;
+                                print $OUT "  Prereqs pattern: " . join(' ', @{$pattern_deps{$key}}) . "\n";
+                                print $OUT "  Expanded prereqs: " . join(' ', @display_deps) . "\n";
                             }
 
-                            my $cmds = $pattern_rules{$makefile}{$pattern_key};
-                            if ($cmds && @$cmds) {
+                            my $rule = $pattern_rule{$key} || '';
+                            if ($rule && $rule =~ /\S/) {
+                                $rule =~ s/\$MV\{([^}]+)\}/\$($1)/g;
                                 print $OUT "  Commands:\n";
-                                for my $cmd (@$cmds) {
-                                    print $OUT "    $cmd\n";
+                                for my $line (split /\n/, $rule) {
+                                    print $OUT "  $line\n";
                                 }
                             }
                             $found = 1;
@@ -7153,18 +7508,29 @@ sub run_job_master {
         return '' unless defined $cmd;
 
         # Process each line of multi-line commands
-        my @lines;
+        my @processed;
         for my $line (split /\n/, $cmd) {
             next unless $line =~ /\S/;  # Skip empty lines
+
+            # Check for - (ignore errors) prefix before stripping
+            my $ignore_errors = ($line =~ /^\s*-/);
 
             # Strip @ (silent) and - (ignore errors) prefixes
             $line =~ s/^\s*[@-]+//;
 
-            push @lines, $line if $line =~ /\S/;
+            next unless $line =~ /\S/;
+
+            # If command had -, wrap it so errors don't stop the chain
+            if ($ignore_errors) {
+                push @processed, "($line || true)";
+            } else {
+                push @processed, $line;
+            }
         }
 
-        # Join multiple commands with && so they execute as one line
-        return join(" && ", @lines);
+        # Join multiple commands with && so they execute sequentially
+        # Commands with - prefix are wrapped in (cmd || true) to not break the chain
+        return join(" && ", @processed);
     }
 
     sub expand_job_command {
@@ -7653,6 +8019,21 @@ sub run_job_master {
             if ($stem) {
                 $rule =~ s/\$\*/$stem/g;
             }
+
+            # Check if any command line has @ prefix (silent mode)
+            # In parallel mode we join commands, so if ANY line has @, we suppress
+            # printing the entire combined command to avoid exposing @ prefixed lines
+            my $any_silent = 0;
+            for my $line (split /\n/, $rule) {
+                next unless $line =~ /\S/;  # Skip empty lines
+                my $trimmed = $line;
+                $trimmed =~ s/^\s+//;  # Remove leading whitespace
+                if ($trimmed =~ /^@/) {
+                    $any_silent = 1;
+                    last;
+                }
+            }
+
             my $processed_rule = process_command($rule);
             $processed_rule = expand_job_command($processed_rule, $target, \@deps);
 
@@ -7693,6 +8074,7 @@ sub run_job_master {
                 target => $target,
                 dir => $dir,
                 command => $processed_rule,
+                silent => $any_silent,  # Track if any command has @ prefix
                 siblings => [@sibling_targets],  # Track siblings that will also be created
             };
             $in_progress{$target} = "queued";
@@ -8283,10 +8665,13 @@ sub run_job_master {
 
             vprint "Dispatched task $task_id to worker\n";
 
-	    if (! $silent_mode) {
+	    # Check if command should be echoed (based on @ prefix detection before processing)
+	    my $silent = $job->{silent} || 0;
+
+	    if (!$silent_mode && !$silent) {
 		print $stomp_prompt,"$job->{command}\n";
 	    }
-	    
+
             broadcast_observers("DISPATCHED $task_id $job->{target}");
 
             if ($block) {
@@ -8536,6 +8921,7 @@ sub run_job_master {
                                     target => $job->{target},
                                     dir => $job->{dir},
                                     command => $job->{command},
+                                    silent => $job->{silent} || 0,
                                 };
 
                                 # Try to dispatch immediately
@@ -9729,10 +10115,23 @@ sub run_job_master {
                                     $sub_cmd = "cd $job->{dir} && make $subtarget";
                                 }
 
+                                # Check if any command line has @ prefix
+                                my $sub_silent = 0;
+                                for my $line (split /\n/, $sub_cmd) {
+                                    next unless $line =~ /\S/;
+                                    my $trimmed = $line;
+                                    $trimmed =~ s/^\s+//;
+                                    if ($trimmed =~ /^@/) {
+                                        $sub_silent = 1;
+                                        last;
+                                    }
+                                }
+
                                 push @job_queue, {
                                     target => $subtarget,
                                     dir => $job->{dir},
                                     command => $sub_cmd,
+                                    silent => $sub_silent,
                                 };
                                 print STDERR "    Queued: $subtarget\n";
                             }
@@ -9942,6 +10341,7 @@ sub run_job_master {
                                 target => $job->{target},
                                 dir => $job->{dir},
                                 command => $job->{command},
+                                silent => $job->{silent} || 0,
                             };
 
                             # Try to dispatch immediately

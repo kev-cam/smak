@@ -19,5 +19,11 @@ test/example-debug
 iverilog/
 test/.smak.connect
 
+# Test project build artifacts and source extracts
+projects/nvc/.deps/
+projects/nvc/src/
+projects/nvc/test/
+projects/nvc/thirdparty/
+
 # Test artifacts
 test/failures-*/

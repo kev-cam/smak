@@ -1363,6 +1363,11 @@ sub parse_makefile {
         $current_type = undef;
     };
 
+    # Conditional stack: each entry is {active => 0/1, seen_else => 0/1}
+    # active=1 means we're processing lines in this branch
+    # seen_else=1 means we've seen the else for this if
+    my @cond_stack = ({active => 1, seen_else => 0});  # Start with active top level
+
     while (my $line = <$fh>) {
         chomp $line;
 
@@ -1373,6 +1378,134 @@ sub parse_makefile {
             last unless defined $next;
             chomp $next;
             $line .= $next;
+        }
+
+        # Handle conditional directives (ifeq, ifdef, ifndef, ifneq, else, endif)
+        # These must be processed even when skipping lines
+        if ($line =~ /^\s*ifeq\s+(.+)$/) {
+            my $args = $1;
+            my $result = 0;
+
+            # Parse ifeq: ifeq (arg1,arg2) or ifeq "arg1" "arg2"
+            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
+                my ($arg1, $arg2) = ($1, $2);
+                # Expand variables in arguments
+                $arg1 = transform_make_vars($arg1);
+                $arg2 = transform_make_vars($arg2);
+                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                # Trim whitespace
+                $arg1 =~ s/^\s+|\s+$//g;
+                $arg2 =~ s/^\s+|\s+$//g;
+                $result = ($arg1 eq $arg2);
+                warn "DEBUG: ifeq('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
+            }
+
+            # Push new conditional state
+            # Active if parent is active AND condition is true
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*ifneq\s+(.+)$/) {
+            my $args = $1;
+            my $result = 0;
+
+            # Parse ifneq: ifneq (arg1,arg2) or ifneq "arg1" "arg2"
+            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
+                my ($arg1, $arg2) = ($1, $2);
+                # Expand variables in arguments
+                $arg1 = transform_make_vars($arg1);
+                $arg2 = transform_make_vars($arg2);
+                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                # Trim whitespace
+                $arg1 =~ s/^\s+|\s+$//g;
+                $arg2 =~ s/^\s+|\s+$//g;
+                $result = ($arg1 ne $arg2);  # ifneq is true when NOT equal
+                warn "DEBUG: ifneq('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
+            }
+
+            # Push new conditional state
+            # Active if parent is active AND condition is true
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*ifdef\s+(\S+)$/) {
+            my $var = $1;
+            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            warn "DEBUG: ifdef $var => defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
+
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*ifndef\s+(\S+)$/) {
+            my $var = $1;
+            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            $result = !$result;  # invert for ifndef
+            warn "DEBUG: ifndef $var => defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
+
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*else\s*$/) {
+            if (@cond_stack <= 1) {
+                warn "Warning: else without matching if in $makefile\n";
+                next;
+            }
+            my $cond = $cond_stack[-1];
+            if ($cond->{seen_else}) {
+                warn "Warning: duplicate else in $makefile\n";
+                next;
+            }
+            $cond->{seen_else} = 1;
+            # Toggle active state if parent is active
+            my $parent_active = $cond_stack[-2]{active};
+            $cond->{active} = $parent_active && !$cond->{active};
+            warn "DEBUG: else => active now " . $cond->{active} . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+        elsif ($line =~ /^\s*endif\s*$/) {
+            if (@cond_stack <= 1) {
+                warn "Warning: endif without matching if in $makefile\n";
+                next;
+            }
+            pop @cond_stack;
+            warn "DEBUG: endif => stack depth now " . scalar(@cond_stack) . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+
+        # Skip lines if we're in an inactive conditional branch
+        unless ($cond_stack[-1]{active}) {
+            # Still need to track current targets to properly handle rule continuations
+            if ($line =~ /^\t/ && !@current_targets) {
+                # Recipe line but no target - skip
+            } elsif ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
+                # New rule while skipping - clear current targets
+                @current_targets = ();
+                @current_suffix_targets = ();
+                $current_rule = '';
+            }
+            next;
         }
 
         # Skip comments and empty lines (but not inside rules)
@@ -1794,6 +1927,9 @@ sub parse_included_makefile {
         $current_type = undef;
     };
 
+    # Conditional stack for included files
+    my @cond_stack = ({active => 1, seen_else => 0});
+
     while (my $line = <$fh>) {
         chomp $line;
 
@@ -1804,6 +1940,87 @@ sub parse_included_makefile {
             last unless defined $next;
             chomp $next;
             $line .= $next;
+        }
+
+        # Handle conditional directives (same as in parse_makefile)
+        if ($line =~ /^\s*ifeq\s+(.+)$/ || $line =~ /^\s*ifneq\s+(.+)$/) {
+            my $is_ifeq = ($line =~ /ifeq/);
+            my $args = $1;
+            my $result = 0;
+
+            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
+                my ($arg1, $arg2) = ($1, $2);
+                $arg1 = transform_make_vars($arg1);
+                $arg2 = transform_make_vars($arg2);
+                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
+                    my $var = $1;
+                    my $val = $MV{$var} // '';
+                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
+                }
+                $arg1 =~ s/^\s+|\s+$//g;
+                $arg2 =~ s/^\s+|\s+$//g;
+                $result = ($arg1 eq $arg2);
+                $result = !$result if !$is_ifeq;
+                warn "DEBUG(include): $line => $is_ifeq('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
+            }
+
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*ifdef\s+(\S+)$/ || $line =~ /^\s*ifndef\s+(\S+)$/) {
+            my $is_ifdef = ($line =~ /ifdef/);
+            my $var = $1;
+            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            $result = !$result if !$is_ifdef;
+            warn "DEBUG(include): $line => $var defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
+
+            my $parent_active = $cond_stack[-1]{active};
+            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            next;
+        }
+        elsif ($line =~ /^\s*else\s*$/) {
+            if (@cond_stack <= 1) {
+                warn "Warning: else without matching if in $include_path\n";
+                next;
+            }
+            my $cond = $cond_stack[-1];
+            if ($cond->{seen_else}) {
+                warn "Warning: duplicate else in $include_path\n";
+                next;
+            }
+            $cond->{seen_else} = 1;
+            my $parent_active = $cond_stack[-2]{active};
+            $cond->{active} = $parent_active && !$cond->{active};
+            warn "DEBUG(include): else => active now " . $cond->{active} . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+        elsif ($line =~ /^\s*endif\s*$/) {
+            if (@cond_stack <= 1) {
+                warn "Warning: endif without matching if in $include_path\n";
+                next;
+            }
+            pop @cond_stack;
+            warn "DEBUG(include): endif => stack depth now " . scalar(@cond_stack) . "\n" if $ENV{SMAK_DEBUG};
+            next;
+        }
+
+        # Skip lines if in inactive conditional branch
+        unless ($cond_stack[-1]{active}) {
+            if ($line =~ /^\t/ && !@current_targets) {
+                # Recipe line but no target - skip
+            } elsif ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
+                # New rule while skipping - clear current targets
+                @current_targets = ();
+                @current_suffix_targets = ();
+                $current_rule = '';
+            }
+            next;
         }
 
         # Skip comments and empty lines

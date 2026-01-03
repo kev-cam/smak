@@ -2970,12 +2970,39 @@ sub preprocess_automake_suffix_rule {
     # Remove the depbase assignment line (we've calculated it in Perl)
     $rule =~ s/depbase=`[^`]+`;\s*//g;
 
-    # Handle mv command as built-in (for now, just keep it - we'll implement parsing later)
-    # The mv -f $depbase.Tpo $depbase.Po will now have $depbase already substituted
+    # Split compound commands at && to handle separately
+    # This allows us to exec gcc directly and handle mv as built-in
+    # Mark mv commands for built-in handling
+    $rule =~ s/\bmv\s+-f\s+/BUILTIN_MV -f /g;
+
+    # Split && into separate lines so each command executes independently
+    $rule =~ s/\s*&&\s*/\n/g;
 
     warn "DEBUG[preprocess]: Output rule:\n$rule\n" if $ENV{SMAK_DEBUG};
 
     return $rule;
+}
+
+sub builtin_mv {
+    my ($source, $dest) = @_;
+
+    warn "DEBUG[builtin_mv]: Moving '$source' to '$dest'\n" if $ENV{SMAK_DEBUG};
+
+    # Perform the move operation
+    use File::Copy;
+    unless (move($source, $dest)) {
+        warn "smak: mv: cannot move '$source' to '$dest': $!\n";
+        return 0;
+    }
+
+    # If this is a .Tpo -> .Po move, we could parse the .Po file here
+    # to discover additional dependencies (future enhancement)
+    if ($dest =~ /\.Po$/) {
+        warn "DEBUG[builtin_mv]: Dependency file created: $dest\n" if $ENV{SMAK_DEBUG};
+        # TODO: Parse .Po file and update dependency tracking
+    }
+
+    return 1;
 }
 
 sub build_target {
@@ -3551,9 +3578,37 @@ sub build_target {
                     }
                 }
 
-                # Not a recursive make, just print the command
-                print "$display_cmd\n";
+                # Not a recursive make, check if it's a built-in command first
+                if ($display_cmd =~ /^BUILTIN_MV\s+-f\s+(\S+)\s+(\S+)/) {
+                    print "mv -f $1 $2\n";
+                } else {
+                    print "$display_cmd\n";
+                }
                 next;
+            }
+
+            # Handle built-in commands
+            if ($clean_cmd =~ /^BUILTIN_MV\s+(.+)$/) {
+                my $mv_args = $1;
+                warn "DEBUG[" . __LINE__ . "]:     Detected built-in mv command\n" if $ENV{SMAK_DEBUG};
+
+                # Parse mv arguments: -f source dest
+                if ($mv_args =~ /^-f\s+(\S+)\s+(\S+)/) {
+                    my ($source, $dest) = ($1, $2);
+
+                    # In dry-run mode, just print what we would do
+                    if ($dry_run_mode) {
+                        print "mv -f $source $dest\n";
+                        next;
+                    }
+
+                    # Execute the built-in mv
+                    unless ($silent_mode || $silent) {
+                        print "mv -f $source $dest\n";
+                    }
+                    builtin_mv($source, $dest);
+                    next;
+                }
             }
 
             # Execute command - use job system if available, otherwise sequential

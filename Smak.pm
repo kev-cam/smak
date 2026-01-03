@@ -6046,6 +6046,7 @@ sub interactive_debug {
 Commands:
   list, l              - List all rules
   rules <target>       - Show rules for a specific target
+  show <target>        - Alias for 'rules <target>'
   build <target>       - Build a target
   progress	       - Show work in progress
   rescan               - Rescan timestamps
@@ -6074,7 +6075,7 @@ HELP
         elsif ($cmd eq 'list' || $cmd eq 'l') {
             print_rules();
         }
-        elsif ($cmd eq 'rules') {
+        elsif ($cmd eq 'rules' || $cmd eq 'show') {
             if (@parts < 2) {
                 print $OUT "Usage: rules <target>\n";
             } else {

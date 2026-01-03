@@ -1847,6 +1847,28 @@ sub parse_makefile {
     # Save the last rule if any
     $save_current_rule->();
 
+    # Add built-in pattern rule for C compilation if not already defined (like GNU make)
+    # Note: Smak's current pattern rule implementation allows only one rule per target pattern
+    # so we can't add multiple rules for %.o (%.c, %.cc, %.cpp). For now, add only %.c which
+    # is the most common case. Projects needing %.cc compilation should define their own rules.
+    {
+        my $target_pattern = "%.o";
+        my $key = "$makefile\t$target_pattern";
+
+        # Only add if not already defined
+        unless (exists $pattern_rule{$key}) {
+            my $command = "\$(CC) \$(CFLAGS) \$(CPPFLAGS) \$(TARGET_ARCH) -c -o \$@ \$<";
+            my $dep_pattern = "%.c";
+
+            # Transform make variables to internal format
+            $command = transform_make_vars($command);
+
+            $pattern_rule{$key} = $command;
+            $pattern_deps{$key} = [$dep_pattern];
+            warn "DEBUG: Added built-in pattern rule: $target_pattern: $dep_pattern\n" if $ENV{SMAK_DEBUG};
+        }
+    }
+
     close($fh);
 }
 

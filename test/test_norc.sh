@@ -4,17 +4,9 @@
 echo "Testing -norc option..."
 echo ""
 
-# Save original rc file if it exists
-ORIG_RC_EXISTS=0
-if [ -f .smak.rc ]; then
-    cp .smak.rc .smak.rc.backup
-    ORIG_RC_EXISTS=1
-fi
-
 # Create a test rc file that sets a custom makefile variable
-cat > .smak.rc <<'EOF'
-# Test rc file - try to set makefile to a non-existent file
-# If this is read, smak will fail to find TestMakefile.norc
+cat > test_norc.rc <<'EOF'
+# Test rc file
 set makefile = "TestMakefile.norc"
 EOF
 
@@ -32,8 +24,8 @@ all:
 	@echo "Using TestMakefile.norc from rc file"
 EOF
 
-echo "Test 1: Default behavior (should read .smak.rc and use TestMakefile.norc)"
-OUTPUT_WITH_RC=$(../smak all 2>&1)
+echo "Test 1: With SMAK_RCFILE (should read rc file and use TestMakefile.norc)"
+OUTPUT_WITH_RC=$(SMAK_RCFILE=test_norc.rc ../smak all 2>&1)
 if echo "$OUTPUT_WITH_RC" | grep -q "Using TestMakefile.norc"; then
     echo "  PASS: RC file was read (makefile variable was set)"
 elif echo "$OUTPUT_WITH_RC" | grep -q "Using default Makefile"; then
@@ -45,7 +37,7 @@ else
 fi
 
 echo ""
-echo "Test 2: With -norc flag (should NOT read .smak.rc, use default Makefile)"
+echo "Test 2: With -norc flag (should NOT read default .smak.rc)"
 OUTPUT_WITHOUT_RC=$(../smak -norc all 2>&1)
 if echo "$OUTPUT_WITHOUT_RC" | grep -q "Using default Makefile"; then
     echo "  PASS: RC file was ignored (used default Makefile)"
@@ -59,7 +51,7 @@ fi
 
 echo ""
 echo "Test 3: Verify -norc overrides SMAK_RCFILE environment variable"
-OUTPUT_ENV=$(SMAK_RCFILE=.smak.rc ../smak -norc all 2>&1)
+OUTPUT_ENV=$(SMAK_RCFILE=test_norc.rc ../smak -norc all 2>&1)
 if echo "$OUTPUT_ENV" | grep -q "Using default Makefile"; then
     echo "  PASS: SMAK_RCFILE ignored with -norc"
 elif echo "$OUTPUT_ENV" | grep -q "Using TestMakefile.norc"; then
@@ -70,15 +62,8 @@ else
     echo "  Output: $OUTPUT_ENV"
 fi
 
-# Restore original rc file
-if [ $ORIG_RC_EXISTS -eq 1 ]; then
-    mv .smak.rc.backup .smak.rc
-else
-    rm -f .smak.rc
-fi
-
 # Cleanup
-rm -f Makefile TestMakefile.norc .smak.rc.test
+rm -f Makefile TestMakefile.norc test_norc.rc
 
 echo ""
 echo "All tests completed"

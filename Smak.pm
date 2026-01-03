@@ -3096,19 +3096,25 @@ sub build_target {
             # If still no rule found, try suffix rules
             # This is needed when .deps/*.Po files define dependencies but no rule
             if (!$rule || $rule !~ /\S/) {
+                warn "DEBUG[" . __LINE__ . "]: No rule found in fixed_rule, trying suffix rules for '$target'\n" if $ENV{SMAK_DEBUG};
                 if ($target =~ /^(.+)(\.[^.\/]+)$/) {
                     my $base = $1;
                     my $target_suffix = $2;
+                    warn "DEBUG[" . __LINE__ . "]:   base='$base', target_suffix='$target_suffix'\n" if $ENV{SMAK_DEBUG};
+                    warn "DEBUG[" . __LINE__ . "]:   suffixes: @suffixes\n" if $ENV{SMAK_DEBUG};
 
                     for my $source_suffix (@suffixes) {
                         next if $source_suffix eq $target_suffix;
 
                         my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                        warn "DEBUG[" . __LINE__ . "]:   trying suffix_key='$suffix_key'\n" if $ENV{SMAK_DEBUG};
                         if (exists $suffix_rule{$suffix_key}) {
+                            warn "DEBUG[" . __LINE__ . "]:     suffix rule exists!\n" if $ENV{SMAK_DEBUG};
                             my $source = "$base$source_suffix";
                             use Cwd 'getcwd';
                             my $cwd = getcwd();
                             my $resolved_source = resolve_vpath($source, $cwd);
+                            warn "DEBUG[" . __LINE__ . "]:     source='$source', resolved='$resolved_source'\n" if $ENV{SMAK_DEBUG};
 
                             if (-f $resolved_source) {
                                 $stem = $base;

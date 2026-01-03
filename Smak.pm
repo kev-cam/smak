@@ -1943,8 +1943,14 @@ sub parse_included_makefile {
                     $fixed_rule{$key} = $current_rule;
                 }
             } elsif ($type eq 'pattern') {
-                if (!exists $pattern_rule{$key} || !defined $pattern_rule{$key} || $pattern_rule{$key} !~ /\S/) {
-                    $pattern_rule{$key} = $current_rule;
+                # Pattern rules can have multiple variants (e.g., %.o from %.c, %.cc, %.cpp)
+                # Only add if the rule has commands
+                if ($current_rule && $current_rule =~ /\S/) {
+                    # Initialize arrays if this is the first pattern rule for this target
+                    $pattern_rule{$key} = [] unless exists $pattern_rule{$key};
+                    # Append this rule variant
+                    push @{$pattern_rule{$key}}, $current_rule;
+                    warn "DEBUG: Added pattern rule variant for $key in included file (now have " . scalar(@{$pattern_rule{$key}}) . " variants)\n" if $ENV{SMAK_DEBUG};
                 }
             } elsif ($type eq 'pseudo') {
                 if (!exists $pseudo_rule{$key} || !defined $pseudo_rule{$key} || $pseudo_rule{$key} !~ /\S/) {
@@ -2222,19 +2228,15 @@ sub parse_included_makefile {
                         }
                     }
                 } elsif ($type eq 'pattern') {
-                    if (exists $pattern_deps{$key}) {
-                        push @{$pattern_deps{$key}}, @deps;
-                    } else {
-                        $pattern_deps{$key} = \@deps;
-                    }
-                    # Store order-only prerequisites
-                    if (@order_only_deps) {
-                        if (exists $pattern_order_only{$key}) {
-                            push @{$pattern_order_only{$key}}, @order_only_deps;
-                        } else {
-                            $pattern_order_only{$key} = \@order_only_deps;
-                        }
-                    }
+                    # Pattern rules can have multiple variants with different dependencies
+                    # Store each variant's dependencies as a separate arrayref
+                    # Initialize arrays if this is the first pattern rule for this target
+                    $pattern_deps{$key} = [] unless exists $pattern_deps{$key};
+                    $pattern_order_only{$key} = [] unless exists $pattern_order_only{$key};
+                    # Append this variant's dependencies
+                    push @{$pattern_deps{$key}}, \@deps;
+                    push @{$pattern_order_only{$key}}, \@order_only_deps;
+                    warn "DEBUG: Added pattern deps variant for $key in included file (now have " . scalar(@{$pattern_deps{$key}}) . " variants)\n" if $ENV{SMAK_DEBUG};
                 } elsif ($type eq 'pseudo') {
                     if (exists $pseudo_deps{$key}) {
                         push @{$pseudo_deps{$key}}, @deps;
@@ -3648,29 +3650,49 @@ sub build_target {
             }
         }
     } elsif (exists $pattern_deps{$key}) {
-        @deps = @{$pattern_deps{$key} || []};
-        $rule = $pattern_rule{$key} || '';
+        # Exact pattern match - use first variant
+        my $rules_ref = $pattern_rule{$key};
+        my $deps_ref = $pattern_deps{$key};
+
+        # Handle both old single-rule format and new array format
+        my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
+        my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
+
+        # Use first variant for exact matches
+        @deps = @{$deps_list[0] || []};
+        $rule = $rules[0] || '';
     } elsif (exists $pseudo_deps{$key}) {
         @deps = @{$pseudo_deps{$key} || []};
         $rule = $pseudo_rule{$key} || '';
     } else {
         # Try to find pattern rule match
-        for my $pkey (keys %pattern_rule) {
+        PATTERN_MATCH_FALLBACK: for my $pkey (keys %pattern_rule) {
             if ($pkey =~ /^[^\t]+\t(.+)$/) {
                 my $pattern = $1;
                 my $pattern_re = $pattern;
                 $pattern_re =~ s/%/(.+)/g;
                 if ($target =~ /^$pattern_re$/) {
-                    @deps = @{$pattern_deps{$pkey} || []};
-                    $rule = $pattern_rule{$pkey} || '';
-                    # Expand % in dependencies
                     $stem = $1;  # Save stem for $* expansion
-                    @deps = map { s/%/$stem/g; $_ } @deps;
+
+                    # Pattern rules can have multiple variants
+                    my $rules_ref = $pattern_rule{$pkey};
+                    my $deps_ref = $pattern_deps{$pkey};
+
+                    # Handle both old single-rule format and new array format
+                    my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
+                    my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
+
+                    # Use first variant
+                    @deps = @{$deps_list[0] || []};
+                    $rule = $rules[0] || '';
+
+                    # Expand % in dependencies
+                    @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
                     # Resolve dependencies through vpath
                     use Cwd 'getcwd';
                     my $cwd = getcwd();
                     @deps = map { resolve_vpath($_, $cwd) } @deps;
-                    last;
+                    last PATTERN_MATCH_FALLBACK;
                 }
             }
         }
@@ -4190,29 +4212,49 @@ sub dry_run_target {
             }
         }
     } elsif (exists $pattern_deps{$key}) {
-        @deps = @{$pattern_deps{$key} || []};
-        $rule = $pattern_rule{$key} || '';
+        # Exact pattern match - use first variant
+        my $rules_ref = $pattern_rule{$key};
+        my $deps_ref = $pattern_deps{$key};
+
+        # Handle both old single-rule format and new array format
+        my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
+        my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
+
+        # Use first variant for exact matches
+        @deps = @{$deps_list[0] || []};
+        $rule = $rules[0] || '';
     } elsif (exists $pseudo_deps{$key}) {
         @deps = @{$pseudo_deps{$key} || []};
         $rule = $pseudo_rule{$key} || '';
     } else {
         # Try to find pattern rule match
-        for my $pkey (keys %pattern_rule) {
+        PATTERN_MATCH_FALLBACK: for my $pkey (keys %pattern_rule) {
             if ($pkey =~ /^[^\t]+\t(.+)$/) {
                 my $pattern = $1;
                 my $pattern_re = $pattern;
                 $pattern_re =~ s/%/(.+)/g;
                 if ($target =~ /^$pattern_re$/) {
-                    @deps = @{$pattern_deps{$pkey} || []};
-                    $rule = $pattern_rule{$pkey} || '';
-                    # Expand % in dependencies
                     $stem = $1;  # Save stem for $* expansion
-                    @deps = map { s/%/$stem/g; $_ } @deps;
+
+                    # Pattern rules can have multiple variants
+                    my $rules_ref = $pattern_rule{$pkey};
+                    my $deps_ref = $pattern_deps{$pkey};
+
+                    # Handle both old single-rule format and new array format
+                    my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
+                    my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
+
+                    # Use first variant
+                    @deps = @{$deps_list[0] || []};
+                    $rule = $rules[0] || '';
+
+                    # Expand % in dependencies
+                    @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
                     # Resolve dependencies through vpath
                     use Cwd 'getcwd';
                     my $cwd = getcwd();
                     @deps = map { resolve_vpath($_, $cwd) } @deps;
-                    last;
+                    last PATTERN_MATCH_FALLBACK;
                 }
             }
         }

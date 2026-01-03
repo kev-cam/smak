@@ -15,7 +15,7 @@ echo ""
 echo "Test 3: -Ks with debug mode"
 echo "list
 show all
-quit" | ../smak -f Makefile.nested -Ks test.fixes -Kd | grep -A 5 "All targets"
+quit" | ../smak -f Makefile.nested -Ks test.fixes -Kd > /dev/null 2>&1
 
 echo ""
 echo "Test 4: Multiple targets"

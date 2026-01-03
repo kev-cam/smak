@@ -101,10 +101,13 @@ our %EXPORT_TAGS = (
 # Separate hashes for different rule types
 our %fixed_rule;
 our %fixed_deps;
+our %fixed_order_only;  # Order-only prerequisites (after |) - don't affect rebuild timestamp checking
 our %pattern_rule;
 our %pattern_deps;
+our %pattern_order_only;  # Order-only prerequisites for pattern rules
 our %pseudo_rule;
 our %pseudo_deps;
+our %pseudo_order_only;  # Order-only prerequisites for pseudo rules
 
 # Suffix rules
 our @suffixes;  # List of suffixes from .SUFFIXES directive
@@ -1513,8 +1516,22 @@ sub parse_makefile {
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X} in dependencies
             $deps_str = transform_make_vars($deps_str);
 
-            my @deps = split /\s+/, $deps_str;
+            # Handle order-only prerequisites (after |)
+            # Syntax: target: normal-prereqs | order-only-prereqs
+            my @deps;
+            my @order_only_deps;
+            if ($deps_str =~ /^(.*?)\s*\|\s*(.*)$/) {
+                # Has order-only prerequisites
+                my $normal_deps_str = $1;
+                my $order_only_str = $2;
+                @deps = split /\s+/, $normal_deps_str;
+                @order_only_deps = split /\s+/, $order_only_str;
+            } else {
+                # No order-only prerequisites
+                @deps = split /\s+/, $deps_str;
+            }
             @deps = grep { $_ ne '' } @deps;
+            @order_only_deps = grep { $_ ne '' } @order_only_deps;
 
             # Handle multiple targets (e.g., "target1 target2: deps")
             # Make creates the same rule for each target
@@ -1610,6 +1627,14 @@ sub parse_makefile {
                     } else {
                         $fixed_deps{$key} = \@deps;
                     }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $fixed_order_only{$key}) {
+                            push @{$fixed_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $fixed_order_only{$key} = \@order_only_deps;
+                        }
+                    }
                 } elsif ($type eq 'pattern') {
                     # Append dependencies if target already exists (like gmake)
                     if (exists $pattern_deps{$key}) {
@@ -1617,12 +1642,28 @@ sub parse_makefile {
                     } else {
                         $pattern_deps{$key} = \@deps;
                     }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $pattern_order_only{$key}) {
+                            push @{$pattern_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $pattern_order_only{$key} = \@order_only_deps;
+                        }
+                    }
                 } elsif ($type eq 'pseudo') {
                     # Append dependencies if target already exists (like gmake)
                     if (exists $pseudo_deps{$key}) {
                         push @{$pseudo_deps{$key}}, @deps;
                     } else {
                         $pseudo_deps{$key} = \@deps;
+                    }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $pseudo_order_only{$key}) {
+                            push @{$pseudo_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $pseudo_order_only{$key} = \@order_only_deps;
+                        }
                     }
                 }
 
@@ -1853,8 +1894,21 @@ sub parse_included_makefile {
             $deps_str =~ s/^\s+|\s+$//g;
             $deps_str = transform_make_vars($deps_str);
 
-            my @deps = split /\s+/, $deps_str;
+            # Handle order-only prerequisites (after |)
+            my @deps;
+            my @order_only_deps;
+            if ($deps_str =~ /^(.*?)\s*\|\s*(.*)$/) {
+                # Has order-only prerequisites
+                my $normal_deps_str = $1;
+                my $order_only_str = $2;
+                @deps = split /\s+/, $normal_deps_str;
+                @order_only_deps = split /\s+/, $order_only_str;
+            } else {
+                # No order-only prerequisites
+                @deps = split /\s+/, $deps_str;
+            }
             @deps = grep { $_ ne '' } @deps;
+            @order_only_deps = grep { $_ ne '' } @order_only_deps;
 
             # Handle multiple targets
             my @targets = split /\s+/, $targets_str;
@@ -1910,17 +1964,41 @@ sub parse_included_makefile {
                     } else {
                         $fixed_deps{$key} = \@deps;
                     }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $fixed_order_only{$key}) {
+                            push @{$fixed_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $fixed_order_only{$key} = \@order_only_deps;
+                        }
+                    }
                 } elsif ($type eq 'pattern') {
                     if (exists $pattern_deps{$key}) {
                         push @{$pattern_deps{$key}}, @deps;
                     } else {
                         $pattern_deps{$key} = \@deps;
                     }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $pattern_order_only{$key}) {
+                            push @{$pattern_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $pattern_order_only{$key} = \@order_only_deps;
+                        }
+                    }
                 } elsif ($type eq 'pseudo') {
                     if (exists $pseudo_deps{$key}) {
                         push @{$pseudo_deps{$key}}, @deps;
                     } else {
                         $pseudo_deps{$key} = \@deps;
+                    }
+                    # Store order-only prerequisites
+                    if (@order_only_deps) {
+                        if (exists $pseudo_order_only{$key}) {
+                            push @{$pseudo_order_only{$key}}, @order_only_deps;
+                        } else {
+                            $pseudo_order_only{$key} = \@order_only_deps;
+                        }
                     }
                 }
             }
@@ -3180,8 +3258,10 @@ sub build_target {
 
     # Find target in fixed, pattern, or pseudo rules
     my $matched_key = $find_rule_key->(\%fixed_deps, $key);
+    my @order_only_prereqs;  # Order-only prerequisites (checked for existence but not timestamps)
     if ($matched_key) {
         @deps = @{$fixed_deps{$matched_key} || []};
+        @order_only_prereqs = @{$fixed_order_only{$matched_key} || []};
         $rule = $fixed_rule{$matched_key} || '';
         warn "DEBUG[" . __LINE__ . "]: Matched fixed rule key='$matched_key' for target='$target'\n" if $ENV{SMAK_DEBUG};
 
@@ -3388,10 +3468,29 @@ sub build_target {
     # Flatten and filter empty strings
     @deps = grep { $_ ne '' } @deps;
 
+    # Process order-only prerequisites the same way as normal dependencies
+    @order_only_prereqs = map {
+        my $dep = $_;
+        # Expand $MV{VAR} references
+        while ($dep =~ /\$MV\{([^}]+)\}/) {
+            my $var = $1;
+            my $val = $MV{$var} // '';
+            $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+        }
+        # If expansion resulted in multiple space-separated values, split them
+        if ($dep =~ /\s/) {
+            split /\s+/, $dep;
+        } else {
+            $dep;
+        }
+    } @order_only_prereqs;
+    @order_only_prereqs = grep { $_ ne '' } @order_only_prereqs;
+
     # Apply vpath resolution to all dependencies
     use Cwd 'getcwd';
     my $cwd = getcwd();
     @deps = map { resolve_vpath($_, $cwd) } @deps;
+    @order_only_prereqs = map { resolve_vpath($_, $cwd) } @order_only_prereqs;
 
     # Filter out dependencies in ignored directories
     # Keep them separate for sanity checks and reporting
@@ -3511,6 +3610,18 @@ sub build_target {
         warn "DEBUG[" . __LINE__ . "]:   Target needs rebuilding\n" if $ENV{SMAK_DEBUG};
         # Track this target as stale (needs rebuilding)
         $stale_targets_cache{$target} = time();
+    }
+
+    # Recursively build order-only prerequisites first (they must exist before normal prerequisites)
+    # Order-only prerequisites don't affect timestamp checking, but must be built before the target
+    unless ($job_server_socket) {
+        if (@order_only_prereqs) {
+            warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@order_only_prereqs) . " order-only prerequisites...\n" if $ENV{SMAK_DEBUG};
+            for my $prereq (@order_only_prereqs) {
+                warn "DEBUG[" . __LINE__ . "]:     Building order-only prerequisite: $prereq\n" if $ENV{SMAK_DEBUG};
+                build_target($prereq, $visited, $depth + 1);
+            }
+        }
     }
 
     # Recursively build dependencies

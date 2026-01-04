@@ -37,8 +37,8 @@ if [ ${PATH/:*/} != "$PWD" ] ; then
 fi
 
 # Pass the invocation name to smak.pl via environment variable
-# Use basename so $(MAKE) is set to "smak" not the full path
-export SMAK_INVOKED_AS="$0"
+# Use absolute path so $(MAKE) can be reliably detected in recursive builds
+export SMAK_INVOKED_AS="$SCRIPT_DIR/$script"
 
 # Set launcher path for bug reports
 export SMAK_LAUNCHER="$SCRIPT_DIR/$script"

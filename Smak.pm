@@ -1110,6 +1110,33 @@ sub expand_vars {
                     # Concatenate all results (standard foreach behavior)
                     $replacement = join('', @results);
                 }
+            } elsif ($func eq 'realpath') {
+                # $(realpath names...)
+                if (@args >= 1) {
+                    use Cwd 'abs_path';
+                    my @paths = split /\s+/, $args[0];
+                    my @resolved;
+                    for my $path (@paths) {
+                        next if $path eq '';
+                        # abs_path returns undef if path doesn't exist
+                        my $resolved = abs_path($path);
+                        push @resolved, $resolved if defined $resolved;
+                    }
+                    $replacement = join(' ', @resolved);
+                }
+            } elsif ($func eq 'abspath') {
+                # $(abspath names...)
+                if (@args >= 1) {
+                    use Cwd 'abs_path';
+                    my @paths = split /\s+/, $args[0];
+                    my @resolved;
+                    for my $path (@paths) {
+                        next if $path eq '';
+                        my $resolved = abs_path($path) // $path;  # Fall back to original if doesn't exist
+                        push @resolved, $resolved;
+                    }
+                    $replacement = join(' ', @resolved);
+                }
             } else {
                 # Unknown function, leave as-is
                 $replacement = "\$($content)";
@@ -1618,8 +1645,17 @@ sub parse_makefile {
                 } else {
                     $MV{$var} = $value;
                 }
+            } elsif ($op eq ':=') {
+                # := is immediate assignment - expand variables before storing
+                # Convert $MV{...} back to $(...)  for full expansion
+                my $make_syntax = format_output($value);
+                # Expand all variables and functions
+                my $expanded = expand_vars($make_syntax);
+                # Transform back to internal format
+                $expanded = transform_make_vars($expanded);
+                $MV{$var} = $expanded;
             } else {
-                # := ? or = operators all do simple assignment
+                # = and ?= operators do lazy assignment (no expansion)
                 $MV{$var} = $value;
             }
 
@@ -1982,8 +2018,8 @@ sub parse_included_makefile {
 
         # Handle conditional directives (same as in parse_makefile)
         if ($line =~ /^\s*ifeq\s+(.+)$/ || $line =~ /^\s*ifneq\s+(.+)$/) {
+            my $args = $1;  # Capture $1 BEFORE doing another regex match
             my $is_ifeq = ($line =~ /ifeq/);
-            my $args = $1;
             my $result = 0;
 
             if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
@@ -2012,8 +2048,8 @@ sub parse_included_makefile {
             next;
         }
         elsif ($line =~ /^\s*ifdef\s+(\S+)$/ || $line =~ /^\s*ifndef\s+(\S+)$/) {
+            my $var = $1;  # Capture $1 BEFORE doing another regex match
             my $is_ifdef = ($line =~ /ifdef/);
-            my $var = $1;
             my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
             $result = !$result if !$is_ifdef;
             warn "DEBUG(include): $line => $var defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
@@ -2130,8 +2166,17 @@ sub parse_included_makefile {
                 } else {
                     $MV{$var} = $value;
                 }
+            } elsif ($op eq ':=') {
+                # := is immediate assignment - expand variables before storing
+                # Convert $MV{...} back to $(...)  for full expansion
+                my $make_syntax = format_output($value);
+                # Expand all variables and functions
+                my $expanded = expand_vars($make_syntax);
+                # Transform back to internal format
+                $expanded = transform_make_vars($expanded);
+                $MV{$var} = $expanded;
             } else {
-                # := ? or = operators all do simple assignment
+                # = and ?= operators do lazy assignment (no expansion)
                 $MV{$var} = $value;
             }
             next;

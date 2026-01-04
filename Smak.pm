@@ -3694,6 +3694,11 @@ sub build_target {
                 }
             }
         }
+
+        # For explicit rules, compute $* from target name if not already set by pattern/suffix rule
+        if (!$stem && $target =~ /^(.+)\.([^.\/]+)$/) {
+            $stem = $1;  # Target name without suffix (e.g., "main" from "main.o")
+        }
     } elsif (exists $pattern_deps{$key}) {
         # Exact pattern match - check all variants and use the one whose source exists
         my $rules_ref = $pattern_rule{$key};
@@ -4321,6 +4326,11 @@ sub dry_run_target {
                     }
                 }
             }
+        }
+
+        # For explicit rules, compute $* from target name if not already set by pattern rule
+        if (!$stem && $target =~ /^(.+)\.([^.\/]+)$/) {
+            $stem = $1;  # Target name without suffix (e.g., "main" from "main.o")
         }
     } elsif (exists $pattern_deps{$key}) {
         # Exact pattern match - check all variants and use the one whose source exists

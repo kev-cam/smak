@@ -144,6 +144,58 @@ done
 # Export extra args for test scripts to use
 export SMAK_EXTRA_ARGS
 
+# Monitor a process and kill it if log file stops growing or gets too large
+# Usage: monitor_process PID LOG_FILE MAX_IDLE_SECONDS MAX_LOG_SIZE_MB
+monitor_process() {
+    local pid=$1
+    local log_file=$2
+    local max_idle=${3:-30}        # Default 30 seconds of no activity
+    local max_size_mb=${4:-100}    # Default 100MB max log size
+    local max_size=$((max_size_mb * 1024 * 1024))
+
+    local last_size=0
+    local idle_time=0
+    local check_interval=2  # Check every 2 seconds
+
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep "$check_interval"
+
+        if [ -f "$log_file" ]; then
+            local current_size=$(stat -f%z "$log_file" 2>/dev/null || stat -c%s "$log_file" 2>/dev/null || echo 0)
+
+            # Check if log is too large
+            if [ "$current_size" -gt "$max_size" ]; then
+                echo "WARNING: Log file $log_file exceeded ${max_size_mb}MB, killing test (PID $pid)" >&2
+                kill -TERM "$pid" 2>/dev/null
+                sleep 1
+                kill -KILL "$pid" 2>/dev/null
+                return 124  # Same exit code as timeout
+            fi
+
+            # Check if log file is growing
+            if [ "$current_size" -gt "$last_size" ]; then
+                # Log is growing, reset idle timer
+                last_size=$current_size
+                idle_time=0
+            else
+                # Log hasn't grown
+                idle_time=$((idle_time + check_interval))
+                if [ "$idle_time" -ge "$max_idle" ]; then
+                    echo "WARNING: Log file $log_file idle for ${max_idle}s, killing test (PID $pid)" >&2
+                    kill -TERM "$pid" 2>/dev/null
+                    sleep 1
+                    kill -KILL "$pid" 2>/dev/null
+                    return 124  # Same exit code as timeout
+                fi
+            fi
+        fi
+    done
+
+    # Process finished naturally
+    wait "$pid"
+    return $?
+}
+
 # Handle clone mode
 if [ -n "$CLONE_MODE" ]; then
     # Generate tag from current timestamp
@@ -377,11 +429,11 @@ exec ../smak $smak_args $mode_jobs $SMAK_EXTRA_ARGS -Kd
 WRAPPER_EOF
             chmod +x "$wrapper_script"
 
-            # Run with script automation using run-with-script.pl (with timeout)
-            timeout 30 env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$script_file" "$wrapper_script" >"$output_file" 2>&1 &
+            # Run with script automation using run-with-script.pl (monitor log instead of timeout)
+            env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$script_file" "$wrapper_script" >"$output_file" 2>&1 &
 
             local pid=$!
-            wait $pid
+            monitor_process "$pid" "$output_file" 30 100
             local result=$?
             rm -f "$wrapper_script"
             return $result
@@ -391,23 +443,23 @@ WRAPPER_EOF
             if [ -n "$mode_jobs" ]; then
                 return 0  # Skip parallel in TTY mode
             fi
-            timeout 60 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 &
+            env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 &
             local pid=$!
-            wait $pid
+            monitor_process "$pid" "$output_file" 60 100
             return $?
 
         else
-            # Default: non-interactive tests, redirect stdin (with timeout)
+            # Default: non-interactive tests, redirect stdin (monitor log instead of timeout)
             # For parallel mode, modify the test script invocation
             if [ -n "$mode_jobs" ] || [ -n "$SMAK_EXTRA_ARGS" ]; then
                 # Inject -j4 and extra args into smak invocation (handles both $SMAK variable and literal 'smak')
                 local inject_args="$mode_jobs $SMAK_EXTRA_ARGS"
-                timeout 30 env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
+                env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
             else
-                timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
+                env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
             fi
             local pid=$!
-            wait $pid
+            monitor_process "$pid" "$output_file" 30 100
             return $?
         fi
     }
@@ -452,17 +504,17 @@ cd "$SCRIPT_DIR"
 exec ../smak $smak_args $mode_jobs $SMAK_EXTRA_ARGS -Kd
 WRAPPER_EOF
             chmod +x "$wrapper_script"
-            timeout 30 env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$fail_script_file" "$wrapper_script" >"$fail_out" 2>&1 &
+            env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$fail_script_file" "$wrapper_script" >"$fail_out" 2>&1 &
             local pid=$!
-            wait $pid
+            monitor_process "$pid" "$fail_out" 30 100
             local result=$?
             rm -f "$wrapper_script"
             return $result
         else
             # Run fail test directly
-            timeout 30 env SMAK_CACHE_DIR=$mode_cache ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null &
+            env SMAK_CACHE_DIR=$mode_cache ./"$(basename "$fail_test")" >"$fail_out" 2>&1 < /dev/null &
             local pid=$!
-            wait $pid
+            monitor_process "$pid" "$fail_out" 30 100
             return $?
         fi
     }

@@ -68,6 +68,7 @@ our @EXPORT_OK = qw(
     set_dry_run_mode
     set_silent_mode
     set_jobs
+    set_max_retries
     start_job_server
     stop_job_server
     tee_print
@@ -254,6 +255,7 @@ our $rebuild_missing_intermediates = $ENV{SMAK_REBUILD_INTERMEDIATES} // 1;  # D
 
 # Job server state
 our $jobs = 1;  # Number of parallel jobs
+our $max_retries = 1;  # Maximum retry count for failed jobs
 our $ssh_host = '';  # SSH host for remote workers
 our $remote_cd = '';  # Remote directory for SSH workers
 our $job_server_socket;  # Socket to job-master
@@ -282,6 +284,11 @@ sub set_silent_mode {
 sub set_jobs {
     my ($num_jobs) = @_;
     $jobs = $num_jobs;
+}
+
+sub set_max_retries {
+    my ($num_retries) = @_;
+    $max_retries = $num_retries;
 }
 
 sub start_job_server {
@@ -7799,6 +7806,7 @@ sub run_job_master {
     our %failed_targets;  # target => exit_code (failed targets)
     our %pending_composite;  # composite targets waiting for dependencies
                             # target => {deps => [list], master_socket => socket}
+    our %currently_dispatched;  # target => task_id (防 duplicate dispatch tracking)
     our $next_task_id = 1;
     # Auto-rescan: Enable by default when FUSE is NOT detected
     # When FUSE is present, it provides file change notifications
@@ -8088,8 +8096,15 @@ sub run_job_master {
             $rule = $fixed_rule{$key} || '';
             $has_fixed_deps = 1;
         } elsif (exists $pattern_deps{$key}) {
-            @deps = @{$pattern_deps{$key} || []};
-            $rule = $pattern_rule{$key} || '';
+            my $deps_ref = $pattern_deps{$key} || [];
+            my $rule_ref = $pattern_rule{$key} || '';
+            # Handle both single variant and multiple variants
+            # For deps: if first element is an array, we have multiple variants, use first
+            @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
+                    @{$deps_ref->[0]} :
+                    (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
+            # For rule: if it's an array, use first variant
+            $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
         } elsif (exists $pseudo_deps{$key}) {
             @deps = @{$pseudo_deps{$key} || []};
             $rule = $pseudo_rule{$key} || '';
@@ -8108,7 +8123,9 @@ sub run_job_master {
                     $pattern_re =~ s/%/(.+)/g;
                     if ($target =~ /^$pattern_re$/) {
                         # Found matching pattern rule - use its rule, keep fixed deps
-                        $rule = $pattern_rule{$pkey} || '';
+                        my $rule_ref = $pattern_rule{$pkey} || '';
+                        # Handle both single rule (string) and multiple variants (array)
+                        $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
                         $stem = $1;  # Save stem for $* expansion
                         $matched_pattern_key = $pkey;  # Save for multi-output detection
                         print STDERR "Found pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
@@ -8126,8 +8143,15 @@ sub run_job_master {
                     my $pattern_re = $pattern;
                     $pattern_re =~ s/%/(.+)/g;
                     if ($target =~ /^$pattern_re$/) {
-                        @deps = @{$pattern_deps{$pkey} || []};
-                        $rule = $pattern_rule{$pkey} || '';
+                        my $deps_ref = $pattern_deps{$pkey} || [];
+                        my $rule_ref = $pattern_rule{$pkey} || '';
+                        # Handle both single variant and multiple variants
+                        # For deps: if first element is an array, we have multiple variants, use first
+                        @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
+                                @{$deps_ref->[0]} :
+                                (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
+                        # For rule: if it's an array, use first variant
+                        $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
                         # Expand % in dependencies
                         $stem = $1;  # Save stem for $* expansion
                         $matched_pattern_key = $pkey;  # Save for multi-output detection
@@ -8594,7 +8618,11 @@ sub run_job_master {
         if (exists $fixed_deps{$key}) {
             @deps = @{$fixed_deps{$key}};
         } elsif (exists $pattern_deps{$key}) {
-            @deps = @{$pattern_deps{$key}};
+            my $deps_ref = $pattern_deps{$key};
+            # Handle both single variant and multiple variants
+            @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
+                    @{$deps_ref->[0]} :
+                    (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
         } elsif (exists $pseudo_deps{$key}) {
             @deps = @{$pseudo_deps{$key}};
         }
@@ -8607,7 +8635,11 @@ sub run_job_master {
                     my $pattern_re = $pattern;
                     $pattern_re =~ s/%/(.+)/g;
                     if ($target =~ /^$pattern_re$/) {
-                        @deps = @{$pattern_deps{$pkey} || []};
+                        my $deps_ref = $pattern_deps{$pkey} || [];
+                        # Handle both single variant and multiple variants
+                        @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
+                                @{$deps_ref->[0]} :
+                                (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
                         # Expand % in dependencies using the stem
                         $stem = $1;
                         @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
@@ -8681,6 +8713,10 @@ sub run_job_master {
 		last; # No workers available
 	    }
 
+            # CRITICAL: Mark worker as not ready IMMEDIATELY to prevent race conditions
+            # If we don't find a suitable job, we'll mark it ready again below
+            $worker_status{$ready_worker}{ready} = 0;
+
             # Find next job whose dependencies are all satisfied
             my $job_index = -1;
             for my $i (0 .. $#job_queue) {
@@ -8719,7 +8755,11 @@ sub run_job_master {
                 if (exists $fixed_deps{$key}) {
                     @deps = @{$fixed_deps{$key} || []};
                 } elsif (exists $pattern_deps{$key}) {
-                    @deps = @{$pattern_deps{$key} || []};
+                    my $deps_ref = $pattern_deps{$key} || [];
+                    # Handle both single variant and multiple variants
+                    @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
+                            @{$deps_ref->[0]} :
+                            (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
                 } elsif (exists $pseudo_deps{$key}) {
                     @deps = @{$pseudo_deps{$key} || []};
                 }
@@ -8732,7 +8772,11 @@ sub run_job_master {
                             my $pattern_re = $pattern;
                             $pattern_re =~ s/%/(.+)/g;
                             if ($target =~ /^$pattern_re$/) {
-                                @deps = @{$pattern_deps{$pkey} || []};
+                                my $deps_ref = $pattern_deps{$pkey} || [];
+                                # Handle both single variant and multiple variants
+                                @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
+                                        @{$deps_ref->[0]} :
+                                        (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
                                 # Expand % in dependencies using the stem
                                 $stem = $1;
                                 @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
@@ -8936,6 +8980,8 @@ sub run_job_master {
 
             # No job with satisfied dependencies found
             if ($job_index < 0) {
+                # Restore worker to ready state since we didn't use it
+                $worker_status{$ready_worker}{ready} = 1;
                 if ($ENV{SMAK_DEBUG}) {
                     print STDERR "No jobs with satisfied dependencies (stuck!)\n";
                     print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
@@ -8949,11 +8995,60 @@ sub run_job_master {
                 last;
             }
 
-            # Dispatch the job
-            my $job = splice(@job_queue, $job_index, 1);
-            my $task_id = $next_task_id++;
+            # Double-check that the job isn't already being dispatched
+            # (race condition prevention)
+            my $job = $job_queue[$job_index];
+            if (exists $in_progress{$job->{target}}) {
+                my $status = $in_progress{$job->{target}};
+                # Skip if actually building (has a worker reference or GLOB)
+                # Don't skip if status is "queued", "pending", "done", or "failed"
+                my $is_building = ref($status) || $status =~ /^GLOB\(/;
+                if ($is_building) {
+                    # Job is already being built - skip it
+                    print STDERR "RACE CONDITION PREVENTED: Job '$job->{target}' already in progress (status: $status), skipping duplicate dispatch\n" if $ENV{SMAK_DEBUG};
+                    splice(@job_queue, $job_index, 1);  # Remove duplicate from queue
+                    next;  # Try next job
+                }
+            }
 
-            $worker_status{$ready_worker}{ready} = 0;
+            # Dispatch the job
+            # CRITICAL: Get target BEFORE removing from queue to minimize race window
+            my $peek_job = $job_queue[$job_index];
+            my $target = $peek_job->{target};
+
+            # ASSERTION: Never dispatch a target that's already completed
+            assert_or_die(
+                !exists $completed_targets{$target},
+                "Attempting to dispatch '$target' but it's already in completed_targets"
+            );
+
+            # ASSERTION: Check for duplicate dispatch BEFORE incrementing task_id
+            if (exists $currently_dispatched{$target}) {
+                my $existing_task = $currently_dispatched{$target};
+                print STDERR "DEBUG: DUPLICATE DISPATCH DETECTED! Target '$target' already dispatched as task $existing_task\n";
+                assert_or_die(0, "Attempting to dispatch '$target' but it's already dispatched as task $existing_task");
+            }
+
+            # Mark as dispatched IMMEDIATELY (before removing from queue) to prevent race
+            my $task_id = $next_task_id++;
+            $currently_dispatched{$target} = $task_id;
+            print STDERR "DEBUG: Dispatched '$target' as task $task_id\n" if $ENV{SMAK_DEBUG};
+
+            # Now safe to remove from queue
+            $job = splice(@job_queue, $job_index, 1);
+
+            # Mark as in_progress IMMEDIATELY to prevent race conditions
+            # Do this BEFORE sending to worker to ensure no duplicate dispatch
+            $in_progress{$job->{target}} = $ready_worker;
+
+            # Worker was already marked not ready at the top of the loop (line 8718)
+            # ASSERTION: Check that no other worker has this task_id
+            for my $w (@workers) {
+                if ($w ne $ready_worker && exists $worker_status{$w}{task_id} && $worker_status{$w}{task_id} == $task_id) {
+                    assert_or_die(0, "Worker collision! Task $task_id assigned to multiple workers");
+                }
+            }
+            # Just set the task_id
             $worker_status{$ready_worker}{task_id} = $task_id;
 
             $running_jobs{$task_id} = {
@@ -8964,10 +9059,8 @@ sub run_job_master {
                 started => 0,
                 output => [],  # Capture output for error analysis
             };
-	    
-	    $j++;
 
-	    $in_progress{$job->{target}} = $ready_worker;
+	    $j++;
 	    
             # Send task to worker
             print $ready_worker "TASK $task_id\n";
@@ -9047,9 +9140,8 @@ sub run_job_master {
 
                     # Process the message inline (same logic as main event loop)
                     if ($line eq 'READY') {
-                        $worker_status{$worker}{ready} |= 2;
-                        vprint "Worker ready
-";
+                        $worker_status{$worker}{ready} = 1;
+                        vprint "Worker ready\n";
                         dispatch_jobs();
 
                     } elsif ($line =~ /^TASK_START (\d+)$/) {
@@ -9120,6 +9212,72 @@ sub run_job_master {
 
                         # Handle successful completion
                         if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
+                            # ASSERTION: Verify successful job produced a valid target
+                            # Only run expensive checks when debugging enabled (to avoid performance impact)
+                            if (ASSERTIONS_ENABLED && $ENV{SMAK_DEBUG}) {
+                                my $target = $job->{target};
+
+                                # Check if this is a phony target by searching all pseudo_rule keys
+                                my $is_phony_target = 0;
+                                for my $key (keys %pseudo_rule) {
+                                    if ($key =~ /\t\Q$target\E$/) {
+                                        $is_phony_target = 1;
+                                        last;
+                                    }
+                                }
+
+                                if (!$is_phony_target) {
+                                    # Target file must exist
+                                    my $target_path = $target =~ m{^/} ? $target : "$job->{dir}/$target";
+                                    if (!-e $target_path) {
+                                        assert_or_die(0, "Target '$target' marked as successfully built but file does not exist at '$target_path'");
+                                    }
+
+                                    # Get all dependencies for this target (excluding order-only deps)
+                                    # Since we don't have makefile in job hash, search all keys that end with this target
+                                    my @deps;
+
+                                    # Check fixed deps - search all keys
+                                    for my $key (keys %fixed_deps) {
+                                        if ($key =~ /\t\Q$target\E$/) {
+                                            my $deps_ref = $fixed_deps{$key};
+                                            if (ref($deps_ref) eq 'ARRAY') {
+                                                push @deps, @$deps_ref;
+                                            } else {
+                                                push @deps, split /\s+/, $deps_ref;
+                                            }
+                                        }
+                                    }
+
+                                    # Check pseudo deps - search all keys
+                                    for my $key (keys %pseudo_deps) {
+                                        if ($key =~ /\t\Q$target\E$/) {
+                                            my $deps_ref = $pseudo_deps{$key};
+                                            if (ref($deps_ref) eq 'ARRAY') {
+                                                push @deps, @$deps_ref;
+                                            } else {
+                                                push @deps, split /\s+/, $deps_ref;
+                                            }
+                                        }
+                                    }
+
+                                    # Verify target is newer than all dependencies
+                                    my $target_mtime = (stat($target_path))[9];
+                                    for my $dep (@deps) {
+                                        next if $dep eq '';  # Skip empty deps
+                                        my $dep_path = $dep =~ m{^/} ? $dep : "$job->{dir}/$dep";
+                                        if (-e $dep_path) {
+                                            my $dep_mtime = (stat($dep_path))[9];
+                                            if ($target_mtime < $dep_mtime) {
+                                                assert_or_die(0,
+                                                    "Target '$target' (mtime=$target_mtime) is older than dependency '$dep' (mtime=$dep_mtime) after successful build"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             # Clear from stale cache after successful build
                             if (exists $stale_targets_cache{$job->{target}}) {
                                 delete $stale_targets_cache{$job->{target}};
@@ -9150,7 +9308,7 @@ sub run_job_master {
                             print STDERR "DEBUG: Auto-retry patterns: " . join(", ", @auto_retry_patterns) . "\n";
 
                             my $retry_count = $retry_counts{$job->{target}} || 0;
-                            if ($job->{target} && $retry_count < 1) {  # Max 1 retry
+                            if ($job->{target} && $retry_count < $max_retries) {  # Check against max_retries
                                 # Analyze captured output for retryable errors
                                 my @output = $job->{output} ? @{$job->{output}} : ();
                                 print STDERR "DEBUG: Captured output has " . scalar(@output) . " lines\n";
@@ -9199,6 +9357,60 @@ sub run_job_master {
 
                                         last if $should_retry;  # Found a retryable error
                                     }
+
+                                    # Check for linker "cannot find" errors (e.g., "ld: cannot find parse.o")
+                                    if (!$should_retry && $clean_line =~ /(?:ld|collect2|link).*:\s*cannot find\s+(.+?)(?:\s*:|$)/i) {
+                                        my $missing_file = $1;
+                                        $missing_file =~ s/^\s+|\s+$//g;  # Trim whitespace
+                                        $missing_file =~ s/^-l//;  # Remove -l prefix if it's a library
+
+                                        print STDERR "Auto-retry: detected linker missing file '$missing_file' for target '$job->{target}'\n" if $ENV{SMAK_DEBUG};
+
+                                        # Try to unblock the missing file if it's stuck in queue
+                                        # Clear it from failed state and in_progress so it can be retried
+                                        my $was_blocked = 0;
+                                        if (exists $failed_targets{$missing_file}) {
+                                            print STDERR "Auto-retry: clearing failed state for '$missing_file' to allow rebuild\n" if $ENV{SMAK_DEBUG};
+                                            delete $failed_targets{$missing_file};
+                                            $was_blocked = 1;
+                                        }
+                                        if (exists $in_progress{$missing_file}) {
+                                            print STDERR "Auto-retry: clearing in_progress state for '$missing_file' (was: $in_progress{$missing_file})\n" if $ENV{SMAK_DEBUG};
+                                            delete $in_progress{$missing_file};
+                                            $was_blocked = 1;
+                                        }
+
+                                        # Also check if the source file (.cc for .o) is stuck
+                                        if ($missing_file =~ /^(.+)\.o$/) {
+                                            my $base = $1;
+                                            for my $ext ('.cc', '.cpp', '.c', '.C') {
+                                                my $source = "$base$ext";
+                                                if (exists $in_progress{$source}) {
+                                                    print STDERR "Auto-retry: clearing in_progress state for source '$source' (was: $in_progress{$source})\n" if $ENV{SMAK_DEBUG};
+                                                    delete $in_progress{$source};
+                                                    $was_blocked = 1;
+                                                }
+                                                if (exists $failed_targets{$source}) {
+                                                    print STDERR "Auto-retry: clearing failed state for source '$source'\n" if $ENV{SMAK_DEBUG};
+                                                    delete $failed_targets{$source};
+                                                    $was_blocked = 1;
+                                                }
+                                            }
+                                        }
+
+                                        # Don't dispatch immediately - this can cause race conditions
+                                        # Instead, mark that we need to build this dependency after all jobs complete
+                                        if ($was_blocked) {
+                                            print STDERR "Auto-retry: unblocked '$missing_file', will build after current jobs complete\n" if $ENV{SMAK_DEBUG};
+                                        }
+
+                                        # Retry for linker errors - likely a parallel build race condition
+                                        # The missing file might be queued or building in another worker
+                                        $should_retry = 1;
+                                        $retry_reason = "linker missing file '$missing_file' (likely parallel build race)";
+                                        print STDERR "Auto-retry: will retry because $retry_reason\n" if $ENV{SMAK_DEBUG};
+                                        last;
+                                    }
                                 }
 
                                 # If no intelligent retry detected, fall back to target pattern matching
@@ -9227,16 +9439,29 @@ sub run_job_master {
                                 delete $failed_targets{$job->{target}};
                                 delete $in_progress{$job->{target}};
 
-                                # Re-queue the target
-                                push @job_queue, {
-                                    target => $job->{target},
-                                    dir => $job->{dir},
-                                    command => $job->{command},
-                                    silent => $job->{silent} || 0,
-                                };
+                                # Check if target is already queued to prevent duplicates
+                                my $already_queued = 0;
+                                for my $queued_job (@job_queue) {
+                                    if ($queued_job->{target} eq $job->{target}) {
+                                        $already_queued = 1;
+                                        print STDERR "Auto-retry: target '$job->{target}' already in queue, skipping duplicate\n" if $ENV{SMAK_DEBUG};
+                                        last;
+                                    }
+                                }
 
-                                # Try to dispatch immediately
-                                dispatch_jobs();
+                                # Re-queue the target only if not already queued
+                                if (!$already_queued) {
+                                    push @job_queue, {
+                                        target => $job->{target},
+                                        dir => $job->{dir},
+                                        command => $job->{command},
+                                        silent => $job->{silent} || 0,
+                                    };
+                                    print STDERR "Auto-retry: re-queued '$job->{target}' for retry (will dispatch when dependencies ready)\n" if $ENV{SMAK_DEBUG};
+                                }
+
+                                # Don't dispatch immediately - let dependencies build first
+                                # The normal job dispatch cycle will handle it when dependencies are ready
                             } else {
                                 # No retry - mark as failed
                                 if ($job->{target}) {
@@ -9263,6 +9488,9 @@ sub run_job_master {
 
                         print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n" if $master_socket;
 
+                        # Clean up dispatch tracking
+                        delete $currently_dispatched{$job->{target}} if exists $currently_dispatched{$job->{target}};
+
                     } elsif ($line =~ /^OUTPUT (.*)$/) {
                         print $master_socket "OUTPUT $1\n" if $master_socket;
                     } elsif ($line =~ /^ERROR (.*)$/) {
@@ -9272,6 +9500,18 @@ sub run_job_master {
                     }
                 }
                 $worker->blocking(1);
+            }
+
+            # Dispatch any queued jobs to newly freed workers before deadlock check
+            # (pending messages may have completed jobs and freed workers)
+            if (@job_queue > 0) {
+                my $ready_workers = 0;
+                for my $w (@workers) {
+                    $ready_workers++ if $worker_status{$w}{ready};
+                }
+                if ($ready_workers > 0) {
+                    dispatch_jobs();
+                }
             }
 
 	    check_queue_state("intermittent check");
@@ -10315,7 +10555,7 @@ sub run_job_master {
 
                 if ($line eq 'READY') {
                     # Worker is ready for a job
-                    $worker_status{$socket}{ready} |= 2;
+                    $worker_status{$socket}{ready} = 1;
                     vprint "Worker ready\n";
                     # Try to dispatch queued jobs
                     dispatch_jobs();
@@ -10344,15 +10584,17 @@ sub run_job_master {
 
                 } elsif ($line =~ /^ERROR (.*)$/) {
                     my $error = $1;
+                    my $task_id = $worker_status{$socket}{task_id} || 'NONE';
                     # Capture error for the task running on this worker
                     if (exists $worker_status{$socket}{task_id}) {
-                        my $task_id = $worker_status{$socket}{task_id};
-                        if (exists $running_jobs{$task_id}) {
-                            push @{$running_jobs{$task_id}{output}}, "ERROR: $error";
+                        my $tid = $worker_status{$socket}{task_id};
+                        if (exists $running_jobs{$tid}) {
+                            push @{$running_jobs{$tid}{output}}, "ERROR: $error";
                         }
                     }
                     # Always print to stderr (job master's stderr is inherited from parent)
                     print STDERR "ERROR: $error\n";
+                    print STDERR "  [DEBUG: from task_id=$task_id, socket=$socket]\n" if $ENV{SMAK_DEBUG};
                     # Also forward to attached clients if any
                     print $master_socket "ERROR $error\n" if $master_socket;
 
@@ -10541,6 +10783,72 @@ sub run_job_master {
 
                     # Handle successful completion
                     if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
+                        # ASSERTION: Verify successful job produced a valid target
+                        # Only run expensive checks when debugging enabled (to avoid performance impact)
+                        if (ASSERTIONS_ENABLED && $ENV{SMAK_DEBUG}) {
+                            my $target = $job->{target};
+
+                            # Check if this is a phony target by searching all pseudo_rule keys
+                            my $is_phony_target = 0;
+                            for my $key (keys %pseudo_rule) {
+                                if ($key =~ /\t\Q$target\E$/) {
+                                    $is_phony_target = 1;
+                                    last;
+                                }
+                            }
+
+                            if (!$is_phony_target) {
+                                # Target file must exist
+                                my $target_path = $target =~ m{^/} ? $target : "$job->{dir}/$target";
+                                if (!-e $target_path) {
+                                    assert_or_die(0, "Target '$target' marked as successfully built but file does not exist at '$target_path'");
+                                }
+
+                                # Get all dependencies for this target (excluding order-only deps)
+                                # Since we don't have makefile in job hash, search all keys that end with this target
+                                my @deps;
+
+                                # Check fixed deps - search all keys
+                                for my $key (keys %fixed_deps) {
+                                    if ($key =~ /\t\Q$target\E$/) {
+                                        my $deps_ref = $fixed_deps{$key};
+                                        if (ref($deps_ref) eq 'ARRAY') {
+                                            push @deps, @$deps_ref;
+                                        } else {
+                                            push @deps, split /\s+/, $deps_ref;
+                                        }
+                                    }
+                                }
+
+                                # Check pseudo deps - search all keys
+                                for my $key (keys %pseudo_deps) {
+                                    if ($key =~ /\t\Q$target\E$/) {
+                                        my $deps_ref = $pseudo_deps{$key};
+                                        if (ref($deps_ref) eq 'ARRAY') {
+                                            push @deps, @$deps_ref;
+                                        } else {
+                                            push @deps, split /\s+/, $deps_ref;
+                                        }
+                                    }
+                                }
+
+                                # Verify target is newer than all dependencies
+                                my $target_mtime = (stat($target_path))[9];
+                                for my $dep (@deps) {
+                                    next if $dep eq '';  # Skip empty deps
+                                    my $dep_path = $dep =~ m{^/} ? $dep : "$job->{dir}/$dep";
+                                    if (-e $dep_path) {
+                                        my $dep_mtime = (stat($dep_path))[9];
+                                        if ($target_mtime < $dep_mtime) {
+                                            assert_or_die(0,
+                                                "Target '$target' (mtime=$target_mtime) is older than dependency '$dep' (mtime=$dep_mtime) after successful build"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         # Clear from stale cache after successful build
                         if (exists $stale_targets_cache{$job->{target}}) {
                             delete $stale_targets_cache{$job->{target}};
@@ -10570,7 +10878,7 @@ sub run_job_master {
                         my $retry_reason = "";
 
                         my $retry_count = $retry_counts{$job->{target}} || 0;
-                        if ($job->{target} && $retry_count < 1) {  # Max 1 retry
+                        if ($job->{target} && $retry_count < $max_retries) {  # Check against max_retries
                             # Analyze captured output for retryable errors
                             my @output = $job->{output} ? @{$job->{output}} : ();
 
@@ -10619,6 +10927,60 @@ sub run_job_master {
 
                                     last if $should_retry;  # Found a retryable error
                                 }
+
+                                # Check for linker "cannot find" errors (e.g., "ld: cannot find parse.o")
+                                if (!$should_retry && $clean_line =~ /(?:ld|collect2|link).*:\s*cannot find\s+(.+?)(?:\s*:|$)/i) {
+                                    my $missing_file = $1;
+                                    $missing_file =~ s/^\s+|\s+$//g;  # Trim whitespace
+                                    $missing_file =~ s/^-l//;  # Remove -l prefix if it's a library
+
+                                    print STDERR "Auto-retry: detected linker missing file '$missing_file' for target '$job->{target}'\n" if $ENV{SMAK_DEBUG};
+
+                                    # Try to unblock the missing file if it's stuck in queue
+                                    # Clear it from failed state and in_progress so it can be retried
+                                    my $was_blocked = 0;
+                                    if (exists $failed_targets{$missing_file}) {
+                                        print STDERR "Auto-retry: clearing failed state for '$missing_file' to allow rebuild\n" if $ENV{SMAK_DEBUG};
+                                        delete $failed_targets{$missing_file};
+                                        $was_blocked = 1;
+                                    }
+                                    if (exists $in_progress{$missing_file}) {
+                                        print STDERR "Auto-retry: clearing in_progress state for '$missing_file' (was: $in_progress{$missing_file})\n" if $ENV{SMAK_DEBUG};
+                                        delete $in_progress{$missing_file};
+                                        $was_blocked = 1;
+                                    }
+
+                                    # Also check if the source file (.cc for .o) is stuck
+                                    if ($missing_file =~ /^(.+)\.o$/) {
+                                        my $base = $1;
+                                        for my $ext ('.cc', '.cpp', '.c', '.C') {
+                                            my $source = "$base$ext";
+                                            if (exists $in_progress{$source}) {
+                                                print STDERR "Auto-retry: clearing in_progress state for source '$source' (was: $in_progress{$source})\n" if $ENV{SMAK_DEBUG};
+                                                delete $in_progress{$source};
+                                                $was_blocked = 1;
+                                            }
+                                            if (exists $failed_targets{$source}) {
+                                                print STDERR "Auto-retry: clearing failed state for source '$source'\n" if $ENV{SMAK_DEBUG};
+                                                delete $failed_targets{$source};
+                                                $was_blocked = 1;
+                                            }
+                                        }
+                                    }
+
+                                    # Don't dispatch immediately - this can cause race conditions
+                                    # Instead, mark that we need to build this dependency after all jobs complete
+                                    if ($was_blocked) {
+                                        print STDERR "Auto-retry: unblocked '$missing_file', will build after current jobs complete\n" if $ENV{SMAK_DEBUG};
+                                    }
+
+                                    # Retry for linker errors - likely a parallel build race condition
+                                    # The missing file might be queued or building in another worker
+                                    $should_retry = 1;
+                                    $retry_reason = "linker missing file '$missing_file' (likely parallel build race)";
+                                    print STDERR "Auto-retry: will retry because $retry_reason\n" if $ENV{SMAK_DEBUG};
+                                    last;
+                                }
                             }
 
                             # If no intelligent retry detected, fall back to target pattern matching
@@ -10647,16 +11009,29 @@ sub run_job_master {
                             delete $failed_targets{$job->{target}};
                             delete $in_progress{$job->{target}};
 
-                            # Re-queue the target
-                            push @job_queue, {
-                                target => $job->{target},
-                                dir => $job->{dir},
-                                command => $job->{command},
-                                silent => $job->{silent} || 0,
-                            };
+                            # Check if target is already queued to prevent duplicates
+                            my $already_queued = 0;
+                            for my $queued_job (@job_queue) {
+                                if ($queued_job->{target} eq $job->{target}) {
+                                    $already_queued = 1;
+                                    print STDERR "Auto-retry: target '$job->{target}' already in queue, skipping duplicate\n" if $ENV{SMAK_DEBUG};
+                                    last;
+                                }
+                            }
 
-                            # Try to dispatch immediately
-                            dispatch_jobs();
+                            # Re-queue the target only if not already queued
+                            if (!$already_queued) {
+                                push @job_queue, {
+                                    target => $job->{target},
+                                    dir => $job->{dir},
+                                    command => $job->{command},
+                                    silent => $job->{silent} || 0,
+                                };
+                                print STDERR "Auto-retry: re-queued '$job->{target}' for retry (will dispatch when dependencies ready)\n" if $ENV{SMAK_DEBUG};
+                            }
+
+                            # Don't dispatch immediately - let dependencies build first
+                            # The normal job dispatch cycle will handle it when dependencies are ready
                         } else {
                             # Mark as failed (no retry or retry exhausted)
                             if ($job->{target}) {
@@ -10683,6 +11058,9 @@ sub run_job_master {
 
                     # Report to master
                     print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n" if $master_socket;
+
+                    # Clean up dispatch tracking
+                    delete $currently_dispatched{$job->{target}} if exists $currently_dispatched{$job->{target}};
                 }
             }
         }

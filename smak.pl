@@ -36,6 +36,7 @@ my $directory = '';  # Directory to change to before running (-C option)
 my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
 my $remote_cd = '';  # Remote directory for SSH workers
 my $norc = 0;  # Skip reading .smak.rc files
+my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j)
 
 # Check for -norc early (before reading .smak.rc)
 for my $arg (@ARGV) {
@@ -227,6 +228,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'ssh=s' => \$ssh_host,
         'cd=s' => \$remote_cd,
         'norc' => \$norc,
+        'retries=i' => \$retries,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -251,6 +253,7 @@ GetOptions(
     'cd=s' => \$remote_cd,
     'norc' => \$norc,
     'scanner=s' => \$scanner_paths,
+    'retries=i' => \$retries,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -262,6 +265,12 @@ if (defined $jobs && $jobs eq "auto") {
         chomp $cpu_count;
     }
     $jobs = $cpu_count;
+}
+
+# Set default retry count if not specified
+# Default: 1 for parallel builds (-j > 0), 0 for sequential
+if (!defined $retries) {
+    $retries = ($jobs > 0) ? 1 : 0;
 }
 
 # Parse variable assignments and targets from remaining arguments
@@ -726,6 +735,9 @@ if ($silent) {
 
 # Set number of parallel jobs
 set_jobs($jobs);
+
+# Set maximum retry count
+set_max_retries($retries);
 
 # Set verbose mode via environment variable so Smak.pm can access it
 # SMAK_DEBUG implies verbose mode, -cli defaults to wheel mode

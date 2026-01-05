@@ -4162,81 +4162,14 @@ sub build_target {
             my ($clean_cmd, $silent, $ignore_errors) = strip_command_prefixes($cmd_for_parsing);
             my $display_cmd = $leading_space . $clean_cmd;
 
-            # In dry-run mode, handle recursive make invocations or print commands
-            if ($dry_run_mode) {
-                warn "DEBUG[" . __LINE__ . "]:     In dry-run mode\n" if $ENV{SMAK_DEBUG};
-                # Check if this is a recursive make/smak invocation
-                if ($display_cmd =~ /\b(make|smak)\s/ || $display_cmd =~ m{/smak(?:\s|$)}) {
-                    # Debug: show what we detected
-                    warn "DEBUG[" . __LINE__ . "]: Detected recursive make/smak: $cmd_line\n" if $ENV{SMAK_DEBUG};
-
-                    # Parse the make/smak command line to extract -f and targets
-                    my ($sub_makefile, @sub_targets) = parse_make_command($cmd_line);
-
-                    warn "DEBUG[" . __LINE__ . "]: Parsed makefile='$sub_makefile' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
-
-                    if ($sub_makefile) {
-                        # Save current makefile state
-                        my $saved_makefile = $makefile;
-
-                        # Switch to sub-makefile
-                        $makefile = $sub_makefile;
-
-                        # Parse the sub-makefile if not already parsed
-                        my $test_key = "$makefile\t" . ($sub_targets[0] || 'all');
-                        unless (exists $fixed_deps{$test_key} || exists $pattern_deps{$test_key} || exists $pseudo_deps{$test_key}) {
-                            eval {
-                                parse_makefile($makefile);
-                            };
-                            if ($@) {
-                                warn "Warning: Could not parse sub-makefile '$makefile': $@\n";
-                                # Restore state and fall back to just printing the command
-                                $makefile = $saved_makefile;
-                                print "$cmd_line\n";
-                                next;
-                            }
-                        }
-
-                        # Build sub-targets recursively in dry-run mode
-                        if (@sub_targets) {
-                            for my $sub_target (@sub_targets) {
-                                build_target($sub_target, $visited, $depth + 1);
-                            }
-                        } else {
-                            # No targets specified, build first target
-                            my $first_target = get_first_target($makefile);
-                            build_target($first_target, $visited, $depth + 1) if $first_target;
-                        }
-
-                        # Restore makefile state
-                        $makefile = $saved_makefile;
-                        next;
-                    }
-                }
-
-                # Not a recursive make, check if it's a built-in command first
-                if ($display_cmd =~ /^BUILTIN_MV\s+-f\s+(\S+)\s+(\S+)/) {
-                    print "mv -f $1 $2\n";
-                } else {
-                    print "$display_cmd\n";
-                }
-                next;
-            }
-
-            # Handle built-in commands
-            if ($clean_cmd =~ /^BUILTIN_MV\s+(.+)$/) {
+            # Handle built-in commands (skip in dry-run mode - let dummy worker print them)
+            if (!$dry_run_mode && $clean_cmd =~ /^BUILTIN_MV\s+(.+)$/) {
                 my $mv_args = $1;
                 warn "DEBUG[" . __LINE__ . "]:     Detected built-in mv command\n" if $ENV{SMAK_DEBUG};
 
                 # Parse mv arguments: -f source dest
                 if ($mv_args =~ /^-f\s+(\S+)\s+(\S+)/) {
                     my ($source, $dest) = ($1, $2);
-
-                    # In dry-run mode, just print what we would do
-                    if ($dry_run_mode) {
-                        print "mv -f $source $dest\n";
-                        next;
-                    }
 
                     # Execute the built-in mv
                     unless ($silent_mode || $silent) {
@@ -4247,6 +4180,58 @@ sub build_target {
                 }
             }
 
+            # Check if this is a recursive make/smak invocation (both dry-run and normal mode)
+            if ($display_cmd =~ /\b(make|smak)\s/ || $display_cmd =~ m{/smak(?:\s|$)}) {
+                warn "DEBUG[" . __LINE__ . "]: Detected recursive make/smak: $cmd_line\n" if $ENV{SMAK_DEBUG};
+
+                # Parse the make/smak command line to extract -f and targets
+                my ($sub_makefile, @sub_targets) = parse_make_command($cmd_line);
+
+                warn "DEBUG[" . __LINE__ . "]: Parsed makefile='$sub_makefile' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
+
+                if ($sub_makefile) {
+                    # Save current makefile state
+                    my $saved_makefile = $makefile;
+
+                    # Switch to sub-makefile
+                    $makefile = $sub_makefile;
+
+                    # Parse the sub-makefile if not already parsed
+                    my $test_key = "$makefile\t" . ($sub_targets[0] || 'all');
+                    unless (exists $fixed_deps{$test_key} || exists $pattern_deps{$test_key} || exists $pseudo_deps{$test_key}) {
+                        eval {
+                            parse_makefile($makefile);
+                        };
+                        if ($@) {
+                            warn "Warning: Could not parse sub-makefile '$makefile': $@\n";
+                            # Restore state and fall back to executing as external command
+                            $makefile = $saved_makefile;
+                            # Fall through to normal command execution
+                            goto EXECUTE_EXTERNAL_COMMAND;
+                        }
+                    }
+
+                    # Build sub-targets internally
+                    unless ($silent_mode || $silent) {
+                        print "$display_cmd\n";
+                    }
+                    if (@sub_targets) {
+                        for my $sub_target (@sub_targets) {
+                            build_target($sub_target, $visited, $depth + 1);
+                        }
+                    } else {
+                        # No targets specified, build first target
+                        my $first_target = get_first_target($makefile);
+                        build_target($first_target, $visited, $depth + 1) if $first_target;
+                    }
+
+                    # Restore makefile state
+                    $makefile = $saved_makefile;
+                    next;
+                }
+            }
+
+            EXECUTE_EXTERNAL_COMMAND:
             # Execute command - use job system if available, otherwise sequential
             use Cwd 'getcwd';
             my $cwd = getcwd();
@@ -7549,7 +7534,9 @@ sub run_job_master {
 
     our @workers;
     our %worker_status;  # socket => {ready => 0/1, task_id => N}
-    my $worker_script = "$bin_dir/smak-worker";
+
+    # Use dummy worker for dry-run mode, normal worker otherwise
+    my $worker_script = $dry_run_mode ? "$bin_dir/smak-worker-dry" : "$bin_dir/smak-worker";
     die "Worker script not found: $worker_script\n" unless -x $worker_script;
 
     # Workers always connect to localhost (either directly or via SSH tunnel)

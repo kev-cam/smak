@@ -726,6 +726,8 @@ sub execute_script_file {
 # Set dry-run mode if requested
 if ($dry_run) {
     set_dry_run_mode(1);
+    # Force -j1 in dry-run mode to use single dummy worker
+    $jobs = 1 unless $jobs == 0;  # Unless sequential (0) was explicitly requested
 }
 
 # Set silent mode if requested

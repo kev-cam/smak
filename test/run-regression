@@ -19,6 +19,7 @@ NO_PARALLEL=0
 FAST_MODE=0
 PARALLEL_JOBS=1
 SMAK_EXTRA_ARGS=""
+EXTERNAL_TESTS=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -48,6 +49,10 @@ while [ $# -gt 0 ]; do
             ;;
         -l|--list)
             LIST_MODE=1
+            shift
+            ;;
+        -x|--external)
+            EXTERNAL_TESTS=1
             shift
             ;;
         --filter)
@@ -91,6 +96,7 @@ Options:
   -j <N>              Run N tests in parallel (default: 1)
   -s, --sanity        Run quick sanity check (2 basic non-interactive tests)
   -f, --full          Run full test suite including random builds and CLI tests
+  -x, --external      Include external project tests (iverilog, nvc, xyce, ghdl)
   -v, --verbose       Show test output
   -t, --tty           Run interactive tests with actual TTY input (not scripted)
   -l, --list          List all tests that would be run and exit
@@ -258,6 +264,7 @@ if [ -n "$CLONE_MODE" ]; then
     CMD="./run-regression"
     [ $SANITY_MODE -eq 1 ] && CMD="$CMD --sanity"
     [ $FULL_MODE -eq 1 ] && CMD="$CMD --full"
+    [ $EXTERNAL_TESTS -eq 1 ] && CMD="$CMD --external"
     [ $VERBOSE -eq 1 ] && CMD="$CMD --verbose"
     [ $TTY_MODE -eq 1 ] && CMD="$CMD --tty"
     [ $NO_PARALLEL -eq 1 ] && CMD="$CMD --no-parallel"
@@ -837,11 +844,34 @@ if [ $SANITY_MODE -eq 1 ]; then
     fi
 else
     # Normal mode: all unit tests
+    # Define external project tests (large builds, skip by default)
+    EXTERNAL_TEST_NAMES=(
+        "test_iverilog.sh"
+        "test_nvc.sh"
+        "test_xyce.sh"
+        "test_ghdl.sh"
+    )
+
     for test in test_*.sh; do
         # Skip -fail.sh tests (they're run as variants of the main test)
         if [[ "$test" == *"-fail.sh" ]]; then
             continue
         fi
+
+        # Skip external tests unless -x/--external is specified
+        if [ $EXTERNAL_TESTS -eq 0 ]; then
+            skip_test=0
+            for ext_test in "${EXTERNAL_TEST_NAMES[@]}"; do
+                if [ "$test" = "$ext_test" ]; then
+                    skip_test=1
+                    break
+                fi
+            done
+            if [ $skip_test -eq 1 ]; then
+                continue
+            fi
+        fi
+
         if [ -f "$test" ]; then
             TESTS_TO_RUN+=("$test")
         fi

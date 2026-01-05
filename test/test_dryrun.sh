@@ -4,7 +4,7 @@
 echo "Testing new commands..."
 echo ""
 
-cat <<'EOF' | ../smak -f Makefile.nested -Kd
+cat <<'EOF' | ../smak -f Makefile.nested-dry -Kd
 dry-run test.o
 ! echo "Hello from shell"
 ! ls -la Makefile.nested

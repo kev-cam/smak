@@ -3568,134 +3568,136 @@ sub build_target {
         $rule = $fixed_rule{$matched_key} || '';
         warn "DEBUG[" . __LINE__ . "]: Matched fixed rule key='$matched_key' for target='$target'\n" if $ENV{SMAK_DEBUG};
 
-        # If fixed rule has no command, try to find pattern rule or suffix rule
+        # If fixed rule has no command, try to find suffix rule or pattern rule
+        # Try suffix rules FIRST so that Makefile suffix rules take precedence over built-in pattern rules
         if (!$rule || $rule !~ /\S/) {
-            PATTERN_SEARCH: for my $pkey (keys %pattern_rule) {
-                if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                    my $pattern = $1;
-                    my $pattern_re = $pattern;
-                    $pattern_re =~ s/%/(.+)/g;
-                    if ($target =~ /^$pattern_re$/) {
-                        $stem = $1;  # Save stem for $* expansion
+            # Try suffix rules first
+            # This is needed when .deps/*.Po files define dependencies but no rule
+            # and ensures Makefile suffix rules override built-in pattern rules
+            warn "DEBUG[" . __LINE__ . "]: No rule found in fixed_rule, trying suffix rules for '$target'\n" if $ENV{SMAK_DEBUG};
+            if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+                my $base = $1;
+                my $target_suffix = $2;
+                warn "DEBUG[" . __LINE__ . "]:   base='$base', target_suffix='$target_suffix'\n" if $ENV{SMAK_DEBUG};
+                warn "DEBUG[" . __LINE__ . "]:   suffixes: @suffixes\n" if $ENV{SMAK_DEBUG};
 
-                        # Pattern rules can now have multiple variants
-                        # Try each variant and use the first one whose prerequisites exist
-                        my $rules_ref = $pattern_rule{$pkey};
-                        my $deps_ref = $pattern_deps{$pkey};
+                for my $source_suffix (@suffixes) {
+                    next if $source_suffix eq $target_suffix;
 
-                        warn "DEBUG: Trying pattern $pkey, rules_ref type=" . ref($rules_ref) . "\n" if $ENV{SMAK_DEBUG};
-
-                        # Handle both old single-rule format and new array format
-                        my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
-                        my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
-
-                        warn "DEBUG: Have " . scalar(@rules) . " rule variants to try\n" if $ENV{SMAK_DEBUG};
-
-                        # Try to find a variant whose source file exists
-                        # If none exist, fall back to first variant (like GNU make)
-                        my $best_variant = 0;  # Default to first variant
-
-                        for (my $i = 0; $i < @rules; $i++) {
-                            my @variant_deps = @{$deps_list[$i] || []};
-
-                            # Expand % in dependencies with the stem
-                            my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
-
-                            # Resolve dependencies through vpath
-                            use Cwd 'getcwd';
-                            my $cwd = getcwd();
-                            @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
-
-                            warn "DEBUG: Variant $i deps: @expanded_deps\n" if $ENV{SMAK_DEBUG};
-
-                            # Check if all prerequisites exist
-                            my $all_prereqs_ok = 1;
-                            for my $prereq (@expanded_deps) {
-                                my $prereq_path = $prereq =~ m{^/} ? $prereq : "$cwd/$prereq";
-                                warn "DEBUG:   Checking prereq $prereq_path: " . (-e $prereq_path ? "exists" : "missing") . "\n" if $ENV{SMAK_DEBUG};
-                                unless (-e $prereq_path) {
-                                    $all_prereqs_ok = 0;
-                                    last;
-                                }
-                            }
-
-                            if ($all_prereqs_ok) {
-                                # Found a variant whose prerequisites all exist - use it
-                                $best_variant = $i;
-                                warn "DEBUG: Found existing prerequisites for variant $i\n" if $ENV{SMAK_DEBUG};
-                                last;
-                            }
-                        }
-
-                        # Use the best variant (either one with existing prereqs, or the first one)
-                        my @variant_deps = @{$deps_list[$best_variant] || []};
-                        my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+                    my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                    warn "DEBUG[" . __LINE__ . "]:   trying suffix_key='$suffix_key'\n" if $ENV{SMAK_DEBUG};
+                    if (exists $suffix_rule{$suffix_key}) {
+                        warn "DEBUG[" . __LINE__ . "]:     suffix rule exists!\n" if $ENV{SMAK_DEBUG};
+                        my $source = "$base$source_suffix";
                         use Cwd 'getcwd';
                         my $cwd = getcwd();
-                        @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
+                        my $resolved_source = resolve_vpath($source, $cwd);
+                        warn "DEBUG[" . __LINE__ . "]:     source='$source', resolved='$resolved_source'\n" if $ENV{SMAK_DEBUG};
 
-                        $rule = $rules[$best_variant];
-                        push @deps, @expanded_deps;
-                        warn "DEBUG: Using pattern rule variant $best_variant for $target (deps: @expanded_deps)\n" if $ENV{SMAK_DEBUG};
-                        last PATTERN_SEARCH;
+                        # Check if source file exists
+                        # resolve_vpath already returns a path relative to cwd, so check it directly
+                        warn "DEBUG[" . __LINE__ . "]:     checking existence of '$resolved_source'\n" if $ENV{SMAK_DEBUG};
+
+                        # Source file can be used if it exists OR can be built via another suffix rule
+                        my $source_exists = -f $resolved_source;
+                        my $source_can_build = !$source_exists && can_build_from_suffix_rule($source, $makefile);
+
+                        if ($source_exists || $source_can_build) {
+                            $stem = $base;
+                            # Keep existing deps from .deps/*.Po, add source if not present
+                            push @deps, $source unless grep { $_ eq $source } @deps;
+                            $rule = $suffix_rule{$suffix_key};
+                            my $suffix_deps_ref = $suffix_deps{$suffix_key};
+                            if ($suffix_deps_ref && @$suffix_deps_ref) {
+                                my @suffix_deps_expanded = map {
+                                    my $d = $_;
+                                    $d =~ s/%/$stem/g;
+                                    $d;
+                                } @$suffix_deps_ref;
+                                push @deps, @suffix_deps_expanded;
+                            }
+                            if ($source_can_build) {
+                                warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (source can be built from suffix rule)\n" if $ENV{SMAK_DEBUG};
+                            } else {
+                                warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (with fixed deps)\n" if $ENV{SMAK_DEBUG};
+                            }
+                            last;
+                        }
                     }
                 }
             }
 
-            # If still no rule found, try suffix rules
-            # This is needed when .deps/*.Po files define dependencies but no rule
+            # If still no rule found, try pattern rules
+            # This ensures built-in pattern rules are only used as a fallback
             if (!$rule || $rule !~ /\S/) {
-                warn "DEBUG[" . __LINE__ . "]: No rule found in fixed_rule, trying suffix rules for '$target'\n" if $ENV{SMAK_DEBUG};
-                if ($target =~ /^(.+)(\.[^.\/]+)$/) {
-                    my $base = $1;
-                    my $target_suffix = $2;
-                    warn "DEBUG[" . __LINE__ . "]:   base='$base', target_suffix='$target_suffix'\n" if $ENV{SMAK_DEBUG};
-                    warn "DEBUG[" . __LINE__ . "]:   suffixes: @suffixes\n" if $ENV{SMAK_DEBUG};
+                PATTERN_SEARCH: for my $pkey (keys %pattern_rule) {
+                    if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                        my $pattern = $1;
+                        my $pattern_re = $pattern;
+                        $pattern_re =~ s/%/(.+)/g;
+                        if ($target =~ /^$pattern_re$/) {
+                            $stem = $1;  # Save stem for $* expansion
 
-                    for my $source_suffix (@suffixes) {
-                        next if $source_suffix eq $target_suffix;
+                            # Pattern rules can now have multiple variants
+                            # Try each variant and use the first one whose prerequisites exist
+                            my $rules_ref = $pattern_rule{$pkey};
+                            my $deps_ref = $pattern_deps{$pkey};
 
-                        my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
-                        warn "DEBUG[" . __LINE__ . "]:   trying suffix_key='$suffix_key'\n" if $ENV{SMAK_DEBUG};
-                        if (exists $suffix_rule{$suffix_key}) {
-                            warn "DEBUG[" . __LINE__ . "]:     suffix rule exists!\n" if $ENV{SMAK_DEBUG};
-                            my $source = "$base$source_suffix";
+                            warn "DEBUG: Trying pattern $pkey, rules_ref type=" . ref($rules_ref) . "\n" if $ENV{SMAK_DEBUG};
+
+                            # Handle both old single-rule format and new array format
+                            my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
+                            my @deps_list = ref($deps_ref->[0]) eq 'ARRAY' ? @$deps_ref : ([$deps_ref]);
+
+                            warn "DEBUG: Have " . scalar(@rules) . " rule variants to try\n" if $ENV{SMAK_DEBUG};
+
+                            # Try to find a variant whose source file exists
+                            # If none exist, fall back to first variant (like GNU make)
+                            my $best_variant = 0;  # Default to first variant
+
+                            for (my $i = 0; $i < @rules; $i++) {
+                                my @variant_deps = @{$deps_list[$i] || []};
+
+                                # Expand % in dependencies with the stem
+                                my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+
+                                # Resolve dependencies through vpath
+                                use Cwd 'getcwd';
+                                my $cwd = getcwd();
+                                @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
+
+                                warn "DEBUG: Variant $i deps: @expanded_deps\n" if $ENV{SMAK_DEBUG};
+
+                                # Check if all prerequisites exist
+                                my $all_prereqs_ok = 1;
+                                for my $prereq (@expanded_deps) {
+                                    my $prereq_path = $prereq =~ m{^/} ? $prereq : "$cwd/$prereq";
+                                    warn "DEBUG:   Checking prereq $prereq_path: " . (-e $prereq_path ? "exists" : "missing") . "\n" if $ENV{SMAK_DEBUG};
+                                    unless (-e $prereq_path) {
+                                        $all_prereqs_ok = 0;
+                                        last;
+                                    }
+                                }
+
+                                if ($all_prereqs_ok) {
+                                    # Found a variant whose prerequisites all exist - use it
+                                    $best_variant = $i;
+                                    warn "DEBUG: Found existing prerequisites for variant $i\n" if $ENV{SMAK_DEBUG};
+                                    last;
+                                }
+                            }
+
+                            # Use the best variant (either one with existing prereqs, or the first one)
+                            my @variant_deps = @{$deps_list[$best_variant] || []};
+                            my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
                             use Cwd 'getcwd';
                             my $cwd = getcwd();
-                            my $resolved_source = resolve_vpath($source, $cwd);
-                            warn "DEBUG[" . __LINE__ . "]:     source='$source', resolved='$resolved_source'\n" if $ENV{SMAK_DEBUG};
+                            @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
 
-                            # Check if source file exists (need to check relative to Makefile's directory)
-                            use File::Basename;
-                            my $makefile_dir = dirname($makefile);
-                            my $source_path = "$makefile_dir/$resolved_source";
-                            warn "DEBUG[" . __LINE__ . "]:     checking existence of '$source_path'\n" if $ENV{SMAK_DEBUG};
-
-                            # Source file can be used if it exists OR can be built via another suffix rule
-                            my $source_exists = -f $source_path;
-                            my $source_can_build = !$source_exists && can_build_from_suffix_rule($source, $makefile);
-
-                            if ($source_exists || $source_can_build) {
-                                $stem = $base;
-                                # Keep existing deps from .deps/*.Po, add source if not present
-                                push @deps, $source unless grep { $_ eq $source } @deps;
-                                $rule = $suffix_rule{$suffix_key};
-                                my $suffix_deps_ref = $suffix_deps{$suffix_key};
-                                if ($suffix_deps_ref && @$suffix_deps_ref) {
-                                    my @suffix_deps_expanded = map {
-                                        my $d = $_;
-                                        $d =~ s/%/$stem/g;
-                                        $d;
-                                    } @$suffix_deps_ref;
-                                    push @deps, @suffix_deps_expanded;
-                                }
-                                if ($source_can_build) {
-                                    warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (source can be built from suffix rule)\n" if $ENV{SMAK_DEBUG};
-                                } else {
-                                    warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target (with fixed deps)\n" if $ENV{SMAK_DEBUG};
-                                }
-                                last;
-                            }
+                            $rule = $rules[$best_variant];
+                            push @deps, @expanded_deps;
+                            warn "DEBUG: Using pattern rule variant $best_variant for $target (deps: @expanded_deps)\n" if $ENV{SMAK_DEBUG};
+                            last PATTERN_SEARCH;
                         }
                     }
                 }

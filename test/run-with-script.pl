@@ -150,7 +150,7 @@ while (time() - $start < $timeout) {
         } elsif ($action->{type} eq 'expect') {
             if ($pending_output =~ /\Q$action->{text}\E/) {
                 vprint ">>> Found expected text: '$action->{text}'\n";
-                $pending_output = '';
+                # Don't clear pending_output - keep any prompt that may be there
                 $action_index++;
             } elsif (time() - $last_output_time > 5) {
                 $test_failed = 1;

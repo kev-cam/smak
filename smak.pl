@@ -770,6 +770,13 @@ if (defined $fuse_server) {
     print "Detected FUSE filesystem: $fuse_server at $fuse_path\n" unless $silent;
 }
 
+# If scanner mode, run standalone file watcher (no Makefile needed)
+if (defined $scanner_paths) {
+    my @paths = split(/,/, $scanner_paths);
+    Smak::run_standalone_scanner(@paths);
+    exit 0;
+}
+
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it
 parse_makefile($makefile);
@@ -886,13 +893,6 @@ if ($cli) {
     if ($own_server && "stop" eq $result) {
         stop_job_server();
     }
-    exit 0;
-}
-
-# If scanner mode, run standalone file watcher
-if (defined $scanner_paths) {
-    my @paths = split(/,/, $scanner_paths);
-    Smak::run_standalone_scanner(@paths);
     exit 0;
 }
 

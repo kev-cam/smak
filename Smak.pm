@@ -8048,15 +8048,26 @@ sub run_job_master {
             # Child - run worker
             if ($ssh_host) {
 		my $local_path = getcwd();
-		$local_path =~ s=^$fuse_mountpoint/==;
+		$local_path =~ s=^$fuse_mountpoint/== if defined $fuse_mountpoint;
                 # SSH mode: launch worker on remote host with reverse port forwarding
                 # Use -R to tunnel remote port back to local worker_port
                 my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
                 my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
-                if ($remote_cd) {
-                    push @ssh_cmd, "smak-worker -cd $remote_cd/$local_path 127.0.0.1:$remote_port";
+                # Construct remote worker command
+                # Use PATH that includes smak directory, or absolute path if SMAK_REMOTE_PATH is set
+                my $remote_worker = $dry_run_mode ? 'smak-worker-dry' : 'smak-worker';
+                my $remote_cmd;
+                if ($ENV{SMAK_REMOTE_PATH}) {
+                    # Use explicit path from environment
+                    $remote_cmd = "$ENV{SMAK_REMOTE_PATH}/$remote_worker";
                 } else {
-                    push @ssh_cmd, "smak-worker 127.0.0.1:$remote_port";
+                    # Try to find smak in PATH, or use worker from bin_dir
+                    $remote_cmd = "PATH=$bin_dir:\$PATH $remote_worker";
+                }
+                if ($remote_cd) {
+                    push @ssh_cmd, "$remote_cmd -cd $remote_cd/$local_path 127.0.0.1:$remote_port";
+                } else {
+                    push @ssh_cmd, "$remote_cmd 127.0.0.1:$remote_port";
                 }
                 exec(@ssh_cmd);
                 die "Failed to exec SSH worker: $!\n";

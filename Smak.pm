@@ -3486,6 +3486,74 @@ sub builtin_mv {
     return 1;
 }
 
+sub builtin_rm {
+    my (@files_and_opts) = @_;
+
+    warn "DEBUG[builtin_rm]: rm @files_and_opts\n" if $ENV{SMAK_DEBUG};
+
+    # In dry-run mode, skip the actual removal but return success
+    if ($dry_run_mode) {
+        warn "DEBUG[builtin_rm]: Dry-run mode - skipping actual removal\n" if $ENV{SMAK_DEBUG};
+        return 1;
+    }
+
+    # Parse options
+    my $force = 0;
+    my $recursive = 0;
+    my @files;
+
+    for my $arg (@files_and_opts) {
+        if ($arg eq '-f') {
+            $force = 1;
+        } elsif ($arg eq '-r' || $arg eq '-R') {
+            $recursive = 1;
+        } elsif ($arg eq '-rf' || $arg eq '-fr' || $arg eq '-Rf' || $arg eq '-fR') {
+            $force = 1;
+            $recursive = 1;
+        } elsif ($arg !~ /^-/) {
+            # Expand glob patterns
+            my @expanded = glob($arg);
+            if (@expanded) {
+                push @files, @expanded;
+            } elsif (!$force) {
+                # If glob didn't match and not forced, treat as literal filename
+                push @files, $arg;
+            }
+        }
+    }
+
+    # Remove files
+    for my $file (@files) {
+        if (-e $file) {
+            if (-d $file) {
+                if ($recursive) {
+                    use File::Path 'remove_tree';
+                    remove_tree($file, {error => \my $err});
+                    if (@$err && !$force) {
+                        warn "smak: rm: cannot remove '$file': $!\n";
+                        return 0 unless $force;
+                    }
+                } elsif (!$force) {
+                    warn "smak: rm: cannot remove '$file': Is a directory\n";
+                    return 0;
+                }
+            } else {
+                unless (unlink($file)) {
+                    if (!$force) {
+                        warn "smak: rm: cannot remove '$file': $!\n";
+                        return 0;
+                    }
+                }
+            }
+        } elsif (!$force && -e $file) {
+            warn "smak: rm: cannot remove '$file': No such file or directory\n";
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 sub build_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
@@ -4218,6 +4286,28 @@ sub build_target {
                     builtin_mv($source, $dest);
                     next;
                 }
+            }
+
+            # Handle rm commands as built-ins (both normal and dry-run mode)
+            # This avoids job server overhead for simple file removal commands
+            if ($clean_cmd =~ /^rm\s+(.+)$/) {
+                my $rm_args = $1;
+                warn "DEBUG[" . __LINE__ . "]:     Detected built-in rm command\n" if $ENV{SMAK_DEBUG};
+
+                # Parse rm arguments
+                my @args = split(/\s+/, $rm_args);
+
+                # Print command before execution
+                unless ($silent_mode || $silent) {
+                    print "$display_cmd\n";
+                }
+
+                # Execute the built-in rm
+                my $result = builtin_rm(@args);
+                if (!$result && !$ignore_errors) {
+                    die "smak: *** [$target] Error 1\n";
+                }
+                next;
             }
 
             # Check if this is a recursive make/smak invocation (both dry-run and normal mode)

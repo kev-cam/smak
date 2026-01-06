@@ -348,6 +348,11 @@ sub start_job_server {
     $job_server_socket->autoflush(1);
     warn "Connected to job-master\n" if $ENV{SMAK_DEBUG};
 
+    # Export job server address for child smak processes
+    # Child smak processes will detect this and relay commands instead of spawning new job servers
+    $ENV{SMAK_JOB_SERVER} = "127.0.0.1:$master_port";
+    warn "Exported SMAK_JOB_SERVER=$ENV{SMAK_JOB_SERVER}\n" if $ENV{SMAK_DEBUG};
+
     # Send environment to job-master
     for my $key (keys %ENV) {
         next if $key =~ /^(BASH_FUNC_|_)/;
@@ -3216,6 +3221,14 @@ sub get_all_ninja_outputs {
 # Helper function to parse make/smak command line
 sub parse_make_command {
     my ($cmd) = @_;
+
+    # Check for shell operators that indicate a compound command
+    # If found, this can't be parsed as a simple make invocation
+    if ($cmd =~ /\s+(&&|\|\||;|\|)\s+/) {
+        warn "DEBUG: Compound command detected with operator '$1', cannot parse as simple make\n" if $ENV{SMAK_DEBUG};
+        # Return empty to signal this should be executed externally or handled specially
+        return ('', ());
+    }
 
     my $makefile = '';
     my @targets;
@@ -9775,6 +9788,54 @@ sub run_job_master {
 
                     # Send SIGWINCH to job master itself to trigger any handlers
                     kill 'WINCH', $$;
+
+                } elsif ($line =~ /^BUILD (.+)$/) {
+                    # Handle recursive smak invocation - child smak is relaying its build request
+                    my $build_args = $1;
+                    warn "Received BUILD request: $build_args\n" if $ENV{SMAK_DEBUG};
+
+                    # Parse: directory target1 target2 ...
+                    my ($dir, @targets) = split(/\s+/, $build_args);
+
+                    # Save current directory
+                    use Cwd 'getcwd';
+                    my $saved_cwd = getcwd();
+                    my $saved_makefile = $makefile;
+
+                    # Change to target directory
+                    chdir($dir) or do {
+                        warn "Failed to chdir to $dir: $!\n";
+                        print $socket "COMPLETE 1\n";
+                        next;
+                    };
+
+                    # Build targets in the new directory
+                    my $exit_code = 0;
+                    eval {
+                        # Parse makefile in new directory if needed
+                        my $new_makefile = 'Makefile';
+                        if (!exists $fixed_deps{"$new_makefile\t" . ($targets[0] || 'all')}) {
+                            parse_makefile($new_makefile);
+                            $makefile = $new_makefile;
+                        }
+
+                        # Build each target
+                        for my $target (@targets) {
+                            build_target($target);
+                        }
+                    };
+                    if ($@) {
+                        warn "BUILD failed: $@\n";
+                        $exit_code = 1;
+                    }
+
+                    # Restore directory and makefile
+                    chdir($saved_cwd);
+                    $makefile = $saved_makefile;
+
+                    # Send completion back to child smak
+                    print $socket "COMPLETE $exit_code\n";
+                    $socket->flush();
 
                 } elsif ($line =~ /^SUBMIT_JOB$/) {
                     # Read job details

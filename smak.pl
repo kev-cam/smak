@@ -1192,6 +1192,53 @@ sub prompt_commit_bug_report {
     chdir($original_dir);
 }
 
+# Check if we're being run as a child of another smak with a job server
+# If so, relay our command-line to the parent job server instead of building
+if ($ENV{SMAK_JOB_SERVER} && !$ENV{SMAK_JOB_SERVER_RELAY_DONE}) {
+    warn "Detected parent job server at $ENV{SMAK_JOB_SERVER}, relaying command\n" if $ENV{SMAK_DEBUG};
+
+    # Reconstruct the command-line
+    use Cwd 'getcwd';
+    my $cwd = getcwd();
+    my @targets_str = @targets ? @targets : ('all');
+    my $cmd = "smak";
+    $cmd .= " -C $cwd" if $cwd ne $ENV{PWD};
+    $cmd .= " @targets_str";
+
+    # Connect to parent job server
+    my ($host, $port) = split(/:/, $ENV{SMAK_JOB_SERVER});
+    use IO::Socket::INET;
+    my $parent_socket = IO::Socket::INET->new(
+        PeerHost => $host,
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 10,
+    );
+
+    if ($parent_socket) {
+        $parent_socket->autoflush(1);
+
+        # Send the targets as a build request
+        # Format: BUILD target1 target2 target3
+        print $parent_socket "BUILD $cwd @targets_str\n";
+
+        # Wait for completion
+        my $response = <$parent_socket>;
+        chomp $response if defined $response;
+
+        close($parent_socket);
+
+        # Exit with appropriate status
+        if ($response && $response =~ /^COMPLETE (\d+)$/) {
+            exit $1;
+        } else {
+            exit 0;  # Success by default
+        }
+    } else {
+        warn "Failed to connect to parent job server, building normally\n";
+    }
+}
+
 # Debug mode - enter interactive debugger
 # Job server is optional - auto-rescan works without it via select() timeout
 # If -j flag is specified, start job server for parallel builds

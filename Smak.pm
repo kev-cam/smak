@@ -1549,8 +1549,9 @@ sub parse_makefile {
             next;
         }
 
-        # Skip comments and empty lines (but not inside rules)
-        if (!@current_targets && ($line =~ /^\s*#/ || $line =~ /^\s*$/)) {
+        # Skip comments and empty lines
+        # Comments can appear between target line and commands, so skip them always
+        if ($line =~ /^\s*#/ || $line =~ /^\s*$/) {
             next;
         }
 
@@ -1879,6 +1880,17 @@ sub parse_makefile {
         # Rule command (starts with tab)
         if ($line =~ /^\t(.*)$/ && (@current_targets || @current_suffix_targets)) {
             my $cmd = $1;
+
+            # Handle line continuations for command lines
+            while ($cmd =~ /\\$/) {
+                $cmd =~ s/\\$/ /;  # Replace backslash with space
+                my $next = <$fh>;
+                last unless defined $next;
+                chomp $next;
+                $next =~ s/^\s+//;  # Remove leading whitespace from continuation line
+                $cmd .= $next;
+            }
+
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
             $cmd = transform_make_vars($cmd);
             $current_rule .= "$cmd\n";
@@ -2312,6 +2324,17 @@ sub parse_included_makefile {
         # Rule command
         if ($line =~ /^\t(.*)$/ && (@current_targets || @current_suffix_targets)) {
             my $cmd = $1;
+
+            # Handle line continuations for command lines
+            while ($cmd =~ /\\$/) {
+                $cmd =~ s/\\$/ /;  # Replace backslash with space
+                my $next = <$fh>;
+                last unless defined $next;
+                chomp $next;
+                $next =~ s/^\s+//;  # Remove leading whitespace from continuation line
+                $cmd .= $next;
+            }
+
             $cmd = transform_make_vars($cmd);
             $current_rule .= "$cmd\n";
             next;
@@ -3312,6 +3335,17 @@ sub needs_rebuild {
     for my $dep (@deps) {
         # Skip .PHONY and other special targets
         next if $dep =~ /^\.PHONY$/;
+
+        # If dependency is a phony target, always rebuild (like "force")
+        # Check if $dep appears in .PHONY dependencies
+        my $phony_key = "$makefile\t.PHONY";
+        if (exists $pseudo_deps{$phony_key}) {
+            my @phony_targets_list = @{$pseudo_deps{$phony_key} || []};
+            if (grep { $_ eq $dep } @phony_targets_list) {
+                warn "DEBUG: Dependency '$dep' is phony, forcing rebuild of '$target'\n" if $ENV{SMAK_DEBUG};
+                return 1;
+            }
+        }
 
         # Skip ignored files
         if (exists $Smak::ignored_files{$dep}) {

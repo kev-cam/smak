@@ -40,6 +40,9 @@ fi
 # Use absolute path so $(MAKE) can be reliably detected in recursive builds
 export SMAK_INVOKED_AS="$SCRIPT_DIR/$script"
 
+# Set MAKE to smak so $(MAKE) in Makefiles uses smak instead of make
+export MAKE="$SCRIPT_DIR/$script"
+
 # Set launcher path for bug reports
 export SMAK_LAUNCHER="$SCRIPT_DIR/$script"
 

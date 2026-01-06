@@ -3227,10 +3227,11 @@ sub parse_make_command {
     if ($cmd =~ /\s+(&&|\|\||;|\|)\s+/) {
         warn "DEBUG: Compound command detected with operator '$1', cannot parse as simple make\n" if $ENV{SMAK_DEBUG};
         # Return empty to signal this should be executed externally or handled specially
-        return ('', ());
+        return ('', '', ());
     }
 
     my $makefile = '';
+    my $directory = '';
     my @targets;
 
     # Split command line into tokens (simple split, doesn't handle quoted strings)
@@ -3244,10 +3245,13 @@ sub parse_make_command {
         if ($parts[$i] eq '-f' && $i + 1 < @parts) {
             $makefile = $parts[$i + 1];
             $i++;  # Skip next arg
+        } elsif ($parts[$i] eq '-C' && $i + 1 < @parts) {
+            $directory = $parts[$i + 1];
+            $i++;  # Skip next arg
         } elsif ($parts[$i] =~ /^-/) {
             # Skip other options
             # Handle options that take arguments
-            if ($parts[$i] =~ /^-(C|I|j|l|o|W)$/ && $i + 1 < @parts) {
+            if ($parts[$i] =~ /^-(I|j|l|o|W)$/ && $i + 1 < @parts) {
                 $i++;  # Skip option argument
             }
         } else {
@@ -3256,7 +3260,7 @@ sub parse_make_command {
         }
     }
 
-    return ($makefile, @targets);
+    return ($makefile, $directory, @targets);
 }
 
 # Helper function to get first target from a makefile
@@ -4323,18 +4327,138 @@ sub build_target {
                 next;
             }
 
+            # Translate "make" to "smak" for built-in handling
+            # This allows smak to handle recursive $(MAKE) invocations
+            my $normalized_cmd = $clean_cmd;
+            $normalized_cmd =~ s/\bmake\b/smak/g;
+
+            # Normalize "cd DIR && make/smak TARGET" to "make/smak -C DIR TARGET" for built-in handling
+            if ($normalized_cmd =~ /cd\s+(\S+)\s+&&\s+(.*?(?:make|smak).*)$/) {
+                my ($dir, $make_cmd) = ($1, $2);
+                # Remove quotes from directory if present
+                $dir =~ s/^['"]//;
+                $dir =~ s/['"]$//;
+
+                # Check if make_cmd already has -C option
+                unless ($make_cmd =~ /\s-C\s/) {
+                    # Add -C DIR to the make command
+                    if ($make_cmd =~ /^(\S+)(\s+.*)$/) {
+                        $normalized_cmd = "$1 -C $dir$2";
+                    } elsif ($make_cmd =~ /^(\S+)$/) {
+                        $normalized_cmd = "$1 -C $dir";
+                    }
+                    warn "DEBUG[" . __LINE__ . "]: Normalized 'cd && make' to: $normalized_cmd\n" if $ENV{SMAK_DEBUG};
+                }
+            }
+
+            # Handle compound commands with multiple smak/make invocations chained with &&
+            # Split and execute each as a built-in
+            if ($clean_cmd =~ /&&/ && $clean_cmd =~ /(?:make|smak)/) {
+                # Check if this is a chain of smak/make commands
+                my @parts = split(/\s+&&\s+/, $clean_cmd);
+                my $all_recursive = 1;
+                for my $part (@parts) {
+                    # Allow 'true' or 'false' as terminating commands
+                    next if $part =~ /^\s*(true|false)\s*$/;
+                    # Check if it's a make/smak command
+                    unless ($part =~ /\b(make|smak)\s/ || $part =~ m{/smak(?:\s|$)}) {
+                        $all_recursive = 0;
+                        last;
+                    }
+                }
+
+                if ($all_recursive) {
+                    warn "DEBUG[" . __LINE__ . "]: Splitting compound recursive make command\n" if $ENV{SMAK_DEBUG};
+
+                    # Print the original command
+                    unless ($silent_mode || $silent) {
+                        print "$display_cmd\n";
+                    }
+
+                    # Execute each piece
+                    for my $part (@parts) {
+                        # Skip 'true' or 'false'
+                        next if $part =~ /^\s*(true|false)\s*$/;
+
+                        # Parse and execute as recursive make
+                        my ($sub_makefile, $sub_directory, @sub_targets) = parse_make_command($part);
+
+                        if ($sub_directory || $sub_makefile || @sub_targets) {
+                            # Save state
+                            use Cwd 'getcwd';
+                            my $saved_cwd = $sub_directory ? getcwd() : undef;
+                            my $saved_makefile = $makefile;
+
+                            # Change directory if needed
+                            if ($sub_directory) {
+                                chdir($sub_directory) or do {
+                                    warn "Warning: Could not chdir to '$sub_directory': $!\n";
+                                    next;
+                                };
+                            }
+
+                            # Set makefile
+                            $makefile = $sub_makefile || 'Makefile';
+
+                            # Parse makefile if needed
+                            my $test_key = "$makefile\t" . ($sub_targets[0] || 'all');
+                            unless (exists $fixed_deps{$test_key} || exists $pattern_deps{$test_key} || exists $pseudo_deps{$test_key}) {
+                                eval { parse_makefile($makefile); };
+                                if ($@) {
+                                    warn "Warning: Could not parse '$makefile': $@\n";
+                                    chdir($saved_cwd) if $saved_cwd;
+                                    $makefile = $saved_makefile;
+                                    next;
+                                }
+                            }
+
+                            # Build targets
+                            if (@sub_targets) {
+                                for my $sub_target (@sub_targets) {
+                                    build_target($sub_target, $visited, $depth + 1);
+                                }
+                            } else {
+                                my $first_target = get_first_target($makefile);
+                                build_target($first_target, $visited, $depth + 1) if $first_target;
+                            }
+
+                            # Restore state
+                            chdir($saved_cwd) if $saved_cwd;
+                            $makefile = $saved_makefile;
+                        }
+                    }
+
+                    next;  # Skip normal execution
+                }
+            }
+
             # Check if this is a recursive make/smak invocation (both dry-run and normal mode)
-            if ($display_cmd =~ /\b(make|smak)\s/ || $display_cmd =~ m{/smak(?:\s|$)}) {
-                warn "DEBUG[" . __LINE__ . "]: Detected recursive make/smak: $cmd_line\n" if $ENV{SMAK_DEBUG};
+            if ($normalized_cmd =~ /\b(make|smak)\s/ || $normalized_cmd =~ m{/smak(?:\s|$)}) {
+                warn "DEBUG[" . __LINE__ . "]: Detected recursive make/smak: $normalized_cmd\n" if $ENV{SMAK_DEBUG};
 
-                # Parse the make/smak command line to extract -f and targets
-                my ($sub_makefile, @sub_targets) = parse_make_command($cmd_line);
+                # Parse the make/smak command line to extract -f, -C directory, and targets
+                my ($sub_makefile, $sub_directory, @sub_targets) = parse_make_command($normalized_cmd);
 
-                warn "DEBUG[" . __LINE__ . "]: Parsed makefile='$sub_makefile' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
+                warn "DEBUG[" . __LINE__ . "]: Parsed makefile='$sub_makefile' directory='$sub_directory' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
 
-                if ($sub_makefile) {
+                # Handle -C directory option
+                my $saved_cwd;
+                if ($sub_directory) {
+                    use Cwd 'getcwd';
+                    $saved_cwd = getcwd();
+                    chdir($sub_directory) or do {
+                        warn "Warning: Could not chdir to '$sub_directory': $!\n";
+                        goto EXECUTE_EXTERNAL_COMMAND;
+                    };
+                    warn "DEBUG[" . __LINE__ . "]: Changed to directory '$sub_directory'\n" if $ENV{SMAK_DEBUG};
+                }
+
+                if ($sub_makefile || $sub_directory) {
                     # Save current makefile state
                     my $saved_makefile = $makefile;
+
+                    # Determine the makefile name (use default if not specified)
+                    $sub_makefile = 'Makefile' unless $sub_makefile;
 
                     # Switch to sub-makefile
                     $makefile = $sub_makefile;
@@ -4366,6 +4490,11 @@ sub build_target {
                         # No targets specified, build first target
                         my $first_target = get_first_target($makefile);
                         build_target($first_target, $visited, $depth + 1) if $first_target;
+                    }
+
+                    # Restore directory if changed
+                    if ($saved_cwd) {
+                        chdir($saved_cwd) or warn "Warning: Could not restore directory to '$saved_cwd': $!\n";
                     }
 
                     # Restore makefile state

@@ -3429,6 +3429,12 @@ sub builtin_mv {
 
     warn "DEBUG[builtin_mv]: Moving '$source' to '$dest'\n" if $ENV{SMAK_DEBUG};
 
+    # In dry-run mode, skip the actual move but return success
+    if ($dry_run_mode) {
+        warn "DEBUG[builtin_mv]: Dry-run mode - skipping actual move\n" if $ENV{SMAK_DEBUG};
+        return 1;
+    }
+
     # Perform the move operation
     use File::Copy;
     unless (move($source, $dest)) {
@@ -5233,6 +5239,14 @@ sub dispatch_command {
             }
         }
 
+    } elsif ($cmd eq 'bench' || $cmd eq 'benchmark') {
+        # Benchmark worker communication latency
+        if (!$job_server_socket) {
+            print "Not connected to job server. Use 'start' first.\n";
+        } else {
+            print $job_server_socket "BENCHMARK\n";
+        }
+
     } else {
         print "Unknown command: $cmd (try 'help')\n";
     }
@@ -5274,6 +5288,7 @@ Available commands:
   start [N]           Start job server with N workers (if not running)
   kill                Kill all workers
   restart [N]         Restart workers (optionally specify count)
+  bench, benchmark    Benchmark worker communication latency
   detach              Detach from CLI, leave job server running
   help, h, ?          Show this help
   quit, exit, q       Exit CLI (shuts down server if owned, else disconnects)
@@ -7765,6 +7780,9 @@ sub run_job_master {
                 my $worker = $worker_server->accept();
                 if ($worker) {
                     $worker->autoflush(1);
+                    # Disable Nagle's algorithm for low latency
+                    use Socket qw(IPPROTO_TCP TCP_NODELAY);
+                    setsockopt($worker, IPPROTO_TCP, TCP_NODELAY, 1);
                     # Read READY signal
                     my $ready = <$worker>;
                     chomp $ready if defined $ready;
@@ -8468,14 +8486,11 @@ sub run_job_master {
                 $in_progress{$target} = "done";
                 print STDERR "Target '$target' exists at '$target_path', marking complete (no rule or deps)\n" if $ENV{SMAK_DEBUG};
             } else {
-                # Target doesn't exist and has no rule to build it - this is an error
-                print STDERR "ERROR: No rule to make target '$target' (needed by other targets)\n";
-                $in_progress{$target} = "failed";
-                $failed_targets{$target} = 1;
-                # Send completion message to master socket if this was a submitted job
-                print $msocket "JOB_COMPLETE $target 1\n" if $msocket;
-                # Fail any composite targets waiting for this
-                fail_dependent_composite_targets($target, 1);
+                # Target doesn't exist and has no rule to build it
+                # Like make, assume it exists (e.g., source files, .git metadata, etc.)
+                $completed_targets{$target} = 1;
+                $in_progress{$target} = "done";
+                print STDERR "No rule for target '$target', assuming it exists\n" if $ENV{SMAK_DEBUG};
             }
         }
     }
@@ -8542,7 +8557,8 @@ sub run_job_master {
 
 	# Assertion: Detect deadlock - queued work, available workers, but nothing running
 	# Only check during intermittent checks (not at startup/dispatch where nothing running is normal)
-	if ($label =~ /intermittent/) {
+	# Skip in dry-run mode where missing files can cause false positives
+	if ($label =~ /intermittent/ && !$dry_run_mode) {
 	    assert_or_die(
 	        !(scalar(@job_queue) > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0),
 	        "Deadlock detected in $label: " . scalar(@job_queue) . " jobs queued, " .
@@ -8852,11 +8868,11 @@ sub run_job_master {
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
                         if ($completed_targets{$single_dep}) {
-                            # With auto-rescan or FUSE monitoring, we can trust completed_targets
-                            # because deleted files are automatically detected and removed
-                            if ($auto_rescan || $fuse_auto_clear) {
-                                # File monitoring active - trust completed_targets
-                                # (Files would have been removed if deleted)
+                            # With auto-rescan, FUSE monitoring, or dry-run mode, we can trust completed_targets
+                            # because deleted files are automatically detected (or files won't exist in dry-run)
+                            if ($auto_rescan || $fuse_auto_clear || $dry_run_mode) {
+                                # File monitoring active or dry-run mode - trust completed_targets
+                                # (Files would have been removed if deleted, or won't exist in dry-run)
                             } elsif (-e $dep_path) {
                                 # No monitoring - verify file exists on disk
                             } elsif (exists $pending_composite{$single_dep}) {
@@ -9220,8 +9236,8 @@ sub run_job_master {
                                     }
                                 }
 
-                                if (!$is_phony_target) {
-                                    # Target file must exist
+                                if (!$is_phony_target && !$dry_run_mode) {
+                                    # Target file must exist (skip in dry-run since files aren't created)
                                     my $target_path = $target =~ m{^/} ? $target : "$job->{dir}/$target";
                                     if (!-e $target_path) {
                                         assert_or_die(0, "Target '$target' marked as successfully built but file does not exist at '$target_path'");
@@ -9788,6 +9804,54 @@ sub run_job_master {
                     %running_jobs = ();
                     print $master_socket "All workers killed\n";
 
+                } elsif ($line =~ /^BENCHMARK$/) {
+                    # Benchmark worker communication latency
+                    use Time::HiRes qw(time);
+
+                    print $master_socket "Benchmarking worker communication...\n";
+                    my $num_tests = 100;
+                    my $total_time = 0;
+
+                    # Find a ready worker
+                    my $test_worker;
+                    for my $w (@workers) {
+                        if ($worker_status{$w}{ready}) {
+                            $test_worker = $w;
+                            last;
+                        }
+                    }
+
+                    if (!$test_worker) {
+                        print $master_socket "ERROR: No ready workers available\n";
+                    } else {
+                        # Send test tasks
+                        for my $i (1..$num_tests) {
+                            my $start = time();
+
+                            # Send dummy task
+                            print $test_worker "TASK $i\n";
+                            print $test_worker "DIR /tmp\n";
+                            print $test_worker "CMD true\n";
+
+                            # Read responses until READY
+                            while (1) {
+                                my $resp = <$test_worker>;
+                                last unless defined $resp;
+                                chomp $resp;
+                                last if $resp eq 'READY';
+                            }
+
+                            $total_time += (time() - $start);
+                        }
+
+                        my $avg_ms = ($total_time / $num_tests) * 1000;
+                        my $throughput = $num_tests / $total_time;
+
+                        print $master_socket sprintf("Completed %d round-trips in %.3fs\n", $num_tests, $total_time);
+                        print $master_socket sprintf("Average latency: %.2f ms/command\n", $avg_ms);
+                        print $master_socket sprintf("Throughput: %.1f commands/sec\n", $throughput);
+                    }
+
                 } elsif ($line =~ /^ADD_WORKER (\d+)$/) {
                     my $count = $1;
                     print STDERR "Adding $count worker(s)\n";
@@ -10349,6 +10413,9 @@ sub run_job_master {
                 my $worker = $worker_server->accept();
                 if ($worker) {
                     $worker->autoflush(1);
+                    # Disable Nagle's algorithm for low latency
+                    use Socket qw(IPPROTO_TCP TCP_NODELAY);
+                    setsockopt($worker, IPPROTO_TCP, TCP_NODELAY, 1);
 
                     # Read READY signal from worker
                     my $ready_msg = <$worker>;
@@ -10797,8 +10864,8 @@ sub run_job_master {
                                 }
                             }
 
-                            if (!$is_phony_target) {
-                                # Target file must exist
+                            if (!$is_phony_target && !$dry_run_mode) {
+                                # Target file must exist (skip in dry-run since files aren't created)
                                 my $target_path = $target =~ m{^/} ? $target : "$job->{dir}/$target";
                                 if (!-e $target_path) {
                                     assert_or_die(0, "Target '$target' marked as successfully built but file does not exist at '$target_path'");

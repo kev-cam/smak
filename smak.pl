@@ -727,7 +727,8 @@ sub execute_script_file {
 if ($dry_run) {
     set_dry_run_mode(1);
     # Force -j1 in dry-run mode to use single dummy worker
-    $jobs = 1 unless $jobs == 0;  # Unless sequential (0) was explicitly requested
+    # Must use job server (not sequential) for dummy worker to work
+    $jobs = 1;
 }
 
 # Set silent mode if requested
@@ -780,8 +781,9 @@ if (-f $auto_script) {
 }
 
 # Start job server if parallel builds are requested
-# Skip in debug, dry-run, or CLI mode (CLI mode starts its own server in run_cli)
-unless ($debug || $dry_run || $cli) {
+# Skip in debug or CLI mode (CLI mode starts its own server in run_cli)
+# Dry-run mode DOES use the job server (with dummy worker)
+unless ($debug || $cli) {
     start_job_server();
 }
 

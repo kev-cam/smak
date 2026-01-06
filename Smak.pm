@@ -418,7 +418,7 @@ sub submit_job {
 
     $in_progress{$target} = "queued";
 
-    warn "Submitting job: $target\n" if $ENV{SMAK_DEBUG};
+    warn "SUBMIT_JOB: target=$target, command=$command\n" if $ENV{SMAK_DEBUG};
 
     # Send job to job-master via socket protocol
     print $job_server_socket "SUBMIT_JOB\n";
@@ -3759,8 +3759,52 @@ sub build_target {
         @deps = @{$pseudo_deps{$key} || []};
         $rule = $pseudo_rule{$key} || '';
     } else {
-        # Try to find pattern rule match
-        PATTERN_MATCH_FALLBACK: for my $pkey (keys %pattern_rule) {
+        # Try suffix rules FIRST (before pattern rules)
+        # This ensures Makefile suffix rules take precedence over built-in pattern rules
+        if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+            my $base = $1;
+            my $target_suffix = $2;
+
+            # Try each possible source suffix in order
+            for my $source_suffix (@suffixes) {
+                # Skip if this is the target suffix itself
+                next if $source_suffix eq $target_suffix;
+
+                # Check if a suffix rule exists for this source->target combination
+                my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                if (exists $suffix_rule{$suffix_key}) {
+                    # Check if source file exists
+                    my $source = "$base$source_suffix";
+                    # Resolve source through vpath
+                    use Cwd 'getcwd';
+                    my $cwd = getcwd();
+                    my $resolved_source = resolve_vpath($source, $cwd);
+
+                    if (-f $resolved_source) {
+                        # Found matching suffix rule and source file
+                        $stem = $base;
+                        @deps = ($source);  # Store unresolved path, will be resolved later
+                        $rule = $suffix_rule{$suffix_key};
+                        my $suffix_deps_ref = $suffix_deps{$suffix_key};
+                        if ($suffix_deps_ref && @$suffix_deps_ref) {
+                            # Expand % in suffix rule dependencies (rare but possible)
+                            my @suffix_deps_expanded = map {
+                                my $d = $_;
+                                $d =~ s/%/$stem/g;
+                                $d;
+                            } @$suffix_deps_ref;
+                            push @deps, @suffix_deps_expanded;
+                        }
+                        warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target from $source\n" if $ENV{SMAK_DEBUG};
+                        last;
+                    }
+                }
+            }
+        }
+
+        # If still no rule found, try to find pattern rule match
+        if (!$rule || $rule !~ /\S/) {
+            PATTERN_MATCH_FALLBACK: for my $pkey (keys %pattern_rule) {
             if ($pkey =~ /^[^\t]+\t(.+)$/) {
                 my $pattern = $1;
                 my $pattern_re = $pattern;
@@ -3821,50 +3865,6 @@ sub build_target {
                 }
             }
         }
-
-        # If still no rule found, try suffix rules
-        if (!$rule || $rule !~ /\S/) {
-            # Extract target suffix (e.g., .o from foo.o)
-            if ($target =~ /^(.+)(\.[^.\/]+)$/) {
-                my $base = $1;
-                my $target_suffix = $2;
-
-                # Try each possible source suffix in order
-                for my $source_suffix (@suffixes) {
-                    # Skip if this is the target suffix itself
-                    next if $source_suffix eq $target_suffix;
-
-                    # Check if a suffix rule exists for this source->target combination
-                    my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
-                    if (exists $suffix_rule{$suffix_key}) {
-                        # Check if source file exists
-                        my $source = "$base$source_suffix";
-                        # Resolve source through vpath
-                        use Cwd 'getcwd';
-                        my $cwd = getcwd();
-                        my $resolved_source = resolve_vpath($source, $cwd);
-
-                        if (-f $resolved_source) {
-                            # Found matching suffix rule and source file
-                            $stem = $base;
-                            @deps = ($source);  # Store unresolved path, will be resolved later
-                            $rule = $suffix_rule{$suffix_key};
-                            my $suffix_deps_ref = $suffix_deps{$suffix_key};
-                            if ($suffix_deps_ref && @$suffix_deps_ref) {
-                                # Expand % in suffix rule dependencies (rare but possible)
-                                my @suffix_deps_expanded = map {
-                                    my $d = $_;
-                                    $d =~ s/%/$stem/g;
-                                    $d;
-                                } @$suffix_deps_ref;
-                                push @deps, @suffix_deps_expanded;
-                            }
-                            warn "DEBUG: Using suffix rule $source_suffix$target_suffix for $target from $source\n" if $ENV{SMAK_DEBUG};
-                            last;
-                        }
-                    }
-                }
-            }
         }
 
         # If still no rule found, try built-in implicit rules (like Make's built-in rules)
@@ -4240,9 +4240,10 @@ sub build_target {
                 # Parallel mode - submit to job server (job master will echo the command)
                 submit_job($target, $cmd_line, $cwd);
             } else {
-                warn "DEBUG[" . __LINE__ . "]:     Sequential execution\n" if $ENV{SMAK_DEBUG};
+                warn "DEBUG[" . __LINE__ . "]:     Sequential execution (job_server_socket=" . (defined $job_server_socket ? "defined" : "undef") . ", jobs=$jobs, dry_run=$dry_run_mode)\n" if $ENV{SMAK_DEBUG};
                 # Sequential mode - echo command here, then execute directly
-                unless ($silent_mode || $silent) {
+                # In dry-run mode, skip printing here since the dummy worker will print it
+                unless ($silent_mode || $silent || $dry_run_mode) {
                     print "$display_cmd\n";
                 }
                 execute_command_sequential($target, $cmd_line, $cwd);
@@ -7537,6 +7538,7 @@ sub run_job_master {
 
     # Use dummy worker for dry-run mode, normal worker otherwise
     my $worker_script = $dry_run_mode ? "$bin_dir/smak-worker-dry" : "$bin_dir/smak-worker";
+    warn "DEBUG: dry_run_mode=$dry_run_mode, worker_script=$worker_script\n" if $ENV{SMAK_DEBUG};
     die "Worker script not found: $worker_script\n" unless -x $worker_script;
 
     # Workers always connect to localhost (either directly or via SSH tunnel)
@@ -7800,7 +7802,8 @@ sub run_job_master {
     # Auto-rescan: Enable by default when FUSE is NOT detected
     # When FUSE is present, it provides file change notifications
     # When FUSE is absent, we need periodic polling to detect changes
-    our $auto_rescan = $has_fuse ? 0 : 1;
+    # Disable in dry-run mode since targets are never actually built
+    our $auto_rescan = $dry_run_mode ? 0 : ($has_fuse ? 0 : 1);
 
     # FUSE auto-clear: Enable by default when FUSE is detected
     # When enabled, FUSE events automatically clear failed targets (like rescan -auto)
@@ -9061,7 +9064,8 @@ sub run_job_master {
 	    # Check if command should be echoed (based on @ prefix detection before processing)
 	    my $silent = $job->{silent} || 0;
 
-	    if (!$silent_mode && !$silent) {
+	    # In dry-run mode, the worker will send the command as OUTPUT, so don't print it here
+	    if (!$silent_mode && !$silent && !$dry_run_mode) {
 		print $stomp_prompt,"$job->{command}\n";
 	    }
 
@@ -9165,7 +9169,8 @@ sub run_job_master {
                             my $is_phony = $is_common_phony || exists $pseudo_deps{"$makefile\t$target"};
 
                             # Only verify file existence for targets that look like real files
-                            my $should_verify = $looks_like_file && !$is_phony;
+                            # Skip verification in dry-run mode since files aren't actually created
+                            my $should_verify = $looks_like_file && !$is_phony && !$dry_run_mode;
 
                             if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                                 # Only mark non-phony targets as complete
@@ -9481,6 +9486,7 @@ sub run_job_master {
                         delete $currently_dispatched{$job->{target}} if exists $currently_dispatched{$job->{target}};
 
                     } elsif ($line =~ /^OUTPUT (.*)$/) {
+                        warn "CONSISTENCY-CHECK: Got OUTPUT: $1\n" if $ENV{SMAK_DEBUG};
                         print $master_socket "OUTPUT $1\n" if $master_socket;
                     } elsif ($line =~ /^ERROR (.*)$/) {
                         print $master_socket "ERROR $1\n" if $master_socket;
@@ -10566,10 +10572,14 @@ sub run_job_master {
                             push @{$running_jobs{$task_id}{output}}, $output;
                         }
                     }
-                    # Always print to stdout (job master's stdout is inherited from parent)
-                    print $stomp_prompt,"$output\n";
-                    # Also forward to attached clients if any
-                    print $master_socket "OUTPUT $output\n" if $master_socket;
+                    # Forward to attached master client, or print locally if standalone
+                    if ($master_socket) {
+                        # Master client connected - forward output and let it handle display
+                        print $master_socket "OUTPUT $output\n";
+                    } else {
+                        # Standalone job master - print to stdout directly
+                        print $stomp_prompt . "$output\n";
+                    }
 
                 } elsif ($line =~ /^ERROR (.*)$/) {
                     my $error = $1;
@@ -10756,7 +10766,8 @@ sub run_job_master {
                                                             package|preinstall|rebuild_cache|edit_cache)$/x;
 
                         # Only verify file existence for targets that look like real files
-                        my $should_verify = $looks_like_file && !$is_common_phony;
+                        # Skip verification in dry-run mode since files aren't actually created
+                        my $should_verify = $looks_like_file && !$is_common_phony && !$dry_run_mode;
 
                         if (!$should_verify || verify_target_exists($job->{target}, $job->{dir})) {
                             $completed_targets{$job->{target}} = 1;

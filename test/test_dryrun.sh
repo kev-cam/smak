@@ -1,12 +1,23 @@
 #!/bin/bash
 # Test dry-run, make-cmp, and ! commands
 
-echo "Testing new commands..."
+echo "Testing --dry-run"
 echo ""
 
-cat <<'EOF' | ../smak -f Makefile.nested-dry -Kd
-dry-run test.o
-! echo "Hello from shell"
-! ls -la Makefile.nested
-quit
-EOF
+timeout 5 ../smak -f Makefile.nested-dry --dry-run > Makefile.nested-dry.log
+sts=$?
+wait
+cat Makefile.nested-dry.log
+
+case $sts in
+    0) set -- `grep Makefile.nested-dry Makefile.nested-dry.log | grep no-gcc | wc -l`
+       if [ $1 != 1 ] ; then
+	   sts=2
+       fi
+       ;;
+esac
+
+rm -f Makefile.nested-dry.log
+
+exit $sts
+

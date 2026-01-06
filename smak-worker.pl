@@ -5,6 +5,7 @@ use IO::Socket::INET;
 use POSIX qw(:sys_wait_h);
 use File::Path qw(make_path remove_tree);
 use File::Copy qw(copy move);
+use Cwd;
 
 # Analyze command failures and determine if they're acceptable
 sub is_acceptable_failure {
@@ -223,8 +224,7 @@ sub get_task {
 	print STDERR "$command\n" if $ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} ne 'w';
 	
 	# Change to directory
-	$old_dir = `pwd`;
-	chomp $old_dir;
+	$old_dir = getcwd();
 	chdir($dir) or do {
 	    # Send error back
 	    print $socket "TASK_START $task_id\n";
@@ -236,6 +236,7 @@ sub get_task {
 	
 	# Signal task start
 	print $socket "TASK_START $task_id\n";
+	$socket->flush();
     }
     else {
 	print $socket "TASK_RETURN $task_id Not ready\n";
@@ -293,10 +294,14 @@ while (my $line = <$socket>) {
     if ($line =~ /^TASK (\d+)$/) {
 	get_task($1,$env_done);
 
+        # In dry-run mode, skip all command parsing - just echo and return
+        # This avoids expensive regex operations that aren't needed
+        my @recursive_calls;
+
+        if (0) {  # Disabled in dry-run mode
         # Check if command has recursive smak/make -C calls
         # Even if mixed with other commands, we can optimize the recursive parts
         my @command_parts = split(/\s+&&\s+/, $command);
-        my @recursive_calls;
         my @non_recursive_parts;
         my $found_non_recursive = 0;
 

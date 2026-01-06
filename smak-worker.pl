@@ -298,7 +298,6 @@ while (my $line = <$socket>) {
         # This avoids expensive regex operations that aren't needed
         my @recursive_calls;
 
-        if (0) {  # Disabled in dry-run mode
         # Check if command has recursive smak/make -C calls
         # Even if mixed with other commands, we can optimize the recursive parts
         my @command_parts = split(/\s+&&\s+/, $command);

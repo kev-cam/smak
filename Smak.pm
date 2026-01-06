@@ -741,6 +741,15 @@ sub execute_command_sequential {
     # Strip command prefixes (@ for silent, - for ignore errors)
     my ($clean_command, $cmd_silent, $ignore_errors) = strip_command_prefixes($command);
 
+    # In dry-run mode, just print the command without executing it
+    if ($dry_run_mode) {
+        unless ($silent_mode || $cmd_silent) {
+            print "$clean_command\n";
+        }
+        chdir($old_dir) if $old_dir;
+        return 0;
+    }
+
     # Execute command as a pipe to stream output in real-time
     # Redirect stderr to stdout and append exit status marker
     my $pid = open(my $cmd_fh, '-|', "$clean_command 2>&1 ; echo EXIT_STATUS=\$?");
@@ -4305,28 +4314,6 @@ sub build_target {
                 }
             }
 
-            # Handle rm commands as built-ins (both normal and dry-run mode)
-            # This avoids job server overhead for simple file removal commands
-            if ($clean_cmd =~ /^rm\s+(.+)$/) {
-                my $rm_args = $1;
-                warn "DEBUG[" . __LINE__ . "]:     Detected built-in rm command\n" if $ENV{SMAK_DEBUG};
-
-                # Parse rm arguments
-                my @args = split(/\s+/, $rm_args);
-
-                # Print command before execution
-                unless ($silent_mode || $silent) {
-                    print "$display_cmd\n";
-                }
-
-                # Execute the built-in rm
-                my $result = builtin_rm(@args);
-                if (!$result && !$ignore_errors) {
-                    die "smak: *** [$target] Error 1\n";
-                }
-                next;
-            }
-
             # Translate "make" to "smak" for built-in handling
             # This allows smak to handle recursive $(MAKE) invocations
             my $normalized_cmd = $clean_cmd;
@@ -4351,24 +4338,28 @@ sub build_target {
                 }
             }
 
-            # Handle compound commands with multiple smak/make invocations chained with &&
-            # Split and execute each as a built-in
-            if ($clean_cmd =~ /&&/ && $clean_cmd =~ /(?:make|smak)/) {
-                # Check if this is a chain of smak/make commands
+            # Handle compound commands with multiple commands chained with &&
+            # This MUST come before the simple rm check below, otherwise compound commands
+            # starting with rm will be caught by the simple rm handler
+            # Split and execute each as a built-in (rm, make/smak, etc.)
+            if ($clean_cmd =~ /&&/) {
+                warn "DEBUG[" . __LINE__ . "]: Found compound command: $clean_cmd\n" if $ENV{SMAK_DEBUG};
+                # Split on && and check if we can handle all parts as built-ins
                 my @parts = split(/\s+&&\s+/, $clean_cmd);
-                my $all_recursive = 1;
+                my $can_handle_all = 1;
                 for my $part (@parts) {
                     # Allow 'true' or 'false' as terminating commands
                     next if $part =~ /^\s*(true|false)\s*$/;
-                    # Check if it's a make/smak command
-                    unless ($part =~ /\b(make|smak)\s/ || $part =~ m{/smak(?:\s|$)}) {
-                        $all_recursive = 0;
+                    # Check if it's a built-in we can handle (rm, make/smak)
+                    unless ($part =~ /^\s*rm\b/ || $part =~ /\b(make|smak)\s/ || $part =~ m{/smak(?:\s|$)}) {
+                        warn "DEBUG[" . __LINE__ . "]: Cannot handle part: $part\n" if $ENV{SMAK_DEBUG};
+                        $can_handle_all = 0;
                         last;
                     }
                 }
 
-                if ($all_recursive) {
-                    warn "DEBUG[" . __LINE__ . "]: Splitting compound recursive make command\n" if $ENV{SMAK_DEBUG};
+                if ($can_handle_all) {
+                    warn "DEBUG[" . __LINE__ . "]: Splitting compound command with built-ins\n" if $ENV{SMAK_DEBUG};
 
                     # Print the original command
                     unless ($silent_mode || $silent) {
@@ -4379,6 +4370,15 @@ sub build_target {
                     for my $part (@parts) {
                         # Skip 'true' or 'false'
                         next if $part =~ /^\s*(true|false)\s*$/;
+
+                        # Check if it's an rm command
+                        if ($part =~ /^\s*rm\b/) {
+                            # Execute as built-in rm
+                            my @args = shell_split($part);
+                            shift @args;  # Remove 'rm'
+                            builtin_rm(@args);
+                            next;
+                        }
 
                         # Parse and execute as recursive make
                         my ($sub_makefile, $sub_directory, @sub_targets) = parse_make_command($part);
@@ -4430,6 +4430,29 @@ sub build_target {
 
                     next;  # Skip normal execution
                 }
+            }
+
+            # Handle rm commands as built-ins (both normal and dry-run mode)
+            # This avoids job server overhead for simple file removal commands
+            # This must come AFTER compound command handling above
+            if ($clean_cmd =~ /^rm\s+(.+)$/) {
+                my $rm_args = $1;
+                warn "DEBUG[" . __LINE__ . "]:     Detected built-in rm command\n" if $ENV{SMAK_DEBUG};
+
+                # Parse rm arguments
+                my @args = split(/\s+/, $rm_args);
+
+                # Print command before execution
+                unless ($silent_mode || $silent) {
+                    print "$display_cmd\n";
+                }
+
+                # Execute the built-in rm
+                my $result = builtin_rm(@args);
+                if (!$result && !$ignore_errors) {
+                    die "smak: *** [$target] Error 1\n";
+                }
+                next;
             }
 
             # Check if this is a recursive make/smak invocation (both dry-run and normal mode)
@@ -4499,6 +4522,28 @@ sub build_target {
 
                     # Restore makefile state
                     $makefile = $saved_makefile;
+                    next;
+                } else {
+                    # No -f or -C options, build targets in current makefile
+                    # Print command before execution
+                    unless ($silent_mode || $silent) {
+                        print "$display_cmd\n";
+                    }
+
+                    if (@sub_targets) {
+                        for my $sub_target (@sub_targets) {
+                            build_target($sub_target, $visited, $depth + 1);
+                        }
+                    } else {
+                        # No targets specified, build first target
+                        my $first_target = get_first_target($makefile);
+                        build_target($first_target, $visited, $depth + 1) if $first_target;
+                    }
+
+                    # Restore directory if changed
+                    if ($saved_cwd) {
+                        chdir($saved_cwd) or warn "Warning: Could not restore directory to '$saved_cwd': $!\n";
+                    }
                     next;
                 }
             }
@@ -7999,8 +8044,8 @@ sub run_job_master {
         my $pid = fork();
         die "Cannot fork worker: $!\n" unless defined $pid;
 
-        if ($pid == 0) {	    
-            # Child - exec worker
+        if ($pid == 0) {
+            # Child - run worker
             if ($ssh_host) {
 		my $local_path = getcwd();
 		$local_path =~ s=^$fuse_mountpoint/==;
@@ -8016,9 +8061,12 @@ sub run_job_master {
                 exec(@ssh_cmd);
                 die "Failed to exec SSH worker: $!\n";
             } else {
-                # Local mode
-                exec($worker_script, "127.0.0.1:$worker_port");
-                die "Failed to exec worker: $!\n";
+                # Local mode - call worker routine directly
+                # This avoids fork+exec overhead by calling the routine in the same process
+                use SmakWorker;
+                SmakWorker::run_worker('127.0.0.1', $worker_port, $dry_run_mode);
+                # Should not reach here - run_worker() exits
+                exit 99;
             }
         }
         vprint "Spawned worker $i (PID $pid)\n";

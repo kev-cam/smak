@@ -1,6 +1,11 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
+
+# Use separate package namespace to avoid symbol conflicts with Smak.pm
+# when loaded via 'do' instead of exec
+package SmakWorkerDry;
+
 use IO::Socket::INET;
 use POSIX qw(:sys_wait_h);
 use File::Path qw(make_path remove_tree);

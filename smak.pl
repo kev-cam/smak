@@ -726,8 +726,9 @@ sub execute_script_file {
 # Set dry-run mode if requested
 if ($dry_run) {
     set_dry_run_mode(1);
-    # Force -j1 in dry-run mode to use single dummy worker
-    # Must use job server (not sequential) for dummy worker to work
+    # Force -j1 in dry-run mode to ensure job server is available with dry-worker
+    # Built-ins (rm, recursive make) execute directly without going to workers
+    # This keeps the infrastructure available while avoiding worker overhead for most commands
     $jobs = 1;
 }
 

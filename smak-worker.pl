@@ -462,9 +462,10 @@ while (my $line = <$socket>) {
         my @warnings;
         my $max_retries = 3;
         my $attempt = 0;
+        my $cancelled = 0;
 
         # Retry loop for transient failures
-        while ($attempt < $max_retries) {
+        while ($attempt < $max_retries && !$cancelled) {
             $attempt++;
             @errors = ();
             @warnings = ();
@@ -503,6 +504,14 @@ while (my $line = <$socket>) {
                             kill 'TERM', $pid if $pid;
                             print STDERR "Worker shutting down during task\n";
                             exit 0;
+                        } elsif ($msg eq 'CANCEL') {
+                            # Cancel current task but stay alive
+                            kill 'TERM', $pid if $pid;
+                            print STDERR "Worker cancelled task $task_id\n";
+                            print $socket "TASK_END $task_id 130\n";  # 130 = interrupted
+                            print $socket "READY\n";
+                            $cancelled = 1;
+                            last;  # Exit the select loop
                         } elsif ($msg eq 'STATUS') {
                             print $socket "RUNNING $task_id\n";
                         }
@@ -593,11 +602,13 @@ while (my $line = <$socket>) {
             last;
         }
 
-        # Send completion
-        print $socket "TASK_END $task_id $exit_code\n";
+        # Send completion (unless already sent by CANCEL handler)
+        if (!$cancelled) {
+            print $socket "TASK_END $task_id $exit_code\n";
 
-        # Send ready for next task
-        print $socket "READY\n";
+            # Send ready for next task
+            print $socket "READY\n";
+        }
 
         # Restore directory
         chdir($old_dir);

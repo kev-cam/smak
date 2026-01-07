@@ -5121,10 +5121,19 @@ sub unified_cli {
             if (defined $socket) {
                 eval {
                     print $socket "KILL_WORKERS\n";
-                    # response checked in main loop
+                    $socket->flush();
+                    # Drain any pending responses
+                    my $sel = IO::Select->new($socket);
+                    while ($sel->can_read(0.3)) {
+                        my $drain = <$socket>;
+                        last unless defined $drain;
+                        warn "DEBUG: drained after cancel: $drain" if $ENV{SMAK_DEBUG};
+                    }
                 };
             }
-            print "\n^C - Cancelling ongoing builds...\n";
+            # Don't clear cancel_requested here - let unified_cli handle it
+            # so it knows to continue rather than exit
+            print "\nCtrl-C - Cancelling ongoing builds...\n";
             STDOUT->flush();
             return -2;  # Had output, will trigger prompt redraw
         }
@@ -5667,7 +5676,24 @@ sub cmd_build {
             # Wait for completion
             my $select = IO::Select->new($socket);
             my $job_done = 0;
-            while (!$exit_req && !$job_done) {
+            my $cancelled = 0;
+            while (!$exit_req && !$job_done && !$cancelled) {
+                # Check for Ctrl-C cancel request
+                if ($SmakCli::cancel_requested) {
+                    print "\nCtrl-C - Cancelling build...\n";
+                    print $socket "KILL_WORKERS\n";
+                    $socket->flush();
+                    $SmakCli::cancel_requested = 0;
+                    $cancelled = 1;
+                    # Drain socket to clear any pending messages
+                    while ($select->can_read(0.5)) {
+                        my $drain = <$socket>;
+                        last unless defined $drain;
+                        chomp $drain;
+                        print "  [cancelled: $drain]\n" if $ENV{SMAK_DEBUG};
+                    }
+                    last;
+                }
                 if ($select->can_read(0.1)) {
                     my $response = <$socket>;
                     last unless defined $response;
@@ -7161,10 +7187,25 @@ HELP
                     # Wait for job completion, displaying output as it arrives
                     my $select = IO::Select->new($job_server_socket);
                     my $job_done = 0;
+                    my $cancelled = 0;
                     my $timeout = 60;  # 60 seconds total timeout
                     my $deadline = time() + $timeout;
 
-                    while (!$job_done && time() < $deadline) {
+                    while (!$job_done && !$cancelled && time() < $deadline) {
+                        # Check for Ctrl-C cancel request
+                        if ($SmakCli::cancel_requested) {
+                            print $OUT "\nCtrl-C - Cancelling build...\n";
+                            print $job_server_socket "KILL_WORKERS\n";
+                            $job_server_socket->flush();
+                            $SmakCli::cancel_requested = 0;
+                            $cancelled = 1;
+                            # Drain socket to clear pending messages
+                            while ($select->can_read(0.5)) {
+                                my $drain = <$job_server_socket>;
+                                last unless defined $drain;
+                            }
+                            last;
+                        }
                         # Process messages from job server
                         if ($select->can_read(0.1)) {
                             my $response = <$job_server_socket>;
@@ -7197,7 +7238,7 @@ HELP
                         }
                     }
 
-                    if (!$job_done) {
+                    if (!$job_done && !$cancelled) {
                         print $OUT "Build timed out after ${timeout}s\n";
                     }
                 } else {
@@ -10165,17 +10206,22 @@ sub run_job_master {
                     print $master_socket "TASKS_END\n";
 
                 } elsif ($line =~ /^KILL_WORKERS$/) {
-                    # Kill all workers
-                    print STDERR "Killing all workers\n";
+                    # Cancel all running jobs but keep workers alive
+                    print STDERR "Cancelling all running jobs\n";
+                    my $cancelled_count = 0;
                     for my $worker (@workers) {
-                        print $worker "SHUTDOWN\n";
-                        close($worker);
-                        $select->remove($worker);
+                        if (!$worker_status{$worker}{ready}) {
+                            # Worker is busy - send cancel
+                            print $worker "CANCEL\n";
+                            $cancelled_count++;
+                        }
                     }
-                    @workers = ();
-                    %worker_status = ();
+                    # Clear all build state so next build can start fresh
+                    my $queue_cleared = scalar(@job_queue);
+                    @job_queue = ();
                     %running_jobs = ();
-                    print $master_socket "All workers killed\n";
+                    %in_progress = ();
+                    print $master_socket "Cancelled $cancelled_count job(s), cleared $queue_cleared queued\n";
 
                 } elsif ($line =~ /^BENCHMARK$/) {
                     # Benchmark worker communication latency
@@ -11148,6 +11194,12 @@ sub run_job_master {
                     # Don't mark ready here - wait for READY message
                     delete $running_jobs{$task_id};
 
+                    # If job was already removed (e.g., by cancel), skip processing
+                    unless ($job) {
+                        print STDERR "Task $task_id ended but already removed (cancelled?)\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+
                     # Track successfully completed targets to avoid rebuilding
                     if ($exit_code == 0 && $job->{target}) {
                         # If this is a clean-like target, detect rm commands and mark removed files as stale
@@ -11555,6 +11607,7 @@ sub wait_for_jobs
 
 # Signal handlers - Ctrl-C just sets a flag
 sub cancel_handler {
+    warn "DEBUG: cancel_handler called, interactive=$interactive\n" if $ENV{SMAK_DEBUG};
     $SmakCli::cancel_requested = 2; # 1 if read Ctrl-C
     if (! $interactive) {
 	cmd_kill();

@@ -420,7 +420,7 @@ run_test() {
     # Helper function to run a single mode
     run_single_mode() {
         local mode_cache="$1"  # "off" or "default"
-        local mode_jobs="$2"   # "" (sequential) or "-j4" (parallel)
+        local mode_jobs="$2"   # "" (sequential) or "-j 4" (parallel)
         local output_file="$3"  # temp file to store output
 
         if [ $is_interactive -eq 1 ] && [ $has_script -ne 0 ] && [ $TTY_MODE -eq 0 ]; then
@@ -457,14 +457,9 @@ WRAPPER_EOF
 
         else
             # Default: non-interactive tests, redirect stdin (monitor log instead of timeout)
-            # For parallel mode, modify the test script invocation
-            if [ -n "$mode_jobs" ] || [ -n "$SMAK_EXTRA_ARGS" ]; then
-                # Inject -j4 and extra args into smak invocation (handles both $SMAK variable and literal 'smak')
-                local inject_args="$mode_jobs $SMAK_EXTRA_ARGS"
-                env SMAK_CACHE_DIR=$mode_cache bash -c "sed 's/\(\\\$SMAK\|smak\)\( \|$\)/\1 $inject_args\2/' '$test_script' | bash" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
-            else
-                env SMAK_CACHE_DIR=$mode_cache ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
-            fi
+            # For parallel mode, use USR_SMAK_OPT to inject -j 4 and extra args
+            local inject_args="$mode_jobs $SMAK_EXTRA_ARGS"
+            env SMAK_CACHE_DIR=$mode_cache USR_SMAK_OPT="$inject_args" ./"$test_script" >"$output_file" 2>&1 < "${script_file:-/dev/null}" &
             local pid=$!
             monitor_process "$pid" "$output_file" 30 100
             return $?
@@ -592,7 +587,7 @@ WRAPPER_EOF
         result_par_nocache=-2  # Special marker for skipped
         local result_par_nocache_fail=-2
     else
-        run_single_mode "off" "-j4" "$out_par_nc"
+        run_single_mode "off" "-j 4" "$out_par_nc"
         result_par_nocache=$?
         local result_par_nocache_fail=0
         if [ $result_par_nocache -eq 124 ]; then
@@ -604,7 +599,7 @@ WRAPPER_EOF
         fi
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
-            run_fail_test "off" "-j4" "$fail_out"
+            run_fail_test "off" "-j 4" "$fail_out"
             result_par_nocache_fail=$?
             rm -f "$fail_out"
         fi
@@ -623,7 +618,7 @@ WRAPPER_EOF
         result_par_cache=-2  # Special marker for skipped
         local result_par_cache_fail=-2
     else
-        run_single_mode "default" "-j4" "$out_par_c"
+        run_single_mode "default" "-j 4" "$out_par_c"
         result_par_cache=$?
         local result_par_cache_fail=0
         if [ $result_par_cache -eq 124 ]; then
@@ -635,7 +630,7 @@ WRAPPER_EOF
         fi
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
-            run_fail_test "default" "-j4" "$fail_out"
+            run_fail_test "default" "-j 4" "$fail_out"
             result_par_cache_fail=$?
             rm -f "$fail_out"
         fi

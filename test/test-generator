@@ -15,6 +15,7 @@ parallel_jobs="2,4,8"  # Comma-separated list of job counts to test
 build_timeout=60
 max_dummy_delay=2  # Maximum delay in dummy-command (seconds)
 log_timeout_multiplier=3  # Log must update within max_delay * multiplier
+output_dir=""  # Output directory (default: test-N)
 
 # Usage message
 usage() {
@@ -26,6 +27,7 @@ Options:
     -s NUM          Number of source files to generate (default: 5)
     -o NUM          Number of object/intermediate files (default: 10)
     -t NUM          Number of final targets (default: 3)
+    -d DIR          Output directory (default: test-N in current dir)
     -r              Run test after generation (sequential then parallel)
     -j NUMS         Comma-separated job counts for parallel tests (default: 2,4,8)
     -T NUM          Build timeout in seconds (default: 60)
@@ -42,12 +44,13 @@ EOF
 }
 
 # Parse arguments
-while getopts "n:s:o:t:rj:T:ch" opt; do
+while getopts "n:s:o:t:d:rj:T:ch" opt; do
     case $opt in
         n) test_num=$OPTARG ;;
         s) num_sources=$OPTARG ;;
         o) num_objects=$OPTARG ;;
         t) num_targets=$OPTARG ;;
+        d) output_dir=$OPTARG ;;
         r) run_test=true ;;
         j) parallel_jobs=$OPTARG ;;
         T) build_timeout=$OPTARG ;;
@@ -56,6 +59,9 @@ while getopts "n:s:o:t:rj:T:ch" opt; do
         *) usage ;;
     esac
 done
+
+# Save original working directory (for -d option)
+ORIG_DIR="$(pwd)"
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,15 +76,26 @@ if $cleanup; then
     exit 0
 fi
 
-# Auto-detect next test number if not specified
-if [[ -z "$test_num" ]]; then
-    test_num=1
-    while [[ -d "test-$test_num" ]]; do
-        ((test_num++))
-    done
+# Determine output directory
+if [[ -n "$output_dir" ]]; then
+    # Make -d path relative to original working directory
+    if [[ "$output_dir" = /* ]]; then
+        # Absolute path
+        test_dir="$output_dir"
+    else
+        # Relative path - resolve from original directory
+        test_dir="$ORIG_DIR/$output_dir"
+    fi
+else
+    # Auto-detect next test number if not specified
+    if [[ -z "$test_num" ]]; then
+        test_num=1
+        while [[ -d "test-$test_num" ]]; do
+            ((test_num++))
+        done
+    fi
+    test_dir="test-$test_num"
 fi
-
-test_dir="test-$test_num"
 
 echo "Generating $test_dir with:"
 echo "  - $num_sources source files"
@@ -89,12 +106,16 @@ echo "  - $num_targets final targets"
 mkdir -p "$test_dir"
 cd "$test_dir"
 
+# Calculate path to dummy-command (in SCRIPT_DIR)
+# Use absolute path for reliability
+DUMMY_PATH="$SCRIPT_DIR/dummy-command"
+
 # Generate the Makefile header
-cat > Makefile << 'EOF'
+cat > Makefile << EOF
 # Auto-generated Makefile for smak testing
 # Uses dummy-command to simulate build processes
 
-DUMMY := ../dummy-command
+DUMMY := $DUMMY_PATH
 
 EOF
 

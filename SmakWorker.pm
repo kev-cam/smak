@@ -160,13 +160,11 @@ sub run_worker {
                 }
             }
 
-            # Send completion
+            # Send completion and ready immediately
+            # Always flush to ensure prompt dispatch of next job
             print $socket "TASK_END $task_id $exit_code\n";
-            $socket->flush() if $is_dry_run;
-            
-            # Send ready for next task
             print $socket "READY\n";
-            $socket->flush() if $is_dry_run;
+            $socket->flush();
             
             # Restore directory
             chdir($old_dir);

@@ -9478,6 +9478,7 @@ sub run_job_master {
             print $ready_worker "TASK $task_id\n";
             print $ready_worker "DIR $job->{dir}\n";
             print $ready_worker "CMD $job->{command}\n";
+            $ready_worker->flush();  # Ensure immediate send to worker
 
             vprint "Dispatched task $task_id to worker\n";
 
@@ -11596,6 +11597,24 @@ sub run_job_master {
 
                     # Clean up dispatch tracking
                     delete $currently_dispatched{$job->{target}} if exists $currently_dispatched{$job->{target}};
+
+                    # Immediately check for READY message to enable streaming dispatch
+                    # Workers send TASK_END followed immediately by READY - process both together
+                    # to avoid waiting for the next select() iteration
+                    $socket->blocking(0);
+                    my $next_line = <$socket>;
+                    $socket->blocking(1);
+                    if (defined $next_line && $next_line =~ /\S/) {
+                        chomp $next_line;
+                        if ($next_line eq 'READY') {
+                            $worker_status{$socket}{ready} = 1;
+                            vprint "Worker ready (streaming)\n";
+                            dispatch_jobs();
+                        } else {
+                            # Non-READY message - shouldn't happen but log for debugging
+                            print STDERR "Unexpected message after TASK_END: $next_line\n" if $ENV{SMAK_DEBUG};
+                        }
+                    }
                 }
             }
         }

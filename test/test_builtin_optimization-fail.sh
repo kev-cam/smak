@@ -38,15 +38,15 @@ SUBMAKE
 
 cat > Makefile.builtin-test << 'MAINMAKE'
 all:
-	../smak -C subdir1 all && ../smak -C subdir2 all && ../smak -C subdir3 all
+	${USR_SMAK_SCRIPT:-smak} -C subdir1 all && ${USR_SMAK_SCRIPT:-smak} -C subdir2 all && ${USR_SMAK_SCRIPT:-smak} -C subdir3 all
 
 clean:
-	../smak -C subdir1 clean && ../smak -C subdir2 clean && ../smak -C subdir3 clean
+	${USR_SMAK_SCRIPT:-smak} -C subdir1 clean && ${USR_SMAK_SCRIPT:-smak} -C subdir2 clean && ${USR_SMAK_SCRIPT:-smak} -C subdir3 clean
 MAINMAKE
 
 # Run test with SMAK_NO_BUILTINS to force spawning
 # SMAK_ASSERT_NO_SPAWN should trigger and fail
-SMAK_NO_BUILTINS=1 SMAK_ASSERT_NO_SPAWN=1 ../smak -f Makefile.builtin-test clean 2>&1 | grep -q "SMAK_ASSERT_NO_SPAWN"
+SMAK_NO_BUILTINS=1 SMAK_ASSERT_NO_SPAWN=1 ${USR_SMAK_SCRIPT:-smak} -f Makefile.builtin-test clean 2>&1 | grep -q "SMAK_ASSERT_NO_SPAWN"
 result=$?
 
 # Cleanup

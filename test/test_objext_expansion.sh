@@ -11,7 +11,7 @@ FAILED=0
 
 # Test: Dry-run should expand $(OBJEXT) without hitting iteration limit
 echo "Test: Dry-run with automake-style variables"
-DRY_OUTPUT=$(../smak -n -f "$MAKEFILE" all 2>&1)
+DRY_OUTPUT=$(${USR_SMAK_SCRIPT:-smak} -n -f "$MAKEFILE" all 2>&1)
 EXIT_CODE=$?
 
 # Check for iteration limit warning

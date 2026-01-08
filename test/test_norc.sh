@@ -25,7 +25,7 @@ all:
 EOF
 
 echo "Test 1: With SMAK_RCFILE (should read rc file and use TestMakefile.norc)"
-OUTPUT_WITH_RC=$(SMAK_RCFILE=test_norc.rc ../smak all 2>&1)
+OUTPUT_WITH_RC=$(SMAK_RCFILE=test_norc.rc ${USR_SMAK_SCRIPT:-smak} all 2>&1)
 if echo "$OUTPUT_WITH_RC" | grep -q "Using TestMakefile.norc"; then
     echo "  PASS: RC file was read (makefile variable was set)"
 elif echo "$OUTPUT_WITH_RC" | grep -q "Using default Makefile"; then
@@ -38,7 +38,7 @@ fi
 
 echo ""
 echo "Test 2: With -norc flag (should NOT read default .smak.rc)"
-OUTPUT_WITHOUT_RC=$(../smak -norc all 2>&1)
+OUTPUT_WITHOUT_RC=$(${USR_SMAK_SCRIPT:-smak} -norc all 2>&1)
 if echo "$OUTPUT_WITHOUT_RC" | grep -q "Using default Makefile"; then
     echo "  PASS: RC file was ignored (used default Makefile)"
 elif echo "$OUTPUT_WITHOUT_RC" | grep -q "Using TestMakefile.norc"; then
@@ -51,7 +51,7 @@ fi
 
 echo ""
 echo "Test 3: Verify -norc overrides SMAK_RCFILE environment variable"
-OUTPUT_ENV=$(SMAK_RCFILE=test_norc.rc ../smak -norc all 2>&1)
+OUTPUT_ENV=$(SMAK_RCFILE=test_norc.rc ${USR_SMAK_SCRIPT:-smak} -norc all 2>&1)
 if echo "$OUTPUT_ENV" | grep -q "Using default Makefile"; then
     echo "  PASS: SMAK_RCFILE ignored with -norc"
 elif echo "$OUTPUT_ENV" | grep -q "Using TestMakefile.norc"; then

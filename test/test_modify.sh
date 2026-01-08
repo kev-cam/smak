@@ -8,7 +8,7 @@ echo ""
 rm -f Makefile.nested-smak
 
 echo "Test 1: Add a new rule, modify dependencies, and save"
-cat <<'EOF' | ../smak -f Makefile.nested -Kd
+cat <<'EOF' | ${USR_SMAK_SCRIPT:-smak} -f Makefile.nested -Kd
 add-rule newtest : test.o : gcc -o newtest test.o
 list
 show newtest
@@ -29,11 +29,11 @@ fi
 
 echo ""
 echo "Test 3: Load the saved modifications"
-../smak -f Makefile.nested -Kd < Makefile.nested-smak
+${USR_SMAK_SCRIPT:-smak} -f Makefile.nested -Kd < Makefile.nested-smak
 
 echo ""
 echo "Test 4: Test delete rule"
-cat <<'EOF' | ../smak -f Makefile.nested -Kd
+cat <<'EOF' | ${USR_SMAK_SCRIPT:-smak} -f Makefile.nested -Kd
 add-rule temptest : foo.o : gcc -o temptest foo.o
 list
 del-rule temptest
@@ -43,7 +43,7 @@ EOF
 
 echo ""
 echo "Test 5: Test modify rule"
-cat <<'EOF' | ../smak -f Makefile.nested -Kd
+cat <<'EOF' | ${USR_SMAK_SCRIPT:-smak} -f Makefile.nested -Kd
 mod-rule all : echo Building all\n\techo Done
 show all
 quit

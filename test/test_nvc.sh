@@ -20,11 +20,11 @@ cd "$NVC_BUILD_DIR" || exit 1
 
 # First, clean
 echo "  Running clean..."
-../smak/smak clean >/dev/null 2>&1 || true
+${USR_SMAK_SCRIPT:-smak}/smak clean >/dev/null 2>&1 || true
 
 # Now try to build
 echo "  Building..."
-BUILD_OUTPUT=$(../smak/smak 2>&1)
+BUILD_OUTPUT=$(${USR_SMAK_SCRIPT:-smak}/smak 2>&1)
 EXIT_CODE=$?
 
 # Check for variable expansion iteration limit warning
@@ -60,10 +60,10 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo ""
     echo "Test: Clean and rebuild with -j4"
     echo "  Running clean..."
-    ../smak/smak clean >/dev/null 2>&1 || true
+    ${USR_SMAK_SCRIPT:-smak}/smak clean >/dev/null 2>&1 || true
 
     echo "  Building with -j4..."
-    BUILD_OUTPUT_PARALLEL=$(../smak/smak -j4 2>&1)
+    BUILD_OUTPUT_PARALLEL=$(${USR_SMAK_SCRIPT:-smak}/smak -j4 2>&1)
     EXIT_CODE_PARALLEL=$?
 
     if [ $EXIT_CODE_PARALLEL -eq 0 ]; then

@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 rm -f test_scan_file.txt
 
 # Start scanner in background
-../smak -scanner test_scan_file.txt > /tmp/scanner-output-$$.txt 2>&1 &
+${USR_SMAK_SCRIPT:-smak} -scanner test_scan_file.txt > /tmp/scanner-output-$$.txt 2>&1 &
 SCANNER_PID=$!
 
 # Give scanner time to start (increased for slower systems)

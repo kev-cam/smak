@@ -12,7 +12,7 @@ FAILED=0
 echo "Test: Dry-run lib/libnvc.a with nvc Makefile"
 cd ../projects/nvc || exit 1
 
-DRY_OUTPUT=$(../../smak -n lib/libnvc.a 2>&1)
+DRY_OUTPUT=$(../${USR_SMAK_SCRIPT:-smak} -n lib/libnvc.a 2>&1)
 EXIT_CODE=$?
 
 # Check for iteration limit warning

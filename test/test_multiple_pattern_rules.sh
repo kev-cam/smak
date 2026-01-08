@@ -36,7 +36,7 @@ EOM
 
 # Test 1: Dry-run should show correct commands for each source type
 echo "Test 1: Dry-run with multiple source types"
-OUTPUT=$(../../smak -n all 2>&1)
+OUTPUT=$(../${USR_SMAK_SCRIPT:-smak} -n all 2>&1)
 
 if echo "$OUTPUT" | grep -q "foo.c"; then
     echo "  ✓ PASS: foo.c rule found"
@@ -65,8 +65,8 @@ fi
 # Test 2: Actual build should work
 echo ""
 echo "Test 2: Actual build"
-../../smak clean > /dev/null 2>&1
-OUTPUT=$(../../smak all 2>&1)
+../${USR_SMAK_SCRIPT:-smak} clean > /dev/null 2>&1
+OUTPUT=$(../${USR_SMAK_SCRIPT:-smak} all 2>&1)
 EXITCODE=$?
 
 if [ $EXITCODE -eq 0 ]; then
@@ -90,7 +90,7 @@ fi
 echo ""
 echo "Test 3: Missing source - fallback to first rule"
 rm -f test.c test.cc test.cpp test.o
-OUTPUT=$(../../smak -n test.o 2>&1)
+OUTPUT=$(../${USR_SMAK_SCRIPT:-smak} -n test.o 2>&1)
 
 if echo "$OUTPUT" | grep -q "test.c"; then
     echo "  ✓ PASS: Falls back to .c rule when no source exists"

@@ -4,7 +4,7 @@
 echo "Testing format conversion in different contexts..."
 echo ""
 
-cat <<'EOF' | ../smak -f Makefile.nested -Kd
+cat <<'EOF' | ${USR_SMAK_SCRIPT:-smak} -f Makefile.nested -Kd
 print "Direct access: " . $MV{CC}
 print "In string: The compiler is $(CC)"
 print "Multiple vars: $(CC) $(CFLAGS)"

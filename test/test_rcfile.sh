@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 
 # Test 1: Using .smak.test.rc should show the message
 echo "Test 1: Verify .smak.test.rc is loaded"
-OUTPUT=$(SMAK_RCFILE=.smak.test.rc ../smak -f Makefile.test list 2>&1)
+OUTPUT=$(SMAK_RCFILE=.smak.test.rc ${USR_SMAK_SCRIPT:-smak} -f Makefile.test list 2>&1)
 if echo "$OUTPUT" | grep -q "Using SMAK_RCFILE:.*\.smak\.test\.rc"; then
     echo "  ✓ PASS: .smak.test.rc was loaded"
 else
@@ -19,7 +19,7 @@ fi
 
 # Test 2: Using /dev/null should not show the message
 echo "Test 2: Verify /dev/null works (no rc file loaded)"
-OUTPUT=$(SMAK_RCFILE=/dev/null ../smak -f Makefile.test list 2>&1)
+OUTPUT=$(SMAK_RCFILE=/dev/null ${USR_SMAK_SCRIPT:-smak} -f Makefile.test list 2>&1)
 if echo "$OUTPUT" | grep -q "Using SMAK_RCFILE"; then
     echo "  ✗ FAIL: /dev/null should not load any rc file"
     echo "  Output: $OUTPUT"
@@ -30,7 +30,7 @@ fi
 
 # Test 3: Verify the message shows the correct path
 echo "Test 3: Verify SMAK_RCFILE value is shown correctly"
-OUTPUT=$(SMAK_RCFILE=.smak.test.rc ../smak -f Makefile.test list 2>&1)
+OUTPUT=$(SMAK_RCFILE=.smak.test.rc ${USR_SMAK_SCRIPT:-smak} -f Makefile.test list 2>&1)
 if echo "$OUTPUT" | grep -q "Using SMAK_RCFILE:.*\.smak\.test\.rc"; then
     echo "  ✓ PASS: Correct SMAK_RCFILE path shown"
 else

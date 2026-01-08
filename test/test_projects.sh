@@ -25,7 +25,7 @@ while IFS= read -r -d '' makefile; do
 
     # Run smak --dry-run
     cd "$dir" || continue
-    output=$(../../smak --dry-run -f "$base" 2>&1)
+    output=$(${USR_SMAK_SCRIPT:-smak} --dry-run -f "$base" 2>&1)
     exit_code=$?
     cd - > /dev/null || exit 1
 
@@ -58,7 +58,7 @@ while IFS= read -r -d '' makefile; do
             ((PASSED++))
         else
             echo "  ✗ FAIL: Output differs from reference"
-            echo "    Run: diff <(../../smak --dry-run -f $base) $reference"
+            echo "    Run: diff <(${USR_SMAK_SCRIPT:-smak} --dry-run -f $base) $reference"
             ((FAILED++))
         fi
     fi

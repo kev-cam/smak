@@ -1,8 +1,7 @@
 #!/bin/bash
 # Test that phony targets can be run repeatedly without being cached
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SMAK="$SCRIPT_DIR/../smak"
+SMAK="${USR_SMAK_SCRIPT:-smak}"
 
 TESTDIR=$(mktemp -d)
 trap "rm -rf $TESTDIR" EXIT

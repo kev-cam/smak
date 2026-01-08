@@ -5,4 +5,4 @@ echo "Testing interactive debug mode..."
 echo ""
 
 cd "$(dirname "$0")"
-exec ../smak -Kd
+exec ${USR_SMAK_SCRIPT:-smak} -Kd

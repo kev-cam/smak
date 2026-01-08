@@ -4,7 +4,7 @@
 echo "Testing --dry-run"
 echo ""
 
-timeout 5 ../smak -f Makefile.nested-dry --dry-run > Makefile.nested-dry.log
+timeout 5 ${USR_SMAK_SCRIPT:-smak} -f Makefile.nested-dry --dry-run > Makefile.nested-dry.log
 sts=$?
 wait
 cat Makefile.nested-dry.log

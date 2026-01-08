@@ -20,12 +20,12 @@ cd "$IVERILOG_DIR" || exit 1
 
 # First, clean
 echo "  Running clean..."
-../smak/smak clean >/dev/null 2>&1 || true
+${USR_SMAK_SCRIPT:-smak}/smak clean >/dev/null 2>&1 || true
 
 # Now try to build and time it
 echo "  Building..."
 START_TIME=$(date +%s)
-BUILD_OUTPUT=$(../smak/smak 2>&1)
+BUILD_OUTPUT=$(${USR_SMAK_SCRIPT:-smak}/smak 2>&1)
 EXIT_CODE=$?
 END_TIME=$(date +%s)
 SEQUENTIAL_TIME=$((END_TIME - START_TIME))
@@ -70,10 +70,10 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo ""
     echo "Test: Clean and rebuild with -j1"
     echo "  Running clean..."
-    ../smak/smak clean >/dev/null 2>&1 || true
+    ${USR_SMAK_SCRIPT:-smak}/smak clean >/dev/null 2>&1 || true
 
     echo "  Building with -j1 (timeout ${TIMEOUT}s)..."
-    BUILD_OUTPUT_J1=$(timeout $TIMEOUT ../smak/smak -j1 2>&1)
+    BUILD_OUTPUT_J1=$(timeout $TIMEOUT ${USR_SMAK_SCRIPT:-smak}/smak -j1 2>&1)
     EXIT_CODE_J1=$?
 
     if [ $EXIT_CODE_J1 -eq 0 ]; then
@@ -92,10 +92,10 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo ""
     echo "Test: Clean and rebuild with -j4"
     echo "  Running clean..."
-    ../smak/smak clean >/dev/null 2>&1 || true
+    ${USR_SMAK_SCRIPT:-smak}/smak clean >/dev/null 2>&1 || true
 
     echo "  Building with -j4 (timeout ${TIMEOUT}s)..."
-    BUILD_OUTPUT_J4=$(timeout $TIMEOUT ../smak/smak -j4 2>&1)
+    BUILD_OUTPUT_J4=$(timeout $TIMEOUT ${USR_SMAK_SCRIPT:-smak}/smak -j4 2>&1)
     EXIT_CODE_J4=$?
 
     if [ $EXIT_CODE_J4 -eq 0 ]; then

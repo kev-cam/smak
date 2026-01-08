@@ -20,6 +20,8 @@ FAST_MODE=0
 PARALLEL_JOBS=1
 SMAK_EXTRA_ARGS=""
 EXTERNAL_TESTS=0
+WORKDIR=""
+LOG_DIR="${SMAK_TEST_LOG_DIR:-/tmp}"  # Directory for temp logs; set by workdir mode
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -54,6 +56,14 @@ while [ $# -gt 0 ]; do
         -x|--external)
             EXTERNAL_TESTS=1
             shift
+            ;;
+        -w|--workdir)
+            WORKDIR="$2"
+            if [ -z "$WORKDIR" ]; then
+                echo "Error: --workdir requires a directory argument"
+                exit 1
+            fi
+            shift 2
             ;;
         --filter)
             FILTER_PATTERN="$2"
@@ -103,6 +113,7 @@ Options:
   --filter <pattern>  Run only tests matching pattern (grep -E compatible)
   --no-parallel       Skip parallel test modes (only test sequential behavior)
   --fast              Skip remaining modes on first failure (mark skipped with -)
+  -w, --workdir DIR   Copy test files to DIR and run tests there (avoids clobbering repo)
   -clone local        Clone from local repository to /tmp/smak/test-<tag>/ and run tests there
   -clone query        Clone from remote, prompting for branch selection
   -h, --help          Show this help
@@ -124,6 +135,7 @@ Examples:
   $0 --list           # Show what tests would run
   $0 --filter autorescan  # Run only tests matching 'autorescan'
   $0 --filter "debug|builtin"  # Run tests matching 'debug' or 'builtin'
+  $0 -w /tmp/smak-test  # Run tests in /tmp/smak-test (avoids repo changes)
   $0 -clone local     # Test in clean clone of local repo
   $0 -clone query     # Test in clone, choose branch interactively
   $0 -norc            # Run tests with smak -norc (ignore user config)
@@ -201,6 +213,80 @@ monitor_process() {
     wait "$pid"
     return $?
 }
+
+# Handle workdir mode - copy test files to external directory
+if [ -n "$WORKDIR" ]; then
+    echo "======================================"
+    echo "WORKDIR MODE: Setting up test environment"
+    echo "======================================"
+    echo "Base directory: $WORKDIR"
+    echo ""
+
+    # Get the repository root
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+    # Create workdir
+    mkdir -p "$WORKDIR"
+
+    # Get absolute path for workdir
+    WORKDIR="$(cd "$WORKDIR" && pwd)"
+
+    # Copy test files to workdir
+    echo "Copying test files..."
+    cp "$SCRIPT_DIR"/*.sh "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/*.mk "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/Makefile "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/Makefile.* "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/run-regression "$WORKDIR/"
+    cp "$SCRIPT_DIR"/run-with-script.pl "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/run-tests "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/test-cli-advanced "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/.smak.test.rc "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/*.c "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/*.cxx "$WORKDIR/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/*.v "$WORKDIR/" 2>/dev/null || true
+
+    # Copy scripts directory if it exists
+    if [ -d "$SCRIPT_DIR/scripts" ]; then
+        mkdir -p "$WORKDIR/scripts"
+        cp "$SCRIPT_DIR/scripts"/* "$WORKDIR/scripts/" 2>/dev/null || true
+    fi
+
+    echo ""
+    echo "Setup complete. Running tests in $WORKDIR"
+    echo "Using smak from: $REPO_ROOT"
+    echo ""
+
+    # Change to workdir and re-run this script without workdir option
+    cd "$WORKDIR"
+
+    # Build the command to run, preserving other options
+    CMD="./run-regression"
+    [ $PARALLEL_JOBS -gt 1 ] && CMD="$CMD -j $PARALLEL_JOBS"
+    [ $SANITY_MODE -eq 1 ] && CMD="$CMD --sanity"
+    [ $FULL_MODE -eq 1 ] && CMD="$CMD --full"
+    [ $EXTERNAL_TESTS -eq 1 ] && CMD="$CMD --external"
+    [ $VERBOSE -eq 1 ] && CMD="$CMD --verbose"
+    [ $TTY_MODE -eq 1 ] && CMD="$CMD --tty"
+    [ $NO_PARALLEL -eq 1 ] && CMD="$CMD --no-parallel"
+    [ $FAST_MODE -eq 1 ] && CMD="$CMD --fast"
+    [ $LIST_MODE -eq 1 ] && CMD="$CMD --list"
+    [ -n "$FILTER_PATTERN" ] && CMD="$CMD --filter '$FILTER_PATTERN'"
+    [ -n "$SMAK_EXTRA_ARGS" ] && CMD="$CMD $SMAK_EXTRA_ARGS"
+
+    # Run the tests with smak repo at head of PATH and LOG_DIR set to workdir
+    export PATH="$REPO_ROOT:$PATH"
+    export SMAK_TEST_LOG_DIR="$WORKDIR"
+    eval $CMD
+    EXIT_CODE=$?
+
+    echo ""
+    echo "======================================"
+    echo "Test directory preserved at: $WORKDIR"
+    echo "======================================"
+
+    exit $EXIT_CODE
+fi
 
 # Handle clone mode
 if [ -n "$CLONE_MODE" ]; then
@@ -323,8 +409,8 @@ show_partial_report() {
     echo ""
 
     # Clean up any temp files from interrupted test
-    rm -f /tmp/smak-wrapper-*.sh 2>/dev/null
-    rm -f /tmp/smak-test-*.log 2>/dev/null
+    rm -f $LOG_DIR/smak-wrapper-*.sh 2>/dev/null
+    rm -f $LOG_DIR/smak-test-*.log 2>/dev/null
 
     exit 130  # Standard exit code for SIGINT
 }
@@ -376,7 +462,7 @@ run_test() {
     # Check if test uses interactive debug mode (-Kd flag)
     # These tests need PTY automation to work properly
     local is_interactive=0
-    if grep -q "smak.*-Kd" "$test_script" 2>/dev/null; then
+    if grep -q "\-Kd" "$test_script" 2>/dev/null; then
         is_interactive=1
     fi
 
@@ -391,11 +477,11 @@ run_test() {
 	script_file=$script_file_path
     elif [ $is_interactive -eq 1 ] && [ $TTY_MODE -eq 0 ]; then
         # For interactive tests without script file, extract commands from heredoc
-        # Look for heredoc pattern: cat <<EOF | ../smak -Kd
-        if grep -q "cat.*<<.*|.*smak.*-Kd" "$test_script" 2>/dev/null; then
+        # Look for heredoc pattern: cat <<EOF | ... -Kd
+        if grep -q "cat.*<<.*|.*-Kd" "$test_script" 2>/dev/null; then
             # Extract commands from heredoc (between <<EOF and EOF)
-            temp_script_file="/tmp/smak-script-${test_name}-$$.script"
-            sed -n '/cat.*<<.*|.*smak.*-Kd/,/^EOF$/p' "$test_script" | \
+            temp_script_file="$LOG_DIR/smak-script-${test_name}-$$.script"
+            sed -n '/cat.*<<.*|.*-Kd/,/^EOF$/p' "$test_script" | \
                 sed '1d;$d' > "$temp_script_file"
             script_file="$temp_script_file"
             has_script=2
@@ -425,14 +511,15 @@ run_test() {
 
         if [ $is_interactive -eq 1 ] && [ $has_script -ne 0 ] && [ $TTY_MODE -eq 0 ]; then
             # Extract smak arguments from test script (e.g., -f Makefile.test)
-            local smak_args=$(grep -oP '(?<=smak ).*(?=-Kd)' "$test_script" | head -1)
+            # Works with both old (../smak) and new (${USR_SMAK_SCRIPT:-smak}) formats
+            local smak_args=$(grep -E '\-Kd' "$test_script" | sed -n 's/.*smak[}]*[ ]*\(.*\)-Kd.*/\1/p' | head -1)
 
             # Create wrapper script that execs smak directly with jobs arg
-            local wrapper_script="/tmp/smak-wrapper-${test_name}-$$.sh"
+            local wrapper_script="$LOG_DIR/smak-wrapper-${test_name}-$$.sh"
             cat > "$wrapper_script" << WRAPPER_EOF
 #!/bin/bash
 cd "$SCRIPT_DIR"
-exec ../smak $smak_args $mode_jobs $SMAK_EXTRA_ARGS -Kd
+exec ${USR_SMAK_SCRIPT:-smak} $smak_args $mode_jobs $SMAK_EXTRA_ARGS -Kd
 WRAPPER_EOF
             chmod +x "$wrapper_script"
 
@@ -467,10 +554,10 @@ WRAPPER_EOF
     }
 
     # Create temp files for output
-    local out_seq_nc="/tmp/smak-test-${test_name}-seq-nc-$$.log"
-    local out_seq_c="/tmp/smak-test-${test_name}-seq-c-$$.log"
-    local out_par_nc="/tmp/smak-test-${test_name}-par-nc-$$.log"
-    local out_par_c="/tmp/smak-test-${test_name}-par-c-$$.log"
+    local out_seq_nc="$LOG_DIR/smak-test-${test_name}-seq-nc-$$.log"
+    local out_seq_c="$LOG_DIR/smak-test-${test_name}-seq-c-$$.log"
+    local out_par_nc="$LOG_DIR/smak-test-${test_name}-par-nc-$$.log"
+    local out_par_c="$LOG_DIR/smak-test-${test_name}-par-c-$$.log"
 
     # Check if fail test exists
     local fail_test="${test_script%.sh}-fail.sh"
@@ -480,7 +567,7 @@ WRAPPER_EOF
     if [ -f "$fail_test" ] && [ -x "$fail_test" ]; then
         has_fail_test=1
         # Check if fail test is also interactive
-        if grep -q "smak.*-Kd" "$fail_test" 2>/dev/null; then
+        if grep -q "\-Kd" "$fail_test" 2>/dev/null; then
             is_fail_interactive=1
             # Check for corresponding script file
             local fail_script_path="scripts/${test_name}-fail.script"
@@ -498,12 +585,12 @@ WRAPPER_EOF
 
         if [ $is_fail_interactive -eq 1 ] && [ -n "$fail_script_file" ] && [ $TTY_MODE -eq 0 ]; then
             # Use PTY automation for interactive fail tests
-            local smak_args=$(grep -oP '(?<=smak ).*(?=-Kd)' "$fail_test" | head -1)
-            local wrapper_script="/tmp/smak-fail-wrapper-${test_name}-$$.sh"
+            local smak_args=$(grep -E '\-Kd' "$fail_test" | sed -n 's/.*smak[}]*[ ]*\(.*\)-Kd.*/\1/p' | head -1)
+            local wrapper_script="$LOG_DIR/smak-fail-wrapper-${test_name}-$$.sh"
             cat > "$wrapper_script" << WRAPPER_EOF
 #!/bin/bash
 cd "$SCRIPT_DIR"
-exec ../smak $smak_args $mode_jobs $SMAK_EXTRA_ARGS -Kd
+exec ${USR_SMAK_SCRIPT:-smak} $smak_args $mode_jobs $SMAK_EXTRA_ARGS -Kd
 WRAPPER_EOF
             chmod +x "$wrapper_script"
             env SMAK_CACHE_DIR=$mode_cache ./run-with-script.pl "$fail_script_file" "$wrapper_script" >"$fail_out" 2>&1 &
@@ -537,7 +624,7 @@ WRAPPER_EOF
         return
     fi
     if [ $has_fail_test -eq 1 ]; then
-        local fail_out="/tmp/smak-test-${test_name}-seq-nc-fail-$$.log"
+        local fail_out="$LOG_DIR/smak-test-${test_name}-seq-nc-fail-$$.log"
         run_fail_test "off" "" "$fail_out"
         result_seq_nocache_fail=$?
         rm -f "$fail_out"
@@ -564,7 +651,7 @@ WRAPPER_EOF
             return
         fi
         if [ $has_fail_test -eq 1 ]; then
-            local fail_out="/tmp/smak-test-${test_name}-seq-c-fail-$$.log"
+            local fail_out="$LOG_DIR/smak-test-${test_name}-seq-c-fail-$$.log"
             run_fail_test "default" "" "$fail_out"
             result_seq_cache_fail=$?
             rm -f "$fail_out"
@@ -598,7 +685,7 @@ WRAPPER_EOF
             return
         fi
         if [ $has_fail_test -eq 1 ]; then
-            local fail_out="/tmp/smak-test-${test_name}-par-nc-fail-$$.log"
+            local fail_out="$LOG_DIR/smak-test-${test_name}-par-nc-fail-$$.log"
             run_fail_test "off" "-j 4" "$fail_out"
             result_par_nocache_fail=$?
             rm -f "$fail_out"
@@ -629,7 +716,7 @@ WRAPPER_EOF
             return
         fi
         if [ $has_fail_test -eq 1 ]; then
-            local fail_out="/tmp/smak-test-${test_name}-par-c-fail-$$.log"
+            local fail_out="$LOG_DIR/smak-test-${test_name}-par-c-fail-$$.log"
             run_fail_test "default" "-j 4" "$fail_out"
             result_par_cache_fail=$?
             rm -f "$fail_out"
@@ -790,7 +877,7 @@ WRAPPER_EOF
         FAILED_TESTS+=("$test_name")
         # Save failure details
         if [ $VERBOSE -eq 0 ]; then
-            local fail_log="/tmp/smak-test-fail-$test_name.log"
+            local fail_log="$LOG_DIR/smak-test-fail-$test_name.log"
             {
                 echo "Test: $test_name"
                 echo "Results: Seq/NoCache=$result_seq_nocache Seq/Cache=$result_seq_cache Par/NoCache=$result_par_nocache Par/Cache=$result_par_cache"
@@ -927,7 +1014,7 @@ if [ $PARALLEL_JOBS -gt 1 ]; then
 
         while [ $idx -lt $batch_end ]; do
             test="${TESTS_TO_RUN[$idx]}"
-            result_file="/tmp/smak-regtest-$$-$(basename "$test" .sh).result"
+            result_file="$LOG_DIR/smak-regtest-$$-$(basename "$test" .sh).result"
             test_results+=("$result_file")
 
             (
@@ -1007,7 +1094,7 @@ if [ $FULL_MODE -eq 1 ]; then
             ./run-tests -f 5 -t 60 -v
             gen_result=$?
         else
-            ./run-tests -f 5 -t 60 > /tmp/smak-generator-test.log 2>&1
+            ./run-tests -f 5 -t 60 > $LOG_DIR/smak-generator-test.log 2>&1
             gen_result=$?
         fi
 
@@ -1039,7 +1126,7 @@ if [ $FULL_MODE -eq 1 ]; then
             ./test-cli-advanced
             cli_result=$?
         else
-            ./test-cli-advanced > /tmp/smak-cli-test.log 2>&1
+            ./test-cli-advanced > $LOG_DIR/smak-cli-test.log 2>&1
             cli_result=$?
         fi
 
@@ -1075,8 +1162,8 @@ if [ $FAILED -gt 0 ]; then
     echo "Failed tests:"
     for test in "${FAILED_TESTS[@]}"; do
         echo -e "  ${RED}✗${NC} $test"
-        if [ -f "/tmp/smak-test-fail-$test.log" ]; then
-            echo "     Log: /tmp/smak-test-fail-$test.log"
+        if [ -f "$LOG_DIR/smak-test-fail-$test.log" ]; then
+            echo "     Log: $LOG_DIR/smak-test-fail-$test.log"
         fi
     done
     echo ""

@@ -20,7 +20,7 @@ EOF
 
 # Run smak in interactive debug mode with job server
 # This will be automated by test runner using test_autorescan-fail.script
-SMAK_DEBUG=1 ../smak -f Makefile.autorescan-fail -j2 -Kd
+SMAK_DEBUG=1 ${USR_SMAK_SCRIPT:-smak} -f Makefile.autorescan-fail -j2 -Kd
 
 # This test should fail (build should not succeed)
 if [ -f test_auto_fail.o ] ; then

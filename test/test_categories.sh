@@ -4,7 +4,7 @@
 echo "Testing categorized rules in debug mode..."
 echo ""
 
-cat <<EOF | ../smak -f Makefile.test -Kd
+cat <<EOF | ${USR_SMAK_SCRIPT:-smak} -f Makefile.test -Kd
 list
 list fixed
 list pattern

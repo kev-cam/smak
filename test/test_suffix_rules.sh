@@ -25,7 +25,7 @@ rm -f test_c.o test_cxx.o
 # Test 1: Dry-run should show correct compilers for each file type
 echo "Test 1: Dry-run output (verify correct compilers)"
 DRY_MAKE=$(timeout 5 make -n -f "$MAKEFILE" all 2>&1)
-DRY_SMAK=$(timeout 5 ../smak -n -f "$MAKEFILE" all 2>&1)
+DRY_SMAK=$(timeout 5 ${USR_SMAK_SCRIPT:-smak} -n -f "$MAKEFILE" all 2>&1)
 
 echo "Make output:"
 echo "$DRY_MAKE"

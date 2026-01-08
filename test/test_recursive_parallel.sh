@@ -24,15 +24,15 @@ MAKEFILE
 # Create main Makefile with recursive calls
 cat > Makefile.recursive << 'MAKEFILE'
 all:
-	../smak -C test-rec-1 all && ../smak -C test-rec-2 all
+	${USR_SMAK_SCRIPT:-smak} -C test-rec-1 all && ${USR_SMAK_SCRIPT:-smak} -C test-rec-2 all
 
 clean:
-	../smak -C test-rec-1 clean && ../smak -C test-rec-2 clean
+	${USR_SMAK_SCRIPT:-smak} -C test-rec-1 clean && ${USR_SMAK_SCRIPT:-smak} -C test-rec-2 clean
 MAKEFILE
 
 # Test in parallel mode
 echo "Testing parallel mode (-j2):"
-SMAK_ASSERT_NO_SPAWN=1 ../smak -f Makefile.recursive -j2 clean
+SMAK_ASSERT_NO_SPAWN=1 ${USR_SMAK_SCRIPT:-smak} -f Makefile.recursive -j2 clean
 result=$?
 
 # Cleanup

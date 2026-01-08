@@ -26,7 +26,7 @@ rm -f only_c.o only_cxx.o
 # Test: Dry-run should select correct rule based on which source file exists
 echo "Test: Rule selection based on source file existence"
 DRY_MAKE=$(timeout 5 make -n -f "$MAKEFILE" all 2>&1)
-DRY_SMAK=$(timeout 5 ../smak -n -f "$MAKEFILE" all 2>&1)
+DRY_SMAK=$(timeout 5 ${USR_SMAK_SCRIPT:-smak} -n -f "$MAKEFILE" all 2>&1)
 
 echo "Make output:"
 echo "$DRY_MAKE"

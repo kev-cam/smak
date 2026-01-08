@@ -195,7 +195,7 @@ if [ $fail_count -gt 0 ]; then
     echo "To investigate a failure:"
     echo "  cd $failures_dir/failure-1-testN"
     echo "  cat logs/build-*.log"
-    echo "  ../../smak all  # Re-run manually"
+    echo "  ../${USR_SMAK_SCRIPT:-smak} all  # Re-run manually"
 else
     echo "No failures found!"
     rmdir "$failures_dir" 2>/dev/null || true

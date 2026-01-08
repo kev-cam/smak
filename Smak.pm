@@ -4316,8 +4316,10 @@ sub build_target {
 
             # Translate "make" to "smak" for built-in handling
             # This allows smak to handle recursive $(MAKE) invocations
+            # Use negative lookbehind to not match "make" when preceded by a dot (file extension like .make)
+            # and lookahead to only match when followed by space or end of string
             my $normalized_cmd = $clean_cmd;
-            $normalized_cmd =~ s/\bmake\b/smak/g;
+            $normalized_cmd =~ s/(?<!\.)make(?=\s|$)/smak/g;
 
             # Normalize "cd DIR && make/smak TARGET" to "make/smak -C DIR TARGET" for built-in handling
             if ($normalized_cmd =~ /cd\s+(\S+)\s+&&\s+(.*?(?:make|smak).*)$/) {

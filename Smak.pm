@@ -8580,6 +8580,39 @@ sub run_job_master {
             }
         }
 
+        # Get order-only prerequisites (must be built before target but don't affect timestamps)
+        # These are specified after | in makefile rules: target: deps | order-only-deps
+        my @order_only_deps;
+        if (exists $fixed_order_only{$key}) {
+            push @order_only_deps, @{$fixed_order_only{$key}};
+        }
+        if (exists $pattern_order_only{$key}) {
+            my $oo_ref = $pattern_order_only{$key};
+            if (ref($oo_ref) eq 'ARRAY') {
+                # Could be array of arrays (multiple variants) or flat array
+                if (@$oo_ref && ref($oo_ref->[0]) eq 'ARRAY') {
+                    push @order_only_deps, @{$oo_ref->[0]};
+                } else {
+                    push @order_only_deps, @$oo_ref;
+                }
+            }
+        }
+        if (exists $pseudo_order_only{$key}) {
+            push @order_only_deps, @{$pseudo_order_only{$key}};
+        }
+        # Expand % in order-only deps if we have a stem
+        if ($stem && @order_only_deps) {
+            @order_only_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @order_only_deps;
+        }
+        @order_only_deps = grep { $_ ne '' } @order_only_deps;
+        if (@order_only_deps && $ENV{SMAK_DEBUG}) {
+            print STDERR "Target '$target' has order-only prerequisites: " . join(', ', @order_only_deps) . "\n";
+        }
+
+        # Add order-only deps to the main deps list so they get queued and checked
+        # (They need to be built before this target can run)
+        push @deps, @order_only_deps;
+
         # Expand variables in dependencies
         my @expanded_deps;
         for my $dep (@deps) {
@@ -9201,7 +9234,35 @@ sub run_job_master {
                     }
                 }
 
-                print STDERR "DEBUG dispatch: Checking job '$target', deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                # Also check order-only prerequisites (specified after | in makefile rules)
+                # These must be built before the target can run, but don't affect rebuild decisions
+                my @order_only_deps;
+                if (exists $fixed_order_only{$key}) {
+                    push @order_only_deps, @{$fixed_order_only{$key}};
+                }
+                if (exists $pattern_order_only{$key}) {
+                    my $oo_ref = $pattern_order_only{$key};
+                    if (ref($oo_ref) eq 'ARRAY') {
+                        if (@$oo_ref && ref($oo_ref->[0]) eq 'ARRAY') {
+                            push @order_only_deps, @{$oo_ref->[0]};
+                        } else {
+                            push @order_only_deps, @$oo_ref;
+                        }
+                    }
+                }
+                if (exists $pseudo_order_only{$key}) {
+                    push @order_only_deps, @{$pseudo_order_only{$key}};
+                }
+                # Expand % in order-only deps if we have a stem
+                if ($stem && @order_only_deps) {
+                    @order_only_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @order_only_deps;
+                }
+                @order_only_deps = grep { $_ ne '' } @order_only_deps;
+                # Add order-only deps to the main deps list for checking
+                push @deps, @order_only_deps;
+
+                print STDERR "DEBUG dispatch: Checking job '$target', deps: [" . join(", ", @deps) . "]" .
+                             (@order_only_deps ? " (includes order-only: " . join(", ", @order_only_deps) . ")" : "") . "\n" if $ENV{SMAK_DEBUG};
 
                 # Check if any dependency has failed - if so, fail this job too
                 my $has_failed_dep = 0;

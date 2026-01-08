@@ -20,11 +20,11 @@ cd "$NVC_BUILD_DIR" || exit 1
 
 # First, clean
 echo "  Running clean..."
-${USR_SMAK_SCRIPT:-smak}/smak clean >/dev/null 2>&1 || true
+${USR_SMAK_SCRIPT:-smak} clean >/dev/null 2>&1 || true
 
 # Now try to build
 echo "  Building..."
-BUILD_OUTPUT=$(${USR_SMAK_SCRIPT:-smak}/smak 2>&1)
+BUILD_OUTPUT=$(${USR_SMAK_SCRIPT:-smak} 2>&1)
 EXIT_CODE=$?
 
 # Check for variable expansion iteration limit warning
@@ -55,23 +55,44 @@ else
     ((FAILED++))
 fi
 
-# If sequential build succeeded, test parallel build
+# If sequential build succeeded, test -j1 (should be equivalent to sequential)
 if [ $EXIT_CODE -eq 0 ]; then
+    echo ""
+    echo "Test: Clean and rebuild with -j1"
+    echo "  Running clean..."
+    ${USR_SMAK_SCRIPT:-smak} clean >/dev/null 2>&1 || true
+
+    echo "  Building with -j1..."
+    BUILD_OUTPUT_J1=$(${USR_SMAK_SCRIPT:-smak} -j1 2>&1)
+    EXIT_CODE_J1=$?
+
+    if [ $EXIT_CODE_J1 -eq 0 ]; then
+        echo "  ✓ PASS: -j1 build completed successfully"
+    else
+        echo "  ✗ FAIL: -j1 build failed with exit code $EXIT_CODE_J1"
+        echo "-j1 build output (last 50 lines):"
+        echo "$BUILD_OUTPUT_J1" | tail -50
+        ((FAILED++))
+    fi
+fi
+
+# If -j1 build succeeded, test -j4 parallel build
+if [ $EXIT_CODE -eq 0 ] && [ ${EXIT_CODE_J1:-1} -eq 0 ]; then
     echo ""
     echo "Test: Clean and rebuild with -j4"
     echo "  Running clean..."
-    ${USR_SMAK_SCRIPT:-smak}/smak clean >/dev/null 2>&1 || true
+    ${USR_SMAK_SCRIPT:-smak} clean >/dev/null 2>&1 || true
 
     echo "  Building with -j4..."
-    BUILD_OUTPUT_PARALLEL=$(${USR_SMAK_SCRIPT:-smak}/smak -j4 2>&1)
+    BUILD_OUTPUT_PARALLEL=$(${USR_SMAK_SCRIPT:-smak} -j4 2>&1)
     EXIT_CODE_PARALLEL=$?
 
     if [ $EXIT_CODE_PARALLEL -eq 0 ]; then
         echo "  ✓ PASS: Parallel build completed successfully"
     else
         echo "  ✗ FAIL: Parallel build failed with exit code $EXIT_CODE_PARALLEL"
-        echo "Parallel build output:"
-        echo "$BUILD_OUTPUT_PARALLEL"
+        echo "Parallel build output (last 50 lines):"
+        echo "$BUILD_OUTPUT_PARALLEL" | tail -50
         ((FAILED++))
     fi
 fi

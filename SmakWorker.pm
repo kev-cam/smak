@@ -145,6 +145,7 @@ sub run_worker {
                 $socket->flush();
             } else {
                 # REGULAR MODE: Execute command
+                warn "WORKER DEBUG: dir='$dir', command='$command'\n" if $ENV{SMAK_DEBUG};
                 my $pid = open(my $cmd_fh, '-|', "$command 2>&1");
                 if ($pid) {
                     while (my $out_line = <$cmd_fh>) {

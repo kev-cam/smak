@@ -8492,9 +8492,40 @@ sub run_job_master {
         # Track which pattern rule matched (for multi-output detection)
         my $matched_pattern_key;
 
-        # If we have fixed deps but no rule, try to find a matching pattern rule
+        # If we have fixed deps but no rule, try suffix rules first, then pattern rules
         if ($has_fixed_deps && !($rule && $rule =~ /\S/)) {
-            print STDERR "Target '$target' in fixed_deps but no rule, checking for pattern rules\n" if $ENV{SMAK_DEBUG};
+            print STDERR "Target '$target' in fixed_deps but no rule, checking for suffix/pattern rules\n" if $ENV{SMAK_DEBUG};
+
+            # Try suffix rules FIRST (they take precedence over built-in pattern rules)
+            if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+                my ($base, $target_suffix) = ($1, $2);
+                for my $source_suffix (@suffixes) {
+                    my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                    if (exists $suffix_rule{$suffix_key}) {
+                        my $source = "$base$source_suffix";
+                        my $resolved_source = resolve_vpath($source, $dir);
+                        if (-f $resolved_source || -f "$dir/$source") {
+                            $stem = $base;
+                            push @deps, $source unless grep { $_ eq $source } @deps;
+                            $rule = $suffix_rule{$suffix_key};
+                            my $suffix_deps_ref = $suffix_deps{$suffix_key};
+                            if ($suffix_deps_ref && @$suffix_deps_ref) {
+                                my @suffix_deps_expanded = map {
+                                    my $d = $_;
+                                    $d =~ s/%/$stem/g;
+                                    $d;
+                                } @$suffix_deps_ref;
+                                push @deps, @suffix_deps_expanded;
+                            }
+                            print STDERR "Using suffix rule $source_suffix$target_suffix for $target (job master)\n" if $ENV{SMAK_DEBUG};
+                            last;
+                        }
+                    }
+                }
+            }
+
+            # Fall back to pattern rules if no suffix rule found
+            if (!($rule && $rule =~ /\S/)) {
             for my $pkey (keys %pattern_rule) {
                 if ($pkey =~ /^[^\t]+\t(.+)$/) {
                     my $pattern = $1;
@@ -8512,6 +8543,7 @@ sub run_job_master {
                     }
                 }
             }
+            }  # End of pattern rule fallback block
         }
 
         # If still no deps/rule, try to find pattern rule match
@@ -8748,8 +8780,10 @@ sub run_job_master {
                 }
             }
 
-            my $processed_rule = process_command($rule);
-            $processed_rule = expand_job_command($processed_rule, $target, \@deps);
+            # Expand variables FIRST, then process command prefixes
+            # (so $(AM_V_at)-rm becomes -rm which then gets processed)
+            my $expanded_rule = expand_job_command($rule, $target, \@deps);
+            my $processed_rule = process_command($expanded_rule);
 
             # Handle multi-output pattern rules (e.g., parse%cc parse%h: parse%y)
             # If this target is part of a multi-output group, check if a sibling is already being built

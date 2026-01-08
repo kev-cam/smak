@@ -5,7 +5,7 @@ use warnings;
 use Exporter qw(import);
 use POSIX ":sys_wait_h";
 use Term::ReadLine;
-use SmakCli qw(:all);
+use SmakCli;
 use Time::HiRes qw(time);
 use File::Path qw(make_path remove_tree);
 use File::Copy qw(copy move);
@@ -4316,8 +4316,10 @@ sub build_target {
 
             # Translate "make" to "smak" for built-in handling
             # This allows smak to handle recursive $(MAKE) invocations
+            # Use negative lookbehind to not match "make" when preceded by a dot (file extension like .make)
+            # and lookahead to only match when followed by space or end of string
             my $normalized_cmd = $clean_cmd;
-            $normalized_cmd =~ s/\bmake\b/smak/g;
+            $normalized_cmd =~ s/(?<!\.)make(?=\s|$)/smak/g;
 
             # Normalize "cd DIR && make/smak TARGET" to "make/smak -C DIR TARGET" for built-in handling
             if ($normalized_cmd =~ /cd\s+(\S+)\s+&&\s+(.*?(?:make|smak).*)$/) {
@@ -8178,6 +8180,7 @@ sub run_job_master {
     our @job_queue;  # Queue of jobs to dispatch
     our %running_jobs;  # task_id => {target, worker, dir, command, started}
     our %completed_targets;  # target => 1 (successfully built targets)
+    our %phony_ran_this_session;  # target => 1 (phony targets that ran successfully this session)
     our %failed_targets;  # target => exit_code (failed targets)
     our %pending_composite;  # composite targets waiting for dependencies
                             # target => {deps => [list], master_socket => socket}
@@ -8589,7 +8592,7 @@ sub run_job_master {
                 # File already exists, will mark complete after queuing deps
             } else {
                 # Register composite target early so it can be failed by dependencies
-                my @pending_deps = grep { !exists $completed_targets{$_} && !exists $failed_targets{$_} } @deps;
+                my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} && !exists $failed_targets{$_} } @deps;
                 if (@pending_deps) {
                     $in_progress{$target} = "pending";
                     $pending_composite{$target} = {
@@ -8823,7 +8826,7 @@ sub run_job_master {
                     print STDERR "Composite target '$target' FAILED due to failed dependency '$failed_deps[0]'\n";
 		    reprompt();
                 } else {
-                    my @pending_deps = grep { !exists $completed_targets{$_} } @deps;
+                    my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} } @deps;
                     if (@pending_deps) {
                         # Update the composite target (may have been pre-registered)
                         $in_progress{$target} = "pending";
@@ -9220,7 +9223,8 @@ sub run_job_master {
                         }
 
                         # Only print debug for non-trivial cases (skip satisfied dependencies to reduce noise)
-                        my $is_satisfied = exists $completed_targets{$single_dep} &&
+                        # Also check phony_ran_this_session for phony targets that completed but weren't cached
+                        my $is_satisfied = (exists $completed_targets{$single_dep} || exists $phony_ran_this_session{$single_dep}) &&
                                           (!exists $in_progress{$single_dep} ||
                                            $in_progress{$single_dep} eq 'done' ||
                                            !$in_progress{$single_dep});
@@ -9233,7 +9237,7 @@ sub run_job_master {
 
                         # If the dependency was recently completed, verify it actually exists on disk
                         # to avoid race conditions where the file isn't visible yet due to filesystem buffering
-                        if ($completed_targets{$single_dep}) {
+                        if ($completed_targets{$single_dep} || $phony_ran_this_session{$single_dep}) {
                             # With auto-rescan, FUSE monitoring, or dry-run mode, we can trust completed_targets
                             # because deleted files are automatically detected (or files won't exist in dry-run)
                             if ($auto_rescan || $fuse_auto_clear || $dry_run_mode) {
@@ -9532,6 +9536,8 @@ sub run_job_master {
 
                         delete $running_jobs{$task_id};
 
+                        my $task_handled_successfully = 0;  # Track if we handled this task as successful
+
                         if ($exit_code == 0 && $job->{target}) {
                             # Check if this looks like a phony target (doesn't produce a file)
                             # Phony targets typically have no extension or are common make targets
@@ -9575,9 +9581,12 @@ sub run_job_master {
                                     # For phony targets, remove from in_progress entirely
                                     # This allows them to be queued again on next request
                                     delete $in_progress{$job->{target}};
+                                    # But track that they ran this session for dependency checking
+                                    $phony_ran_this_session{$job->{target}} = 1;
                                 }
                                 print STDERR "Task $task_id completed successfully: $job->{target}" .
                                              ($is_phony ? " (phony, removed from tracking)" : "") . "\n" if $ENV{SMAK_DEBUG};
+                                $task_handled_successfully = 1;
                             } else {
                                 # File doesn't exist even after retries - treat as failure
                                 $in_progress{$job->{target}} = "failed";
@@ -9587,7 +9596,7 @@ sub run_job_master {
                         }
 
                         # Handle successful completion
-                        if ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}}) {
+                        if ($task_handled_successfully || ($exit_code == 0 && $job->{target} && $completed_targets{$job->{target}})) {
                             # ASSERTION: Verify successful job produced a valid target
                             # Only run expensive checks when debugging enabled (to avoid performance impact)
                             if (ASSERTIONS_ENABLED && $ENV{SMAK_DEBUG}) {
@@ -10453,7 +10462,7 @@ sub run_job_master {
                                     my $has_stale_dep = 0;
                                     for my $dep (@deps) {
                                         if (exists $stale_targets_cache{$dep} ||
-                                            !exists $completed_targets{$dep} && !exists $failed_targets{$dep}) {
+                                            (!exists $completed_targets{$dep} && !exists $phony_ran_this_session{$dep} && !exists $failed_targets{$dep})) {
                                             $has_stale_dep = 1;
                                             last;
                                         }

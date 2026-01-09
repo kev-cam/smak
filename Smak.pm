@@ -8791,9 +8791,39 @@ sub run_job_master {
             }  # End of pattern rule fallback block
         }
 
-        # If still no deps/rule, try to find pattern rule match
+        # If still no deps/rule, try suffix rules first, then pattern rules
         if (!$has_fixed_deps && !@deps) {
-            for my $pkey (keys %pattern_rule) {
+            # Try suffix rules FIRST (they take precedence over built-in pattern rules)
+            if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+                my ($base, $target_suffix) = ($1, $2);
+                for my $source_suffix (@suffixes) {
+                    my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                    if (exists $suffix_rule{$suffix_key}) {
+                        my $source = "$base$source_suffix";
+                        my $resolved_source = resolve_vpath($source, $dir);
+                        if (-f $resolved_source || -f "$dir/$source") {
+                            $stem = $base;
+                            push @deps, $source unless grep { $_ eq $source } @deps;
+                            $rule = $suffix_rule{$suffix_key};
+                            my $suffix_deps_ref = $suffix_deps{$suffix_key};
+                            if ($suffix_deps_ref && @$suffix_deps_ref) {
+                                my @suffix_deps_expanded = map {
+                                    my $d = $_;
+                                    $d =~ s/%/$stem/g;
+                                    $d;
+                                } @$suffix_deps_ref;
+                                push @deps, @suffix_deps_expanded;
+                            }
+                            print STDERR "Using suffix rule $source_suffix$target_suffix for $target (no fixed deps)\n" if $ENV{SMAK_DEBUG};
+                            last;
+                        }
+                    }
+                }
+            }
+
+            # Fall back to pattern rules if no suffix rule found
+            if (!($rule && $rule =~ /\S/)) {
+            PATTERN_LOOP: for my $pkey (keys %pattern_rule) {
                 if ($pkey =~ /^[^\t]+\t(.+)$/) {
                     my $pattern = $1;
                     my $pattern_re = $pattern;
@@ -8801,28 +8831,52 @@ sub run_job_master {
                     if ($target =~ /^$pattern_re$/) {
                         my $deps_ref = $pattern_deps{$pkey} || [];
                         my $rule_ref = $pattern_rule{$pkey} || '';
-                        # Handle both single variant and multiple variants
-                        # For deps: if first element is an array, we have multiple variants, use first
-                        @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
-                                @{$deps_ref->[0]} :
-                                (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
-                        # For rule: if it's an array, use first variant
-                        $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
-                        # Expand % in dependencies
                         $stem = $1;  # Save stem for $* expansion
                         $matched_pattern_key = $pkey;  # Save for multi-output detection
-                        @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
-                        # Resolve dependencies through vpath
-                        my @orig_deps = @deps;
-                        @deps = map { resolve_vpath($_, $dir) } @deps;
-                        if ($ENV{SMAK_DEBUG} && "@orig_deps" ne "@deps") {
-                            print STDERR "  Deps after vpath: " . join(", ", @deps) . "\n";
+
+                        # Check if we have multiple variants (array of arrays)
+                        if (ref($deps_ref) eq 'ARRAY' && @$deps_ref && ref($deps_ref->[0]) eq 'ARRAY') {
+                            # Multiple variants - find one whose source file exists
+                            my $found_variant = 0;
+                            for my $vi (0 .. $#$deps_ref) {
+                                my @variant_deps = @{$deps_ref->[$vi]};
+                                @variant_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+                                my @resolved_deps = map { resolve_vpath($_, $dir) } @variant_deps;
+                                # Check if the first dep (source file) exists
+                                if (@resolved_deps && -f $resolved_deps[0]) {
+                                    @deps = @resolved_deps;
+                                    $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[$vi] : $rule_ref;
+                                    print STDERR "Matched pattern rule '$pattern' variant $vi for target '$target' (stem='$stem', source exists)\n" if $ENV{SMAK_DEBUG};
+                                    $found_variant = 1;
+                                    last PATTERN_LOOP;
+                                }
+                            }
+                            # If no variant's source exists, use the first variant
+                            if (!$found_variant) {
+                                @deps = @{$deps_ref->[0]};
+                                @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                                @deps = map { resolve_vpath($_, $dir) } @deps;
+                                $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
+                                print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem', using default variant)\n" if $ENV{SMAK_DEBUG};
+                                last PATTERN_LOOP;
+                            }
+                        } else {
+                            # Single variant or flat deps array
+                            @deps = ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ();
+                            @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                            my @orig_deps = @deps;
+                            @deps = map { resolve_vpath($_, $dir) } @deps;
+                            $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
+                            if ($ENV{SMAK_DEBUG} && "@orig_deps" ne "@deps") {
+                                print STDERR "  Deps after vpath: " . join(", ", @deps) . "\n";
+                            }
+                            print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
+                            last PATTERN_LOOP;
                         }
-                        print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
-                        last;
                     }
                 }
             }
+            }  # End of pattern rule fallback block
         }
 
         # Get order-only prerequisites (must be built before target but don't affect timestamps)
@@ -9620,27 +9674,74 @@ sub run_job_master {
                     @deps = @{$pseudo_deps{$key} || []};
                 }
 
-                # If no deps found by exact match, try pattern matching (like queue_target_recursive does)
+                # If no deps found by exact match, try suffix rules first, then pattern matching
                 if (!@deps) {
-                    for my $pkey (keys %pattern_rule) {
+                    # Try suffix rules FIRST (they take precedence over built-in pattern rules)
+                    my $job_dir = $job->{dir} || '.';
+                    if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+                        my ($base, $target_suffix) = ($1, $2);
+                        for my $source_suffix (@suffixes) {
+                            my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                            if (exists $suffix_rule{$suffix_key}) {
+                                my $source = "$base$source_suffix";
+                                my $resolved_source = resolve_vpath($source, $job_dir);
+                                if (-f $resolved_source || -f "$job_dir/$source") {
+                                    $stem = $base;
+                                    push @deps, $source unless grep { $_ eq $source } @deps;
+                                    print STDERR "DEBUG dispatch: Using suffix rule $source_suffix$target_suffix for $target, deps: [$source]\n" if $ENV{SMAK_DEBUG};
+                                    last;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                # Fall back to pattern rules if no deps found
+                if (!@deps) {
+                    my $job_dir = $job->{dir} || '.';
+                    DISPATCH_PATTERN: for my $pkey (keys %pattern_rule) {
                         if ($pkey =~ /^[^\t]+\t(.+)$/) {
                             my $pattern = $1;
                             my $pattern_re = $pattern;
                             $pattern_re =~ s/%/(.+)/g;
                             if ($target =~ /^$pattern_re$/) {
                                 my $deps_ref = $pattern_deps{$pkey} || [];
-                                # Handle both single variant and multiple variants
-                                @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
-                                        @{$deps_ref->[0]} :
-                                        (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
-                                # Expand % in dependencies using the stem
                                 $stem = $1;
-                                @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
-                                print STDERR "DEBUG dispatch: Matched pattern '$pattern' for '$target', stem='$stem', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
-                                # NOTE: Don't resolve vpath here - dependency names must stay as-is
-                                # for hash lookups (completed_targets, failed_targets, in_progress).
-                                # Vpath resolution happens when checking if files exist.
-                                last;
+
+                                # Check if we have multiple variants (array of arrays)
+                                if (ref($deps_ref) eq 'ARRAY' && @$deps_ref && ref($deps_ref->[0]) eq 'ARRAY') {
+                                    # Multiple variants - find one whose source file exists
+                                    my $found_variant = 0;
+                                    for my $vi (0 .. $#$deps_ref) {
+                                        my @variant_deps = @{$deps_ref->[$vi]};
+                                        @variant_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+                                        # Check if the first dep (source file) exists
+                                        my $source = $variant_deps[0];
+                                        my $resolved_source = resolve_vpath($source, $job_dir);
+                                        if (-f $resolved_source || -f "$job_dir/$source") {
+                                            @deps = @variant_deps;
+                                            print STDERR "DEBUG dispatch: Matched pattern '$pattern' variant $vi for '$target' (stem='$stem', source exists)\n" if $ENV{SMAK_DEBUG};
+                                            $found_variant = 1;
+                                            last DISPATCH_PATTERN;
+                                        }
+                                    }
+                                    # If no variant's source exists, use the first variant
+                                    if (!$found_variant) {
+                                        @deps = @{$deps_ref->[0]};
+                                        @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                                        print STDERR "DEBUG dispatch: Matched pattern '$pattern' for '$target' (stem='$stem', using default variant)\n" if $ENV{SMAK_DEBUG};
+                                        last DISPATCH_PATTERN;
+                                    }
+                                } else {
+                                    # Single variant or flat deps array
+                                    @deps = ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ();
+                                    @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
+                                    print STDERR "DEBUG dispatch: Matched pattern '$pattern' for '$target', stem='$stem', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                                    # NOTE: Don't resolve vpath here - dependency names must stay as-is
+                                    # for hash lookups (completed_targets, failed_targets, in_progress).
+                                    # Vpath resolution happens when checking if files exist.
+                                    last DISPATCH_PATTERN;
+                                }
                             }
                         }
                     }

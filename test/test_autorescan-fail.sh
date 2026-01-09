@@ -22,13 +22,13 @@ EOF
 # This will be automated by test runner using test_autorescan-fail.script
 SMAK_DEBUG=1 ${USR_SMAK_SCRIPT:-smak} -f Makefile.autorescan-fail -j2 -Kd
 
-# This test should fail (build should not succeed)
+# This test expects the build to fail (source file is missing)
 if [ -f test_auto_fail.o ] ; then
-    # File was created - test failed (we expected failure)
+    # File was created - build succeeded when it should have failed
     rm -f test_auto_fail.o Makefile.autorescan-fail
-    exit 0  # Report success (failure was expected)
+    exit 1  # Test failed - build should not have succeeded
 else
-    # File not created - test succeeded (failure occurred as expected)
+    # File not created - build correctly failed as expected
     rm -f Makefile.autorescan-fail
-    exit 1  # Report failure (this means the test worked - build failed as expected)
+    exit 0  # Test passed - build failed as expected
 fi

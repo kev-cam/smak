@@ -206,6 +206,14 @@ sub should_filter_dependency {
 
 our @job_queue;
 
+# Layered job scheduling - jobs organized by dependency depth
+# Layer 0 = leaves (no buildable deps), higher layers depend on lower layers
+# Dispatch from layer 0 upward; when layer N completes, layer N+1 can run
+our @job_layers;         # Array of arrays: $job_layers[layer] = [job1, job2, ...]
+our %target_layer;       # target => layer number
+our $current_dispatch_layer = 0;  # Layer currently being dispatched from
+our $max_dispatch_layer = 0;      # Highest layer number
+
 # Hash for Makefile variables
 our %MV;
 
@@ -1711,8 +1719,17 @@ sub parse_makefile {
             $targets_str =~ s/^\s+|\s+$//g;
             $deps_str =~ s/^\s+|\s+$//g;
 
-            # Transform $(VAR) and $X to $MV{VAR} and $MV{X} in dependencies
+            # Transform $(VAR) and $X to $MV{VAR} and $MV{X} in both targets and dependencies
+            $targets_str = transform_make_vars($targets_str);
             $deps_str = transform_make_vars($deps_str);
+
+            # Expand variables in target names immediately so rules are stored under expanded names
+            # This ensures lookups work correctly (e.g., bin/nvc$(EXEEXT) -> bin/nvc when EXEEXT is empty)
+            while ($targets_str =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $targets_str =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
 
             # Handle order-only prerequisites (after |)
             # Syntax: target: normal-prereqs | order-only-prereqs
@@ -2225,7 +2242,17 @@ sub parse_included_makefile {
 
             $targets_str =~ s/^\s+|\s+$//g;
             $deps_str =~ s/^\s+|\s+$//g;
+
+            # Transform $(VAR) and $X to $MV{VAR} and $MV{X} in both targets and dependencies
+            $targets_str = transform_make_vars($targets_str);
             $deps_str = transform_make_vars($deps_str);
+
+            # Expand variables in target names immediately so rules are stored under expanded names
+            while ($targets_str =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $targets_str =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
 
             # Handle order-only prerequisites (after |)
             my @deps;
@@ -5446,6 +5473,9 @@ sub dispatch_command {
     } elsif ($cmd eq 'deps' || $cmd eq 'd') {
         cmd_deps($words, $socket);
 
+    } elsif ($cmd eq 'btree' || $cmd eq 'bt') {
+        cmd_btree($words, $socket);
+
     } elsif ($cmd eq 'vpath') {
         cmd_vpath($words, $socket);
 
@@ -5602,6 +5632,7 @@ Available commands:
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
   deps <target>       Show dependencies for target
+  btree <target>      Show layered build tree (layers of dependencies)
   vpath <file>        Test vpath resolution for a file
   add-rule <t> <d> <r> Add a new rule (rule text can use \n and \t)
   mod-rule <t> <r>    Modify the rule for a target
@@ -6467,6 +6498,165 @@ sub cmd_deps {
         # No job server - call show_dependencies directly
         show_dependencies($target);
     }
+}
+
+sub cmd_btree {
+    my ($words, $socket) = @_;
+
+    if (@$words == 0) {
+        print "Usage: btree <target>\n";
+        print "  Shows the build tree with targets organized by dependency layers.\n";
+        print "  Layer 0 = final target, Layer 1 = direct deps, Layer 2 = deps of deps, etc.\n";
+        return;
+    }
+
+    my $target = $words->[0];
+
+    # Build the layered tree
+    my %visited;
+    my @layers;  # Array of arrays: $layers[depth] = [target1, target2, ...]
+
+    # Recursive helper to collect targets at each depth
+    my $collect_tree;
+    $collect_tree = sub {
+        my ($tgt, $depth) = @_;
+
+        return if $visited{$tgt}++;  # Already processed
+
+        # Add to layer
+        $layers[$depth] //= [];
+        push @{$layers[$depth]}, $tgt;
+
+        # Get dependencies
+        my $key = "$makefile\t$tgt";
+        my @deps;
+
+        if (exists $fixed_deps{$key}) {
+            @deps = @{$fixed_deps{$key} || []};
+        } elsif (exists $pattern_deps{$key}) {
+            my $deps_ref = $pattern_deps{$key} || [];
+            @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
+                    @{$deps_ref->[0]} :
+                    (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
+        } elsif (exists $pseudo_deps{$key}) {
+            @deps = @{$pseudo_deps{$key} || []};
+        }
+
+        # Expand $MV{var} references in dependencies
+        my @expanded_deps;
+        for my $dep (@deps) {
+            my $expanded = $dep;
+            while ($expanded =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $expanded =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            # Handle multiple space-separated values from expansion
+            if ($expanded =~ /\s/) {
+                push @expanded_deps, split /\s+/, $expanded;
+            } elsif ($expanded =~ /\S/) {
+                push @expanded_deps, $expanded;
+            }
+        }
+        @deps = @expanded_deps;
+
+        # Try pattern matching if no explicit deps
+        if (!@deps && $tgt =~ /^(.+)(\.[^.\/]+)$/) {
+            my ($base, $target_suffix) = ($1, $2);
+            for my $source_suffix (@suffixes) {
+                next if $source_suffix eq $target_suffix;
+                my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                if (exists $suffix_rule{$suffix_key}) {
+                    my $source = "$base$source_suffix";
+                    # Check if source exists or has a rule
+                    if (-e $source || -e resolve_vpath($source, '.')) {
+                        push @deps, $source;
+                        last;
+                    }
+                }
+            }
+        }
+
+        # Recursively process dependencies (if they're buildable)
+        for my $dep (@deps) {
+            next unless defined $dep && $dep =~ /\S/;
+            next if $dep =~ /dirstamp$/;  # Skip dirstamp markers
+            next if $dep =~ /\.deps\//;    # Skip .deps markers
+            next if $dep =~ /^\/usr\//;    # Skip system files
+
+            # Check if this dep is buildable (has a rule or is a source file)
+            my $dep_key = "$makefile\t$dep";
+            my $is_buildable = exists $fixed_deps{$dep_key} ||
+                               exists $fixed_rule{$dep_key} ||
+                               exists $pattern_deps{$dep_key} ||
+                               exists $pattern_rule{$dep_key} ||
+                               exists $pseudo_deps{$dep_key};
+
+            # Also check if it's a source file that could be built via suffix rule
+            if (!$is_buildable && $dep =~ /\.([^.\/]+)$/) {
+                my $ext = ".$1";
+                for my $src_ext (@suffixes) {
+                    my $sk = "$makefile\t$src_ext\t$ext";
+                    if (exists $suffix_rule{$sk}) {
+                        $is_buildable = 1;
+                        last;
+                    }
+                }
+            }
+
+            $collect_tree->($dep, $depth + 1) if $is_buildable || !-e $dep;
+        }
+    };
+
+    # Start collection from target
+    $collect_tree->($target, 0);
+
+    # Display the tree
+    if (@layers == 0) {
+        print "No build tree found for target: $target\n";
+        return;
+    }
+
+    print "Build tree for: $target\n";
+    print "=" x 60 . "\n";
+
+    for my $depth (0 .. $#layers) {
+        next unless $layers[$depth] && @{$layers[$depth]};
+
+        my @targets = sort @{$layers[$depth]};
+        my $count = scalar @targets;
+
+        print "\nLayer $depth";
+        if ($depth == 0) {
+            print " (final target)";
+        } elsif ($depth == 1) {
+            print " (direct dependencies)";
+        }
+        print " [$count target" . ($count == 1 ? "" : "s") . "]:\n";
+
+        for my $t (@targets) {
+            # Mark with indicator based on what it is
+            my $indicator = "";
+            if ($t =~ /\.a$/) {
+                $indicator = "[lib] ";
+            } elsif ($t =~ /\.o$/) {
+                $indicator = "[obj] ";
+            } elsif ($t =~ /\.(c|cpp|cc|cxx)$/) {
+                $indicator = "[src] ";
+            } elsif ($t =~ /\.(h|hpp)$/) {
+                $indicator = "[hdr] ";
+            } elsif (-x $t || $t =~ /^bin\//) {
+                $indicator = "[exe] ";
+            }
+            print "  $indicator$t\n";
+        }
+    }
+
+    # Summary
+    my $total = 0;
+    $total += scalar @{$layers[$_] || []} for 0 .. $#layers;
+    print "\n" . "=" x 60 . "\n";
+    print "Total: $total targets in " . scalar(@layers) . " layers\n";
 }
 
 sub cmd_vpath {
@@ -8247,9 +8437,19 @@ sub run_job_master {
         # Expand variables
         my $expanded = expand_vars($converted);
 
+        # Determine first prerequisite ($<), filtering out .dirstamp and .deps/ files
+        # These are directory marker dependencies that should not be used as source files
+        my $first_prereq = '';
+        for my $dep (@deps) {
+            next if $dep =~ /dirstamp$/;   # Skip .dirstamp files
+            next if $dep =~ /\.deps\//;     # Skip .deps/ directory markers
+            $first_prereq = $dep;
+            last;
+        }
+
         # Expand automatic variables
         $expanded =~ s/\$@/$target/g;                     # $@ = target name
-        $expanded =~ s/\$</$deps[0] || ''/ge;             # $< = first prerequisite
+        $expanded =~ s/\$</$first_prereq/g;               # $< = first prerequisite (excluding dirstamp)
         $expanded =~ s/\$\^/join(' ', @deps)/ge;          # $^ = all prerequisites
 
         return $expanded;
@@ -8420,6 +8620,51 @@ sub run_job_master {
 
         vprint "ERROR: Target '$target' does not exist at '$target_path' after task completion\n";
         return 0;
+    }
+
+    # Compute layer for a target based on its dependencies
+    # Layer 0 = leaves (no buildable deps), higher layers depend on lower layers
+    # Returns the layer number for this target
+    sub compute_target_layer {
+        my ($deps_ref) = @_;
+        my $max_dep_layer = -1;
+
+        for my $dep (@$deps_ref) {
+            next unless defined $dep && $dep =~ /\S/;
+            # If dependency has a layer, it needs building
+            if (exists $target_layer{$dep}) {
+                my $dep_layer = $target_layer{$dep};
+                $max_dep_layer = $dep_layer if $dep_layer > $max_dep_layer;
+            }
+            # Source files (no layer) don't contribute
+        }
+
+        # Our layer is one above our highest dependency
+        return $max_dep_layer + 1;
+    }
+
+    # Add a job to the appropriate layer
+    sub add_job_to_layer {
+        my ($job, $layer) = @_;
+
+        # Track the target's layer
+        $target_layer{$job->{target}} = $layer;
+
+        # Update max layer if needed
+        if ($layer > $max_dispatch_layer) {
+            $max_dispatch_layer = $layer;
+        }
+
+        # Initialize layer array if needed
+        $job_layers[$layer] //= [];
+
+        # Add job to layer
+        push @{$job_layers[$layer]}, $job;
+
+        # Also add to flat queue for compatibility during transition
+        push @job_queue, $job;
+
+        print STDERR "DEBUG: Added '$job->{target}' to layer $layer\n" if $ENV{SMAK_DEBUG};
     }
 
     # Recursively queue a target and all its dependencies
@@ -8605,13 +8850,25 @@ sub run_job_master {
             @order_only_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @order_only_deps;
         }
         @order_only_deps = grep { $_ ne '' } @order_only_deps;
+
+        # Expand variables in order-only deps
+        my @expanded_order_only;
+        for my $dep (@order_only_deps) {
+            while ($dep =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            push @expanded_order_only, $dep if $dep ne '';
+        }
+        @order_only_deps = @expanded_order_only;
+
         if (@order_only_deps && $ENV{SMAK_DEBUG}) {
             print STDERR "Target '$target' has order-only prerequisites: " . join(', ', @order_only_deps) . "\n";
         }
 
-        # Add order-only deps to the main deps list so they get queued and checked
-        # (They need to be built before this target can run)
-        push @deps, @order_only_deps;
+        # NOTE: Do NOT add order-only deps to @deps - they should be queued and checked
+        # separately but NOT used for $< expansion (first prerequisite)
 
         # Expand variables in dependencies
         my @expanded_deps;
@@ -8700,6 +8957,33 @@ sub run_job_master {
 		} else {
 		    queue_target_recursive($single_dep, $dir, $msocket, $depth+1);
 		}
+            }
+        }
+
+        # Also recursively queue order-only prerequisites
+        # These must be built before the target but don't affect $< expansion
+        for my $dep (@order_only_deps) {
+            next if $dep =~ /^\.PHONY$/;
+            next if $dep !~ /\S/;
+
+            for my $single_dep (split /\s+/, $dep) {
+                next unless $single_dep =~ /\S/;
+
+                my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$dir/$single_dep";
+                if (-e $dep_path && !exists $fixed_deps{"$makefile\t$single_dep"}
+                    && !exists $pattern_deps{"$makefile\t$single_dep"}
+                    && !exists $pseudo_deps{"$makefile\t$single_dep"}) {
+                    $completed_targets{$single_dep} = 1;
+                    print STDERR "Order-only dep '$single_dep' exists at '$dep_path', marking complete\n" if $ENV{SMAK_DEBUG};
+                    next;
+                }
+
+                if ($depth > $recurse_limit) {
+                    warn "Recursion queuing order-only ${dir}:$single_dep\n";
+                    return;
+                } else {
+                    queue_target_recursive($single_dep, $dir, $msocket, $depth+1);
+                }
             }
         }
 
@@ -8851,13 +9135,18 @@ sub run_job_master {
                 }
             }
 
-            push @job_queue, {
+            # Compute layer based on dependencies (deps already queued recursively)
+            my $layer = compute_target_layer(\@deps);
+
+            my $job = {
                 target => $target,
                 dir => $dir,
                 command => $processed_rule,
                 silent => $any_silent,  # Track if any command has @ prefix
                 siblings => [@sibling_targets],  # Track siblings that will also be created
+                layer => $layer,  # Store layer for reference
             };
+            add_job_to_layer($job, $layer);
             $in_progress{$target} = "queued";
             # Mark all siblings as queued too (they'll be created by the same command)
             for my $sibling (@sibling_targets) {
@@ -9137,6 +9426,129 @@ sub run_job_master {
         }
     }
 
+    # Get next job from the layered queue (O(1) operation)
+    # Returns job or undef if no jobs available at current or lower layers
+    sub get_next_job_from_layers {
+        # Advance layer if current is empty
+        while ($current_dispatch_layer <= $max_dispatch_layer) {
+            my $layer_jobs = $job_layers[$current_dispatch_layer];
+            if ($layer_jobs && @$layer_jobs > 0) {
+                # Pop job from current layer
+                my $job = shift @$layer_jobs;
+
+                # Also remove from flat queue (for compatibility)
+                for my $i (0 .. $#job_queue) {
+                    if ($job_queue[$i] && $job_queue[$i]{target} eq $job->{target}) {
+                        splice(@job_queue, $i, 1);
+                        last;
+                    }
+                }
+
+                print STDERR "DEBUG: Dispatching '$job->{target}' from layer $current_dispatch_layer\n" if $ENV{SMAK_DEBUG};
+                return $job;
+            }
+            # Current layer empty, advance to next
+            $current_dispatch_layer++;
+            print STDERR "DEBUG: Advanced to dispatch layer $current_dispatch_layer\n" if $ENV{SMAK_DEBUG};
+        }
+        return undef;  # No jobs left
+    }
+
+    # Dispatch a single job to a specific worker (called when worker reports READY)
+    sub dispatch_job_to_worker {
+        my ($worker) = @_;
+
+        # Get next job from layered queue
+        my $job = get_next_job_from_layers();
+        return 0 unless $job;
+
+        my $target = $job->{target};
+
+        # Check if already being dispatched (race prevention)
+        if (exists $currently_dispatched{$target}) {
+            print STDERR "DEBUG: Target '$target' already dispatched, skipping\n" if $ENV{SMAK_DEBUG};
+            return 0;
+        }
+
+        # Mark worker as not ready
+        $worker_status{$worker}{ready} = 0;
+
+        # Assign task ID
+        my $task_id = $next_task_id++;
+        $currently_dispatched{$target} = $task_id;
+        $in_progress{$target} = $worker;
+        $worker_status{$worker}{task_id} = $task_id;
+
+        $running_jobs{$task_id} = {
+            target => $target,
+            worker => $worker,
+            dir => $job->{dir},
+            command => $job->{command},
+            siblings => $job->{siblings} || [],
+            layer => $job->{layer} // 0,
+        };
+
+        # Send task to worker
+        print $worker "TASK $task_id\n";
+        print $worker "DIR $job->{dir}\n";
+        print $worker "CMD $job->{command}\n";
+        $worker->flush();
+
+        vprint "Dispatched task $task_id: $target (layer " . ($job->{layer} // 0) . ")\n";
+
+        # Print command unless silent
+        my $silent = $job->{silent} || 0;
+        if (!$silent_mode && !$silent && !$dry_run_mode) {
+            print $stomp_prompt, "$job->{command}\n";
+        }
+
+        broadcast_observers("DISPATCHED $task_id $target");
+        return 1;
+    }
+
+    # New layer-based dispatch (temporarily disabled for debugging)
+    sub dispatch_jobs_layered {
+	my ($do,$block) = @_;
+	my $j = 0;
+
+        check_queue_state("dispatch_jobs start");
+
+        # Layer-based dispatch: jobs in layer N depend only on layers < N
+        # When dispatching from layer N, all layers < N are already complete
+        while (@job_queue > 0 || $current_dispatch_layer <= $max_dispatch_layer) {
+            # Find a ready worker
+            my $ready_worker;
+            for my $worker (@workers) {
+                if ($worker_status{$worker}{ready}) {
+                    $ready_worker = $worker;
+                    last;
+                }
+            }
+            if (!$ready_worker) {
+                print STDERR "DEBUG: No ready workers\n" if $ENV{SMAK_DEBUG};
+                last;
+            }
+
+            # Dispatch next job from current layer to this worker
+            if (dispatch_job_to_worker($ready_worker)) {
+                $j++;
+                if ($block) {
+                    wait_for_worker_done($ready_worker);
+                }
+                if (defined $do && $do == 1) {
+                    last;  # Only dispatch one job
+                }
+            } else {
+                # No more jobs available
+                last;
+            }
+        }
+
+        check_queue_state("dispatch_jobs end") if @job_queue;
+        return $j;
+    }
+
+    # Original dispatch_jobs code (restored for testing)
     sub dispatch_jobs {
 	my ($do,$block) = @_;
 	my $j = 0;
@@ -9258,15 +9670,32 @@ sub run_job_master {
                     @order_only_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @order_only_deps;
                 }
                 @order_only_deps = grep { $_ ne '' } @order_only_deps;
-                # Add order-only deps to the main deps list for checking
-                push @deps, @order_only_deps;
+
+                # Expand variables in order-only deps
+                my @expanded_order_only;
+                for my $dep (@order_only_deps) {
+                    while ($dep =~ /\$MV\{([^}]+)\}/) {
+                        my $var = $1;
+                        my $val = $MV{$var} // '';
+                        $dep =~ s/\$MV\{\Q$var\E\}/$val/;
+                    }
+                    push @expanded_order_only, $dep if $dep ne '';
+                }
+                @order_only_deps = @expanded_order_only;
+
+                # Add order-only deps to a separate list for checking (not to @deps which affects $<)
+                # We'll check both @deps and @order_only_deps for completion
 
                 print STDERR "DEBUG dispatch: Checking job '$target', deps: [" . join(", ", @deps) . "]" .
-                             (@order_only_deps ? " (includes order-only: " . join(", ", @order_only_deps) . ")" : "") . "\n" if $ENV{SMAK_DEBUG};
+                             (@order_only_deps ? ", order-only: [" . join(", ", @order_only_deps) . "]" : "") . "\n" if $ENV{SMAK_DEBUG};
+
+                # Combine regular deps and order-only deps for checking
+                # Order-only deps must be checked for completion but don't affect $< expansion
+                my @all_deps_to_check = (@deps, @order_only_deps);
 
                 # Check if any dependency has failed - if so, fail this job too
                 my $has_failed_dep = 0;
-                for my $dep (@deps) {
+                for my $dep (@all_deps_to_check) {
                     next if $dep =~ /^\.PHONY$/;
                     next if $dep !~ /\S/;
                     for my $single_dep (split /\s+/, $dep) {
@@ -9289,7 +9718,7 @@ sub run_job_master {
                 # Check if all dependencies are completed
                 my $deps_satisfied = 1;
                 my $has_unbuildable_dep = 0;
-                for my $dep (@deps) {
+                for my $dep (@all_deps_to_check) {
                     next if $dep =~ /^\.PHONY$/;
                     next if $dep !~ /\S/;
 
@@ -9616,8 +10045,12 @@ sub run_job_master {
                     # Process the message inline (same logic as main event loop)
                     if ($line eq 'READY') {
                         $worker_status{$worker}{ready} = 1;
-                        vprint "Worker ready\n";
-                        dispatch_jobs();
+                        my $dispatched = dispatch_jobs(1);  # Try to dispatch one job
+                        if ($dispatched) {
+                            vprint "Worker received job (consistency check)\n";
+                        } else {
+                            vprint "Worker ready\n";
+                        }
 
                     } elsif ($line =~ /^TASK_START (\d+)$/) {
                         my $task_id = $1;
@@ -9932,13 +10365,17 @@ sub run_job_master {
 
                                 # Re-queue the target only if not already queued
                                 if (!$already_queued) {
-                                    push @job_queue, {
+                                    # Use original layer for retry (preserved in job hash)
+                                    my $retry_layer = $job->{layer} // 0;
+                                    my $retry_job = {
                                         target => $job->{target},
                                         dir => $job->{dir},
                                         command => $job->{command},
                                         silent => $job->{silent} || 0,
+                                        layer => $retry_layer,
                                     };
-                                    print STDERR "Auto-retry: re-queued '$job->{target}' for retry (will dispatch when dependencies ready)\n" if $ENV{SMAK_DEBUG};
+                                    add_job_to_layer($retry_job, $retry_layer);
+                                    print STDERR "Auto-retry: re-queued '$job->{target}' to layer $retry_layer for retry\n" if $ENV{SMAK_DEBUG};
                                 }
 
                                 # Don't dispatch immediately - let dependencies build first
@@ -10102,7 +10539,7 @@ sub run_job_master {
                 chomp $line;
 
                 if ($line eq 'SHUTDOWN') {
-                    print STDERR "Shutdown requested by master.\n";
+                    print STDERR "Shutdown requested by master.\n" if $ENV{SMAK_DEBUG} || $ENV{SMAK_VERBOSE};
                     shutdown_workers();
                     print $master_socket "SHUTDOWN_ACK\n";
                     exit 0;
@@ -11142,9 +11579,12 @@ sub run_job_master {
                 if ($line eq 'READY') {
                     # Worker is ready for a job
                     $worker_status{$socket}{ready} = 1;
-                    vprint "Worker ready\n";
-                    # Try to dispatch queued jobs
-                    dispatch_jobs();
+                    my $dispatched = dispatch_jobs(1);  # Try to dispatch one job
+                    if ($dispatched) {
+                        vprint "Worker received next job\n";
+                    } else {
+                        vprint "Worker ready (no jobs)\n";
+                    }
 
                 } elsif ($line =~ /^TASK_START (\d+)$/) {
                     my $task_id = $1;
@@ -11270,13 +11710,17 @@ sub run_job_master {
                                     }
                                 }
 
-                                push @job_queue, {
+                                # Subtasks inherit parent's layer
+                                my $sub_layer = $job->{layer} // 0;
+                                my $sub_job = {
                                     target => $subtarget,
                                     dir => $job->{dir},
                                     command => $sub_cmd,
                                     silent => $sub_silent,
+                                    layer => $sub_layer,
                                 };
-                                print STDERR "    Queued: $subtarget\n";
+                                add_job_to_layer($sub_job, $sub_layer);
+                                print STDERR "    Queued: $subtarget (layer $sub_layer)\n";
                             }
 
                             # Remove original task from running jobs
@@ -11618,13 +12062,17 @@ sub run_job_master {
 
                             # Re-queue the target only if not already queued
                             if (!$already_queued) {
-                                push @job_queue, {
+                                # Use original layer for retry
+                                my $retry_layer = $job->{layer} // 0;
+                                my $retry_job = {
                                     target => $job->{target},
                                     dir => $job->{dir},
                                     command => $job->{command},
                                     silent => $job->{silent} || 0,
+                                    layer => $retry_layer,
                                 };
-                                print STDERR "Auto-retry: re-queued '$job->{target}' for retry (will dispatch when dependencies ready)\n" if $ENV{SMAK_DEBUG};
+                                add_job_to_layer($retry_job, $retry_layer);
+                                print STDERR "Auto-retry: re-queued '$job->{target}' to layer $retry_layer for retry\n" if $ENV{SMAK_DEBUG};
                             }
 
                             # Don't dispatch immediately - let dependencies build first
@@ -11669,8 +12117,12 @@ sub run_job_master {
                         chomp $next_line;
                         if ($next_line eq 'READY') {
                             $worker_status{$socket}{ready} = 1;
-                            vprint "Worker ready (streaming)\n";
-                            dispatch_jobs();
+                            my $dispatched = dispatch_jobs(1);  # Try to dispatch one job
+                            if ($dispatched) {
+                                vprint "Worker received next job (streaming)\n";
+                            } else {
+                                vprint "Worker ready (no jobs available)\n";
+                            }
                         } else {
                             # Non-READY message - shouldn't happen but log for debugging
                             print STDERR "Unexpected message after TASK_END: $next_line\n" if $ENV{SMAK_DEBUG};

@@ -286,7 +286,7 @@ while (my $line = <$socket>) {
 
     # Check for shutdown signal
     if ($line eq 'SHUTDOWN') {
-        print STDERR "Worker shutting down on master request\n";
+        print STDERR "Worker shutting down on master request\n" if $ENV{SMAK_DEBUG} || $ENV{SMAK_VERBOSE};
         last;
     }
 
@@ -505,7 +505,7 @@ while (my $line = <$socket>) {
 
                         if ($msg eq 'SHUTDOWN') {
                             kill 'TERM', $pid if $pid;
-                            print STDERR "Worker shutting down during task\n";
+                            print STDERR "Worker shutting down during task\n" if $ENV{SMAK_DEBUG} || $ENV{SMAK_VERBOSE};
                             exit 0;
                         } elsif ($msg eq 'STATUS') {
                             print $socket "RUNNING $task_id\n";

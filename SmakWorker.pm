@@ -96,7 +96,7 @@ sub run_worker {
 
         # Check for shutdown signal
         if ($line eq 'SHUTDOWN') {
-            print STDERR "Worker shutting down on master request\n";
+            print STDERR "Worker shutting down on master request\n" if $ENV{SMAK_DEBUG} || $ENV{SMAK_VERBOSE};
             last;
         }
 

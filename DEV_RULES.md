@@ -25,6 +25,22 @@ cd test && ./run-regression -j 4
 cd test && ./run-regression -clone local
 ```
 
+### Test Directory Safety
+**IMPORTANT:** Always run manual/ad-hoc tests from `/tmp/smak-test/` to avoid accidentally deleting source files with glob patterns like `rm -rf test-*`.
+
+```bash
+# Create test directory
+mkdir -p /tmp/smak-test && cd /tmp/smak-test
+
+# Run individual test scripts from there
+/usr/local/src/smak/test/test-cli-advanced
+
+# Or copy test files there first
+cp /usr/local/src/smak/test/test_*.sh /tmp/smak-test/
+```
+
+The `test-cli-advanced` script automatically uses `/tmp/smak-test-cli-$$` for its working directory.
+
 ## Development Workflow
 
 1. **Read Before Modifying**

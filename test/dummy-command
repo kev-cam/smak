@@ -5,6 +5,7 @@
 input_files=()
 output_files=()
 mode=""
+send_sigint=0
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -15,6 +16,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         -out)
             mode="output"
+            shift
+            ;;
+        -sigint)
+            # Send SIGINT to parent process (for Ctrl-C testing)
+            send_sigint=1
             shift
             ;;
         *)
@@ -42,10 +48,17 @@ if [[ ${#input_files[@]} -gt 0 ]]; then
     echo "All ${#input_files[@]} input file(s) verified"
 fi
 
-# Random delay between 0 and 2 seconds
-delay=$(awk -v min=0 -v max=2 'BEGIN{srand(); print min+rand()*(max-min)}')
+# Random delay between 0 and 0.1 seconds (fast mode for testing)
+delay=$(awk -v min=0 -v max=0.1 'BEGIN{srand(); print min+rand()*(max-min)}')
 echo "Waiting ${delay} seconds..."
 sleep "$delay"
+
+# Send SIGINT to parent if requested (for Ctrl-C testing)
+if [[ $send_sigint -eq 1 ]]; then
+    echo "Sending SIGINT to parent process ($$'s parent)"
+    kill -INT $PPID 2>/dev/null || true
+    sleep 0.5  # Give parent time to handle signal
+fi
 
 # Touch all output files
 if [[ ${#output_files[@]} -gt 0 ]]; then

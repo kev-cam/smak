@@ -1966,6 +1966,9 @@ sub parse_makefile {
     }
 
     close($fh);
+
+    # Save state to cache after successful parse
+    save_state_cache($makefile_path);
 }
 
 sub parse_included_makefile {

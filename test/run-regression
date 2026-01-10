@@ -21,7 +21,13 @@ PARALLEL_JOBS=1
 SMAK_EXTRA_ARGS=""
 EXTERNAL_TESTS=0
 WORKDIR=""
-LOG_DIR="${SMAK_TEST_LOG_DIR:-/tmp}"  # Directory for temp logs; set by workdir mode
+LOG_DIR="${SMAK_TEST_LOG_DIR:-/tmp/smak-tests}"  # Directory for temp logs; set by workdir mode
+
+if [ ! -d $LOG_DIR ] ; then
+    mkdir -p $LOG_DIR
+fi
+
+exec 2>$LOG_DIR/regression.errors | tee $LOG_DIR/regression.log
 
 while [ $# -gt 0 ]; do
     case "$1" in

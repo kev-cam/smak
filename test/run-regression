@@ -23,12 +23,6 @@ EXTERNAL_TESTS=0
 WORKDIR=""
 LOG_DIR="${SMAK_TEST_LOG_DIR:-/tmp/smak-tests}"  # Directory for temp logs; set by workdir mode
 
-if [ ! -d $LOG_DIR ] ; then
-    mkdir -p $LOG_DIR
-fi
-
-exec 2>$LOG_DIR/regression.errors | tee $LOG_DIR/regression.log
-
 while [ $# -gt 0 ]; do
     case "$1" in
         -j)
@@ -164,6 +158,12 @@ EOF
             ;;
     esac
 done
+
+if [ ! -d $LOG_DIR ] ; then
+    mkdir -p $LOG_DIR
+fi
+
+exec 2>$LOG_DIR/regression.errors | tee $LOG_DIR/regression.log
 
 # Export extra args for test scripts to use
 export SMAK_EXTRA_ARGS

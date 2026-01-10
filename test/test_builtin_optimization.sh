@@ -1,10 +1,17 @@
 #!/bin/bash
 # Test that recursive smak -C calls use built-in optimization
+# Built-in commands (rm, mv, recursive smak -C) are handled in-process
+# even in parallel mode, to track file-system changes properly.
 
 echo "Testing built-in recursive call optimization..."
 echo ""
 
 cd "$(dirname "$0")"
+
+# Clean up stale job-server connections and cache that could cause hangs or skipped targets
+rm -f .smak.connect
+rm -f /tmp/${USER:-dkc}/smak/smak-jobserver-*.port 2>/dev/null
+rm -f /tmp/${USER:-dkc}/smak/test/state.cache 2>/dev/null
 
 # Create test structure
 mkdir -p subdir1 subdir2 subdir3

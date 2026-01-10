@@ -1,10 +1,16 @@
 #!/bin/bash
 # Test that SMAK_ASSERT_NO_SPAWN catches when built-ins are NOT used
+# This verifies that disabling built-ins (SMAK_NO_BUILTINS=1) causes subprocess spawning.
 
 echo "Testing SMAK_ASSERT_NO_SPAWN assertion (should fail)..."
 echo ""
 
 cd "$(dirname "$0")"
+
+# Clean up stale job-server connections and cache that could cause hangs or skipped targets
+rm -f .smak.connect
+rm -f /tmp/${USER:-dkc}/smak/smak-jobserver-*.port 2>/dev/null
+rm -f /tmp/${USER:-dkc}/smak/test/state.cache 2>/dev/null
 
 # Create test structure
 mkdir -p subdir1 subdir2 subdir3

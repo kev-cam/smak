@@ -459,6 +459,57 @@ sub strip_command_prefixes {
     return ($cmd, $silent, $ignore_errors);
 }
 
+# Check if a command should be handled as a built-in (fast in-process execution)
+# rather than being sent to a worker. This includes:
+# - Recursive smak/make -C calls
+# - Simple built-in commands (rm, mkdir, echo, true, false, cd)
+# - Compound rm commands
+# Returns 1 if should be built-in, 0 otherwise
+sub is_builtin_command {
+    my ($cmd) = @_;
+    return 0 unless defined $cmd;
+
+    # Strip command prefixes
+    my $clean_cmd = $cmd;
+    $clean_cmd =~ s/^[@-]+//;
+    $clean_cmd =~ s/^\s+|\s+$//g;
+
+    # Check for recursive smak/make -C calls
+    # Match patterns like: smak -C dir target, make -C dir target, ${VAR:-smak} -C dir target
+    if ($clean_cmd =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make)|\$\{[^\}]*(?:smak|make)[^\}]*\})(?:\s+-\S+)*\s+-C\s+\S+\s+\S+}) {
+        return 1;
+    }
+
+    # Check for chained recursive calls: smak -C d1 t1 && smak -C d2 t2 && ...
+    my @parts = split(/\s+&&\s+/, $clean_cmd);
+    my $all_recursive = 1;
+    for my $part (@parts) {
+        $part =~ s/^\s+|\s+$//g;
+        $part =~ s/^[@-]+//;
+        # Skip no-op commands
+        next if $part eq 'true' || $part eq ':' || $part eq '';
+        unless ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make)|\$\{[^\}]*(?:smak|make)[^\}]*\})(?:\s+-\S+)*\s+-C\s+\S+\s+\S+}) {
+            $all_recursive = 0;
+            last;
+        }
+    }
+    return 1 if $all_recursive && @parts > 0;
+
+    # Check for simple built-in commands
+    my @words = split(/\s+/, $clean_cmd);
+    my $first_cmd = $words[0] || '';
+    if ($first_cmd =~ /^(rm|mkdir|echo|true|false|cd|:)$/) {
+        return 1;
+    }
+
+    # Check for compound rm commands like (rm -f x || true) && (rm -f y || true)
+    if ($clean_cmd =~ /^\s*\(?\s*rm\s/) {
+        return 1;
+    }
+
+    return 0;
+}
+
 # Execute a command using built-in Perl functions instead of shell
 # Returns exit code (0 = success, non-zero = failure, undef = not a built-in)
 sub execute_builtin {
@@ -746,8 +797,9 @@ sub execute_command_sequential {
         $part =~ s/^[@-]+//;      # Strip @ (silent) and - (ignore errors) prefixes
         # Match: smak -C <dir> <target> or make -C <dir> <target>
         # Also match relative paths like ../smak or ./smak
+        # Also match shell variable syntax like ${USR_SMAK_SCRIPT:-smak}
         # Allow optional flags (like -j4) between smak and -C
-        if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make))(?:\s+-\S+)*\s+-C\s+(\S+)\s+(\S+)}) {
+        if ($part =~ m{^(?:(?:\.\.?/|/)?[\w/.-]*(?:smak|make)|\$\{[^\}]*(?:smak|make)[^\}]*\})(?:\s+-\S+)*\s+-C\s+(\S+)\s+(\S+)}) {
             if (!$found_non_recursive) {
                 push @recursive_calls, { dir => $1, target => $2 };
             } else {
@@ -4763,15 +4815,18 @@ sub build_target {
 
             EXECUTE_EXTERNAL_COMMAND:
             # Execute command - use job system if available, otherwise sequential
+            # BUT: built-in commands (rm, mv, recursive smak -C) should always be handled
+            # in-process to track file-system changes and avoid worker overhead
             use Cwd 'getcwd';
             my $cwd = getcwd();
-            if ($job_server_socket && 0 != $jobs) {
+            my $use_builtin = is_builtin_command($cmd_line);
+            if ($job_server_socket && 0 != $jobs && !$use_builtin) {
                 warn "DEBUG[" . __LINE__ . "]:     Using job server ($jobs)\n" if $ENV{SMAK_DEBUG};
                 # Parallel mode - submit to job server (job master will echo the command)
                 submit_job($target, $cmd_line, $cwd);
             } else {
-                warn "DEBUG[" . __LINE__ . "]:     Sequential execution (job_server_socket=" . (defined $job_server_socket ? "defined" : "undef") . ", jobs=$jobs, dry_run=$dry_run_mode)\n" if $ENV{SMAK_DEBUG};
-                # Sequential mode - echo command here, then execute directly
+                warn "DEBUG[" . __LINE__ . "]:     Sequential execution (job_server_socket=" . (defined $job_server_socket ? "defined" : "undef") . ", jobs=$jobs, dry_run=$dry_run_mode, builtin=$use_builtin)\n" if $ENV{SMAK_DEBUG};
+                # Sequential mode or built-in command - echo command here, then execute directly
                 # In dry-run mode, skip printing here since the dummy worker will print it
                 unless ($silent_mode || $silent || $dry_run_mode) {
                     print "$display_cmd\n";

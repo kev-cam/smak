@@ -2740,25 +2740,37 @@ sub _quote_string {
     return "'$str'";
 }
 
+# Cache for vpath resolutions to avoid repeated lookups
+our %vpath_cache;
+
 # Resolve a file through vpath directories
 sub resolve_vpath {
     my ($file, $dir) = @_;
+
+    # Check cache first - key includes both file and dir for correctness
+    my $cache_key = "$dir\t$file";
+    if (exists $vpath_cache{$cache_key}) {
+        return $vpath_cache{$cache_key};
+    }
 
     # Skip inactive implicit rule patterns (e.g., RCS/SCCS if not present in project)
     # This avoids unnecessary vpath resolution and debug spam for patterns that don't exist
     if (is_inactive_pattern($file)) {
         warn "DEBUG vpath: Skipping inactive pattern file '$file'\n" if ($ENV{SMAK_DEBUG} || 0) >= 2;
+        $vpath_cache{$cache_key} = $file;
         return $file;  # Return as-is without vpath resolution
     }
 
     # Skip files in ignored directories (e.g., /usr/include, /usr/local/include)
     # These are system directories that won't change, so no need for vpath resolution
     if (is_ignored_dir($file)) {
+        $vpath_cache{$cache_key} = $file;
         return $file;  # Return as-is, system files don't need vpath resolution
     }
 
     # Early exit if no vpath patterns are defined - no point in checking
     unless (keys %vpath) {
+        $vpath_cache{$cache_key} = $file;
         return $file;  # No vpath to search, return original
     }
 
@@ -2766,6 +2778,7 @@ sub resolve_vpath {
     my $file_path = $file =~ m{^/} ? $file : "$dir/$file";
     if (-e $file_path) {
         # File found in current directory (common case, no debug needed)
+        $vpath_cache{$cache_key} = $file;
         return $file;
     }
 
@@ -2799,14 +2812,16 @@ sub resolve_vpath {
                     # Return relative path from $dir
                     $candidate =~ s{^\Q$dir\E/}{};
                     print STDERR "DEBUG vpath: ✓ resolved '$file' → '$candidate' via vpath\n" if $ENV{SMAK_DEBUG};
+                    $vpath_cache{$cache_key} = $candidate;
                     return $candidate;
                 }
             }
         }
     }
 
-    # Not found via vpath, return original
+    # Not found via vpath, return original (and cache the negative result)
     print STDERR "DEBUG vpath: '$file' not found via vpath, returning as-is\n" if $ENV{SMAK_DEBUG};
+    $vpath_cache{$cache_key} = $file;
     return $file;
 }
 

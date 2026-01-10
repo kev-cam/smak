@@ -307,7 +307,7 @@ sub start_job_server {
     use IO::Select;
     use FindBin qw($RealBin);
 
-    return if $jobs < 1;  # Need at least 1 worker for job server (enables FUSE monitoring)
+    return if $jobs < 1;  # Need at least 1 worker for job server
 
     $SmakCli::cli_owner = $$; # parent not server or workers
 
@@ -583,6 +583,142 @@ sub execute_builtin {
 
     # Not a recognized built-in
     return undef;
+}
+
+# Try to execute a compound command (e.g., "(rm -f *.o || true) && (rm -f src/*.o || true)")
+# as built-in operations without spawning a shell.
+# Optimizes by combining multiple rm commands into a single operation.
+# Returns: 0 on success, non-zero on error, undef if command cannot be handled as built-in
+sub try_execute_compound_builtin {
+    my ($cmd, $silent_mode_flag) = @_;
+
+    # Quick check: if command contains shell-specific features we can't handle, bail out
+    # Commands should already have variables expanded when they reach here
+    return undef if $cmd =~ /`/;                   # Backtick command substitution
+    return undef if $cmd =~ /\$/;                  # Any variable (should be expanded already)
+    return undef if $cmd =~ /(?<!\|)\|(?!\|)/;     # Single | (pipe), but allow || (or)
+    return undef if $cmd =~ /[<>]/;                # Redirections
+    return undef if $cmd =~ /;/;                   # Semicolon command separator
+
+    # Split by && (respecting parentheses)
+    my @parts;
+    my $depth = 0;
+    my $current = '';
+
+    for my $char (split //, $cmd) {
+        if ($char eq '(') {
+            $depth++;
+            $current .= $char;
+        } elsif ($char eq ')') {
+            $depth--;
+            $current .= $char;
+        } elsif ($depth == 0 && $current =~ /\&$/ && $char eq '&') {
+            # Found && at depth 0
+            $current =~ s/\&$//;  # Remove the first &
+            $current =~ s/^\s+|\s+$//g;
+            push @parts, $current if $current =~ /\S/;
+            $current = '';
+        } else {
+            $current .= $char;
+        }
+    }
+    $current =~ s/^\s+|\s+$//g;
+    push @parts, $current if $current =~ /\S/;
+
+    # Try to combine all parts into a single rm -f operation if possible
+    # (rm -f x || true) && (rm -f y || true) => rm -f x y
+    my @rm_patterns;
+    my $all_rm_f = 1;
+
+    for my $part (@parts) {
+        my $inner_cmd = $part;
+
+        # Handle (cmd || true) pattern - for rm -f this is redundant
+        if ($part =~ /^\s*\((.+?)\s*\|\|\s*true\s*\)\s*$/) {
+            $inner_cmd = $1;
+        }
+        # Handle (cmd) pattern - just unwrap
+        elsif ($part =~ /^\s*\((.+)\)\s*$/) {
+            $inner_cmd = $1;
+        }
+
+        # Strip @ and - prefixes
+        $inner_cmd =~ s/^[@-]+//;
+        $inner_cmd =~ s/^\s+|\s+$//g;
+
+        # Check if it's "rm -f <patterns>"
+        if ($inner_cmd =~ /^rm\s+(-f|-rf|-fr)\s+(.+)$/) {
+            my $flags = $1;
+            my $patterns = $2;
+            # For now, only optimize plain "rm -f" (not -rf)
+            if ($flags eq '-f') {
+                push @rm_patterns, split(/\s+/, $patterns);
+            } else {
+                $all_rm_f = 0;
+                last;
+            }
+        } elsif ($inner_cmd eq 'true' || $inner_cmd eq ':') {
+            # No-op, skip
+        } else {
+            $all_rm_f = 0;
+            last;
+        }
+    }
+
+    # If all parts were "rm -f", execute as single operation
+    if ($all_rm_f && @rm_patterns > 0) {
+        print STDERR "DEBUG: Optimized compound rm -f: " . scalar(@rm_patterns) . " patterns\n" if $ENV{SMAK_DEBUG};
+
+        # Expand globs and remove files
+        for my $pattern (@rm_patterns) {
+            my @files = glob($pattern);
+            for my $file (@files) {
+                if (-e $file && !-d $file) {
+                    unlink($file);  # Ignore errors (like rm -f)
+                }
+            }
+        }
+        return 0;
+    }
+
+    # Fall back to executing parts individually
+    for my $part (@parts) {
+        my $ignore_errors = 0;
+        my $inner_cmd = $part;
+
+        # Handle (cmd || true) pattern - means ignore errors
+        if ($part =~ /^\s*\((.+?)\s*\|\|\s*true\s*\)\s*$/) {
+            $inner_cmd = $1;
+            $ignore_errors = 1;
+        }
+        # Handle (cmd) pattern - just unwrap
+        elsif ($part =~ /^\s*\((.+)\)\s*$/) {
+            $inner_cmd = $1;
+        }
+
+        # Strip @ and - prefixes
+        my $silent = 0;
+        while ($inner_cmd =~ s/^[@-]//) {
+            $silent = 1 if $& eq '@';
+            $ignore_errors = 1 if $& eq '-';
+        }
+        $inner_cmd =~ s/^\s+|\s+$//g;
+
+        # Try to execute as built-in
+        my $exit = execute_builtin($inner_cmd);
+
+        if (!defined $exit) {
+            # Not a built-in, can't handle this compound command
+            return undef;
+        }
+
+        if ($exit != 0 && !$ignore_errors) {
+            # Command failed and we're not ignoring errors
+            return $exit;
+        }
+    }
+
+    return 0;  # All parts executed successfully
 }
 
 sub execute_command_sequential {
@@ -2723,12 +2859,22 @@ sub _save_hash {
     for my $key (sort keys %$hashref) {
         my $val = $hashref->{$key};
         if (ref($val) eq 'ARRAY') {
-            print $fh "    " . _quote_string($key) . " => [" . join(", ", map { _quote_string($_) } @$val) . "],\n";
+            print $fh "    " . _quote_string($key) . " => [" . join(", ", map { _serialize_value($_) } @$val) . "],\n";
         } else {
             print $fh "    " . _quote_string($key) . " => " . _quote_string($val) . ",\n";
         }
     }
     print $fh ");\n\n";
+}
+
+# Helper: serialize a value (handles nested arrays)
+sub _serialize_value {
+    my ($val) = @_;
+    if (ref($val) eq 'ARRAY') {
+        return "[" . join(", ", map { _serialize_value($_) } @$val) . "]";
+    } else {
+        return _quote_string($val);
+    }
 }
 
 # Helper: quote a string for Perl code
@@ -4270,6 +4416,8 @@ sub build_target {
         warn "DEBUG[" . __LINE__ . "]:   Rule value: '$rule_preview" . (length($rule) > 100 ? "...' (truncated)" : "'") . "\n";
     }
 
+    warn "DEBUG[" . __LINE__ . "]:   rule='$rule' (". (defined $rule ? "defined" : "undef") . ", " . ($rule ? "truthy" : "falsy") . "), deps=" . scalar(@deps) . ", job_server=" . (defined $job_server_socket ? "yes" : "no") . "\n" if $ENV{SMAK_DEBUG};
+
     # Execute rule if it exists (submit_job is blocking, so no need to wait)
     if ($rule && $rule =~ /\S/) {
         warn "DEBUG[" . __LINE__ . "]:   Executing rule for target '$target'\n" if $ENV{SMAK_DEBUG};
@@ -4395,10 +4543,19 @@ sub build_target {
                 my @parts = split(/\s+&&\s+/, $clean_cmd);
                 my $can_handle_all = 1;
                 for my $part (@parts) {
+                    my $check_part = $part;
+                    # Unwrap (cmd || true) pattern
+                    if ($check_part =~ /^\s*\((.+?)\s*\|\|\s*true\s*\)\s*$/) {
+                        $check_part = $1;
+                    }
+                    # Unwrap (cmd) pattern
+                    elsif ($check_part =~ /^\s*\((.+)\)\s*$/) {
+                        $check_part = $1;
+                    }
                     # Allow 'true' or 'false' as terminating commands
-                    next if $part =~ /^\s*(true|false)\s*$/;
+                    next if $check_part =~ /^\s*(true|false)\s*$/;
                     # Check if it's a built-in we can handle (rm, make/smak)
-                    unless ($part =~ /^\s*rm\b/ || $part =~ /\b(make|smak)\s/ || $part =~ m{/smak(?:\s|$)}) {
+                    unless ($check_part =~ /^\s*rm\b/ || $check_part =~ /\b(make|smak)\s/ || $check_part =~ m{/smak(?:\s|$)}) {
                         warn "DEBUG[" . __LINE__ . "]: Cannot handle part: $part\n" if $ENV{SMAK_DEBUG};
                         $can_handle_all = 0;
                         last;
@@ -4415,20 +4572,29 @@ sub build_target {
 
                     # Execute each piece
                     for my $part (@parts) {
+                        my $exec_part = $part;
+                        # Unwrap (cmd || true) pattern
+                        if ($exec_part =~ /^\s*\((.+?)\s*\|\|\s*true\s*\)\s*$/) {
+                            $exec_part = $1;
+                        }
+                        # Unwrap (cmd) pattern
+                        elsif ($exec_part =~ /^\s*\((.+)\)\s*$/) {
+                            $exec_part = $1;
+                        }
                         # Skip 'true' or 'false'
-                        next if $part =~ /^\s*(true|false)\s*$/;
+                        next if $exec_part =~ /^\s*(true|false)\s*$/;
 
                         # Check if it's an rm command
-                        if ($part =~ /^\s*rm\b/) {
+                        if ($exec_part =~ /^\s*rm\b/) {
                             # Execute as built-in rm
-                            my @args = shell_split($part);
+                            my @args = split(/\s+/, $exec_part);
                             shift @args;  # Remove 'rm'
                             builtin_rm(@args);
                             next;
                         }
 
                         # Parse and execute as recursive make
-                        my ($sub_makefile, $sub_directory, @sub_targets) = parse_make_command($part);
+                        my ($sub_makefile, $sub_directory, @sub_targets) = parse_make_command($exec_part);
 
                         if ($sub_directory || $sub_makefile || @sub_targets) {
                             # Save state
@@ -9680,8 +9846,11 @@ sub run_job_master {
                 my $key = "$makefile\t$target";
                 my @deps;
                 my $stem;  # For pattern expansion
+                my $has_explicit_rule = 0;  # Track if target has explicit rule (don't apply pattern rules)
                 if (exists $fixed_deps{$key}) {
                     @deps = @{$fixed_deps{$key} || []};
+                    # Check if there's an explicit rule for this target
+                    $has_explicit_rule = exists $fixed_rule{$key} && $fixed_rule{$key} =~ /\S/;
                 } elsif (exists $pattern_deps{$key}) {
                     my $deps_ref = $pattern_deps{$key} || [];
                     # Handle both single variant and multiple variants
@@ -9692,8 +9861,9 @@ sub run_job_master {
                     @deps = @{$pseudo_deps{$key} || []};
                 }
 
-                # If no deps found by exact match, try suffix rules first, then pattern matching
-                if (!@deps) {
+                # If no deps found by exact match and no explicit rule, try suffix rules first, then pattern matching
+                # Targets with explicit rules should NOT have pattern rule deps added
+                if (!@deps && !$has_explicit_rule) {
                     # Try suffix rules FIRST (they take precedence over built-in pattern rules)
                     my $job_dir = $job->{dir} || '.';
                     if ($target =~ /^(.+)(\.[^.\/]+)$/) {
@@ -10050,6 +10220,73 @@ sub run_job_master {
                 assert_or_die(0, "Attempting to dispatch '$target' but it's already dispatched as task $existing_task");
             }
 
+            # Try to execute command as a built-in (avoids worker round-trip)
+            # This handles compound commands like "(rm -f *.o || true) && (rm -f src/*.o || true)"
+            my $peek_cmd = $peek_job->{command};
+            if (defined $peek_cmd && $peek_cmd =~ /\S/) {
+                # Change to job directory for built-in execution
+                my $saved_dir;
+                if ($peek_job->{dir} && $peek_job->{dir} ne '.') {
+                    use Cwd 'getcwd';
+                    $saved_dir = getcwd();
+                    if (!chdir($peek_job->{dir})) {
+                        warn "Cannot chdir to $peek_job->{dir}: $!\n" if $ENV{SMAK_DEBUG};
+                        $saved_dir = undef;  # Don't try to restore
+                    }
+                }
+
+                my $builtin_exit = try_execute_compound_builtin($peek_cmd);
+
+                # Restore directory
+                chdir($saved_dir) if defined $saved_dir;
+
+                if (defined $builtin_exit) {
+                    # Command was handled as built-in - no need for worker
+                    print STDERR "DEBUG: Built-in execution of '$target': exit $builtin_exit\n" if $ENV{SMAK_DEBUG};
+
+                    # Remove from queue
+                    splice(@job_queue, $job_index, 1);
+
+                    # Restore worker to ready state (we didn't use it)
+                    $worker_status{$ready_worker}{ready} = 1;
+
+                    if ($builtin_exit == 0) {
+                        # Success - mark complete
+                        $completed_targets{$target} = 1;
+                        $in_progress{$target} = "done";
+
+                        # Check composite targets
+                        for my $comp_target (keys %pending_composite) {
+                            my $comp = $pending_composite{$comp_target};
+                            $comp->{deps} = [grep { $_ ne $target } @{$comp->{deps}}];
+
+                            if (@{$comp->{deps}} == 0) {
+                                vprint "All dependencies complete for composite target '$comp_target' (built-in)\n";
+                                $completed_targets{$comp_target} = 1;
+                                $in_progress{$comp_target} = "done";
+                                if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
+                                    print {$comp->{master_socket}} "JOB_COMPLETE $comp_target 0\n";
+                                }
+                                delete $pending_composite{$comp_target};
+                            }
+                        }
+
+                        # Notify master
+                        print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket;
+                    } else {
+                        # Failure
+                        $failed_targets{$target} = $builtin_exit;
+                        $in_progress{$target} = "failed";
+                        fail_dependent_composite_targets($target, $builtin_exit);
+                        print $master_socket "JOB_COMPLETE $target $builtin_exit\n" if $master_socket;
+                    }
+
+                    $j++;
+                    next;  # Continue to next job
+                }
+                # Not a built-in - continue with normal worker dispatch
+            }
+
             # Mark as dispatched IMMEDIATELY (before removing from queue) to prevent race
             my $task_id = $next_task_id++;
             $currently_dispatched{$target} = $task_id;
@@ -10118,6 +10355,7 @@ sub run_job_master {
     # Main event loop
     my $last_consistency_check = time();
     my $jobs_received = 0;  # Track if we've received any job submissions
+    my $idle_sent = 0;      # Track if we've sent IDLE to master
 
     while (1) {
         # Check if all work is complete AND master has disconnected
@@ -10131,6 +10369,13 @@ sub run_job_master {
             unlink($port_file) if -f $port_file;
 
             last;
+        }
+
+        # Check if all work is complete - notify master
+        if ($jobs_received && !$idle_sent && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0 && defined($master_socket)) {
+            vprint "All jobs complete. Sending IDLE to master.\n";
+            print $master_socket "IDLE\n" if $master_socket;
+            $idle_sent = 1;
         }
 
         my @ready = $select->can_read(0.1);
@@ -10250,12 +10495,33 @@ sub run_job_master {
                             if (ASSERTIONS_ENABLED && $ENV{SMAK_DEBUG}) {
                                 my $target = $job->{target};
 
-                                # Check if this is a phony target by searching all pseudo_rule keys
+                                # Check if this is a phony target
                                 my $is_phony_target = 0;
-                                for my $key (keys %pseudo_rule) {
-                                    if ($key =~ /\t\Q$target\E$/) {
-                                        $is_phony_target = 1;
-                                        last;
+
+                                # 1. Check .PHONY declarations in pseudo_deps
+                                my $phony_key = "$makefile\t.PHONY";
+                                if (exists $pseudo_deps{$phony_key}) {
+                                    my @phony_targets = @{$pseudo_deps{$phony_key}};
+                                    $is_phony_target = 1 if grep { $_ eq $target } @phony_targets;
+                                }
+
+                                # 2. Check for common phony target names
+                                if (!$is_phony_target && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+                                    $is_phony_target = 1;
+                                }
+
+                                # 3. Check for automake-style phony targets (clean-*, install-*, mostlyclean-*, etc.)
+                                if (!$is_phony_target && $target =~ /^(clean|install|uninstall|mostlyclean|distclean|maintainer-clean)-/) {
+                                    $is_phony_target = 1;
+                                }
+
+                                # 4. Check pseudo_rule as fallback
+                                if (!$is_phony_target) {
+                                    for my $key (keys %pseudo_rule) {
+                                        if ($key =~ /\t\Q$target\E$/) {
+                                            $is_phony_target = 1;
+                                            last;
+                                        }
                                     }
                                 }
 
@@ -10735,6 +11001,7 @@ sub run_job_master {
 
                     vprint "Received job request for target: $target\n";
                     $jobs_received = 1;  # Mark that we've received at least one job
+                    $idle_sent = 0;      # Reset idle flag - we have new work
 
                     # Lookup dependencies using the key format "makefile\ttarget"
                     my $key = "$makefile\t$target";
@@ -11948,12 +12215,33 @@ sub run_job_master {
                         if (ASSERTIONS_ENABLED && $ENV{SMAK_DEBUG}) {
                             my $target = $job->{target};
 
-                            # Check if this is a phony target by searching all pseudo_rule keys
+                            # Check if this is a phony target
                             my $is_phony_target = 0;
-                            for my $key (keys %pseudo_rule) {
-                                if ($key =~ /\t\Q$target\E$/) {
-                                    $is_phony_target = 1;
-                                    last;
+
+                            # 1. Check .PHONY declarations in pseudo_deps
+                            my $phony_key = "$makefile\t.PHONY";
+                            if (exists $pseudo_deps{$phony_key}) {
+                                my @phony_targets = @{$pseudo_deps{$phony_key}};
+                                $is_phony_target = 1 if grep { $_ eq $target } @phony_targets;
+                            }
+
+                            # 2. Check for common phony target names
+                            if (!$is_phony_target && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+                                $is_phony_target = 1;
+                            }
+
+                            # 3. Check for automake-style phony targets (clean-*, install-*, mostlyclean-*, etc.)
+                            if (!$is_phony_target && $target =~ /^(clean|install|uninstall|mostlyclean|distclean|maintainer-clean)-/) {
+                                $is_phony_target = 1;
+                            }
+
+                            # 4. Check pseudo_rule as fallback
+                            if (!$is_phony_target) {
+                                for my $key (keys %pseudo_rule) {
+                                    if ($key =~ /\t\Q$target\E$/) {
+                                        $is_phony_target = 1;
+                                        last;
+                                    }
                                 }
                             }
 

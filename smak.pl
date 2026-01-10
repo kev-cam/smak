@@ -920,8 +920,11 @@ if (!$debug) {
     };
 
     # Wait for all submitted jobs to complete before shutting down
+    # Only wait if there are jobs pending - if all commands were handled as built-ins,
+    # no jobs were submitted and we can skip straight to shutdown
     if ($Smak::job_server_socket && keys %Smak::in_progress) {
-        while (keys %Smak::in_progress) {
+        # Keep reading until we get IDLE (all work complete) or connection closes
+        while (1) {
             # Read job completion notifications from job server
             my $response = <$Smak::job_server_socket>;
             last unless defined $response;
@@ -933,6 +936,10 @@ if (!$debug) {
                 if ($exit_code != 0) {
                     warn "Job failed: $target (exit $exit_code)\n" unless $Smak::silent_mode;
                 }
+            }
+            # IDLE means all work is complete
+            elsif ($response eq 'IDLE') {
+                last;
             }
             # Also handle other messages to prevent blocking
             elsif ($response =~ /^OUTPUT (.*)$/) {

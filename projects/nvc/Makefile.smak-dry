@@ -1,194 +1,279 @@
-Warning: included file not found: ./.deps/dummy.Po [./.deps/dummy.Po]
-Warning: included file not found: ./src/.deps/bounds.Po [src/.deps/bounds.Po]
-Warning: included file not found: ./src/.deps/cgen.Po [src/.deps/cgen.Po]
-Warning: included file not found: ./src/.deps/common.Po [src/.deps/common.Po]
-Warning: included file not found: ./src/.deps/debug.Po [src/.deps/debug.Po]
-Warning: included file not found: ./src/.deps/diag.Po [src/.deps/diag.Po]
-Warning: included file not found: ./src/.deps/driver.Po [src/.deps/driver.Po]
-Warning: included file not found: ./src/.deps/dump.Po [src/.deps/dump.Po]
-Warning: included file not found: ./src/.deps/elab.Po [src/.deps/elab.Po]
-Warning: included file not found: ./src/.deps/eval.Po [src/.deps/eval.Po]
-Warning: included file not found: ./src/.deps/fbuf.Po [src/.deps/fbuf.Po]
-Warning: included file not found: ./src/.deps/hash.Po [src/.deps/hash.Po]
-Warning: included file not found: ./src/.deps/ident.Po [src/.deps/ident.Po]
-Warning: included file not found: ./src/.deps/inst.Po [src/.deps/inst.Po]
-Warning: included file not found: ./src/.deps/lexer.Po [src/.deps/lexer.Po]
-Warning: included file not found: ./src/.deps/lib.Po [src/.deps/lib.Po]
-Warning: included file not found: ./src/.deps/lower.Po [src/.deps/lower.Po]
-Warning: included file not found: ./src/.deps/make.Po [src/.deps/make.Po]
-Warning: included file not found: ./src/.deps/mask.Po [src/.deps/mask.Po]
-Warning: included file not found: ./src/.deps/names.Po [src/.deps/names.Po]
-Warning: included file not found: ./src/.deps/nvc.Po [src/.deps/nvc.Po]
-Warning: included file not found: ./src/.deps/object.Po [src/.deps/object.Po]
-Warning: included file not found: ./src/.deps/option.Po [src/.deps/option.Po]
-Warning: included file not found: ./src/.deps/parse.Po [src/.deps/parse.Po]
-Warning: included file not found: ./src/.deps/printf.Po [src/.deps/printf.Po]
-Warning: included file not found: ./src/.deps/scan.Po [src/.deps/scan.Po]
-Warning: included file not found: ./src/.deps/sem.Po [src/.deps/sem.Po]
-Warning: included file not found: ./src/.deps/server.Po [src/.deps/server.Po]
-Warning: included file not found: ./src/.deps/simp.Po [src/.deps/simp.Po]
-Warning: included file not found: ./src/.deps/thread.Po [src/.deps/thread.Po]
-Warning: included file not found: ./src/.deps/tree.Po [src/.deps/tree.Po]
-Warning: included file not found: ./src/.deps/type.Po [src/.deps/type.Po]
-Warning: included file not found: ./src/.deps/util.Po [src/.deps/util.Po]
-Warning: included file not found: ./src/.deps/vcode.Po [src/.deps/vcode.Po]
-Warning: included file not found: ./src/cov/.deps/cov-data.Po [src/cov/.deps/cov-data.Po]
-Warning: included file not found: ./src/cov/.deps/cov-exclude.Po [src/cov/.deps/cov-exclude.Po]
-Warning: included file not found: ./src/cov/.deps/cov-export.Po [src/cov/.deps/cov-export.Po]
-Warning: included file not found: ./src/cov/.deps/cov-html.Po [src/cov/.deps/cov-html.Po]
-Warning: included file not found: ./src/cov/.deps/cov-report.Po [src/cov/.deps/cov-report.Po]
-Warning: included file not found: ./src/jit/.deps/jit-code.Po [src/jit/.deps/jit-code.Po]
-Warning: included file not found: ./src/jit/.deps/jit-core.Po [src/jit/.deps/jit-core.Po]
-Warning: included file not found: ./src/jit/.deps/jit-dump.Po [src/jit/.deps/jit-dump.Po]
-Warning: included file not found: ./src/jit/.deps/jit-exits.Po [src/jit/.deps/jit-exits.Po]
-Warning: included file not found: ./src/jit/.deps/jit-ffi.Po [src/jit/.deps/jit-ffi.Po]
-Warning: included file not found: ./src/jit/.deps/jit-interp.Po [src/jit/.deps/jit-interp.Po]
-Warning: included file not found: ./src/jit/.deps/jit-intrin.Po [src/jit/.deps/jit-intrin.Po]
-Warning: included file not found: ./src/jit/.deps/jit-irgen.Po [src/jit/.deps/jit-irgen.Po]
-Warning: included file not found: ./src/jit/.deps/jit-layout.Po [src/jit/.deps/jit-layout.Po]
-Warning: included file not found: ./src/jit/.deps/jit-llvm.Po [src/jit/.deps/jit-llvm.Po]
-Warning: included file not found: ./src/jit/.deps/jit-optim.Po [src/jit/.deps/jit-optim.Po]
-Warning: included file not found: ./src/jit/.deps/jit-pack.Po [src/jit/.deps/jit-pack.Po]
-Warning: included file not found: ./src/jit/.deps/jit-x86.Po [src/jit/.deps/jit-x86.Po]
-Warning: included file not found: ./src/mir/.deps/mir-dump.Po [src/mir/.deps/mir-dump.Po]
-Warning: included file not found: ./src/mir/.deps/mir-node.Po [src/mir/.deps/mir-node.Po]
-Warning: included file not found: ./src/mir/.deps/mir-optim.Po [src/mir/.deps/mir-optim.Po]
-Warning: included file not found: ./src/mir/.deps/mir-type.Po [src/mir/.deps/mir-type.Po]
-Warning: included file not found: ./src/mir/.deps/mir-unit.Po [src/mir/.deps/mir-unit.Po]
-Warning: included file not found: ./src/mir/.deps/mir-vcode.Po [src/mir/.deps/mir-vcode.Po]
-Warning: included file not found: ./src/psl/.deps/psl-dump.Po [src/psl/.deps/psl-dump.Po]
-Warning: included file not found: ./src/psl/.deps/psl-fsm.Po [src/psl/.deps/psl-fsm.Po]
-Warning: included file not found: ./src/psl/.deps/psl-lower.Po [src/psl/.deps/psl-lower.Po]
-Warning: included file not found: ./src/psl/.deps/psl-node.Po [src/psl/.deps/psl-node.Po]
-Warning: included file not found: ./src/psl/.deps/psl-sem.Po [src/psl/.deps/psl-sem.Po]
-Warning: included file not found: ./src/rt/.deps/assert.Po [src/rt/.deps/assert.Po]
-Warning: included file not found: ./src/rt/.deps/copy.Po [src/rt/.deps/copy.Po]
-Warning: included file not found: ./src/rt/.deps/cover.Po [src/rt/.deps/cover.Po]
-Warning: included file not found: ./src/rt/.deps/ename.Po [src/rt/.deps/ename.Po]
-Warning: included file not found: ./src/rt/.deps/fileio.Po [src/rt/.deps/fileio.Po]
-Warning: included file not found: ./src/rt/.deps/heap.Po [src/rt/.deps/heap.Po]
-Warning: included file not found: ./src/rt/.deps/model.Po [src/rt/.deps/model.Po]
-Warning: included file not found: ./src/rt/.deps/mspace.Po [src/rt/.deps/mspace.Po]
-Warning: included file not found: ./src/rt/.deps/printer.Po [src/rt/.deps/printer.Po]
-Warning: included file not found: ./src/rt/.deps/random.Po [src/rt/.deps/random.Po]
-Warning: included file not found: ./src/rt/.deps/reflect.Po [src/rt/.deps/reflect.Po]
-Warning: included file not found: ./src/rt/.deps/shell.Po [src/rt/.deps/shell.Po]
-Warning: included file not found: ./src/rt/.deps/simpkg.Po [src/rt/.deps/simpkg.Po]
-Warning: included file not found: ./src/rt/.deps/standard.Po [src/rt/.deps/standard.Po]
-Warning: included file not found: ./src/rt/.deps/stdenv.Po [src/rt/.deps/stdenv.Po]
-Warning: included file not found: ./src/rt/.deps/wave.Po [src/rt/.deps/wave.Po]
-Warning: included file not found: ./src/sdf/.deps/sdf-parse.Po [src/sdf/.deps/sdf-parse.Po]
-Warning: included file not found: ./src/sdf/.deps/sdf-util.Po [src/sdf/.deps/sdf-util.Po]
-Warning: included file not found: ./src/vhdl/.deps/vhdl-inst.Po [src/vhdl/.deps/vhdl-inst.Po]
-Warning: included file not found: ./src/vhdl/.deps/vhdl-lower.Po [src/vhdl/.deps/vhdl-lower.Po]
-Warning: included file not found: ./src/vhdl/.deps/vhdl-predef.Po [src/vhdl/.deps/vhdl-predef.Po]
-Warning: included file not found: ./src/vhdl/.deps/vhdl-util.Po [src/vhdl/.deps/vhdl-util.Po]
-Warning: included file not found: ./src/vhpi/.deps/vhpi-model.Po [src/vhpi/.deps/vhpi-model.Po]
-Warning: included file not found: ./src/vhpi/.deps/vhpi-str.Po [src/vhpi/.deps/vhpi-str.Po]
-Warning: included file not found: ./src/vhpi/.deps/vhpi-util.Po [src/vhpi/.deps/vhpi-util.Po]
-Warning: included file not found: ./src/vhpi/.deps/vhpi_sens.Po [src/vhpi/.deps/vhpi_sens.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-dump.Po [src/vlog/.deps/vlog-dump.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-inst.Po [src/vlog/.deps/vlog-inst.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-lower.Po [src/vlog/.deps/vlog-lower.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-node.Po [src/vlog/.deps/vlog-node.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-number.Po [src/vlog/.deps/vlog-number.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-parse.Po [src/vlog/.deps/vlog-parse.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-pp.Po [src/vlog/.deps/vlog-pp.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-sem.Po [src/vlog/.deps/vlog-sem.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-simp.Po [src/vlog/.deps/vlog-simp.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-symtab.Po [src/vlog/.deps/vlog-symtab.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-trans.Po [src/vlog/.deps/vlog-trans.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-udp.Po [src/vlog/.deps/vlog-udp.Po]
-Warning: included file not found: ./src/vlog/.deps/vlog-util.Po [src/vlog/.deps/vlog-util.Po]
-Warning: included file not found: ./src/vpi/.deps/vpi-model.Po [src/vpi/.deps/vpi-model.Po]
-Warning: included file not found: ./src/vpi/.deps/vpi-str.Po [src/vpi/.deps/vpi-str.Po]
-Warning: included file not found: ./src/vpi/.deps/vpi-systf.Po [src/vpi/.deps/vpi-systf.Po]
-Warning: included file not found: ./src/vpi/.deps/vpi-util.Po [src/vpi/.deps/vpi-util.Po]
-Warning: included file not found: ./test/.deps/fstdump.Po [test/.deps/fstdump.Po]
-Warning: included file not found: ./test/.deps/jitperf.Po [test/.deps/jitperf.Po]
-Warning: included file not found: ./test/.deps/lockbench.Po [test/.deps/lockbench.Po]
-Warning: included file not found: ./test/.deps/mtstress.Po [test/.deps/mtstress.Po]
-Warning: included file not found: ./test/.deps/run_regr.Po [test/.deps/run_regr.Po]
-Warning: included file not found: ./test/.deps/test_bounds.Po [test/.deps/test_bounds.Po]
-Warning: included file not found: ./test/.deps/test_charset.Po [test/.deps/test_charset.Po]
-Warning: included file not found: ./test/.deps/test_cover.Po [test/.deps/test_cover.Po]
-Warning: included file not found: ./test/.deps/test_debug.Po [test/.deps/test_debug.Po]
-Warning: included file not found: ./test/.deps/test_driver.Po [test/.deps/test_driver.Po]
-Warning: included file not found: ./test/.deps/test_dump.Po [test/.deps/test_dump.Po]
-Warning: included file not found: ./test/.deps/test_elab.Po [test/.deps/test_elab.Po]
-Warning: included file not found: ./test/.deps/test_ident.Po [test/.deps/test_ident.Po]
-Warning: included file not found: ./test/.deps/test_jit.Po [test/.deps/test_jit.Po]
-Warning: included file not found: ./test/.deps/test_lib.Po [test/.deps/test_lib.Po]
-Warning: included file not found: ./test/.deps/test_lower.Po [test/.deps/test_lower.Po]
-Warning: included file not found: ./test/.deps/test_mir.Po [test/.deps/test_mir.Po]
-Warning: included file not found: ./test/.deps/test_misc.Po [test/.deps/test_misc.Po]
-Warning: included file not found: ./test/.deps/test_model.Po [test/.deps/test_model.Po]
-Warning: included file not found: ./test/.deps/test_mspace.Po [test/.deps/test_mspace.Po]
-Warning: included file not found: ./test/.deps/test_native.Po [test/.deps/test_native.Po]
-Warning: included file not found: ./test/.deps/test_parse.Po [test/.deps/test_parse.Po]
-Warning: included file not found: ./test/.deps/test_psl.Po [test/.deps/test_psl.Po]
-Warning: included file not found: ./test/.deps/test_sdf.Po [test/.deps/test_sdf.Po]
-Warning: included file not found: ./test/.deps/test_sem.Po [test/.deps/test_sem.Po]
-Warning: included file not found: ./test/.deps/test_server.Po [test/.deps/test_server.Po]
-Warning: included file not found: ./test/.deps/test_shell.Po [test/.deps/test_shell.Po]
-Warning: included file not found: ./test/.deps/test_simp.Po [test/.deps/test_simp.Po]
-Warning: included file not found: ./test/.deps/test_util.Po [test/.deps/test_util.Po]
-Warning: included file not found: ./test/.deps/test_value.Po [test/.deps/test_value.Po]
-Warning: included file not found: ./test/.deps/test_vlog.Po [test/.deps/test_vlog.Po]
-Warning: included file not found: ./test/.deps/unit_test.Po [test/.deps/unit_test.Po]
-Warning: included file not found: ./test/.deps/vpi_dump_vpi-vpi-dump.Po [test/.deps/vpi_dump_vpi-vpi-dump.Po]
-Warning: included file not found: ./test/.deps/workqbench.Po [test/.deps/workqbench.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1035.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1035.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1045.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1045.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1057.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1057.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1060.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1060.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1161.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1161.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1192.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1192.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1213.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1213.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1233.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1233.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1240.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1240.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue1301.Po [test/vhpi/.deps/lib_vhpi_test_so-issue1301.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue612.Po [test/vhpi/.deps/lib_vhpi_test_so-issue612.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue744.Po [test/vhpi/.deps/lib_vhpi_test_so-issue744.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue762.Po [test/vhpi/.deps/lib_vhpi_test_so-issue762.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue978.Po [test/vhpi/.deps/lib_vhpi_test_so-issue978.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-issue988.Po [test/vhpi/.deps/lib_vhpi_test_so-issue988.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi1.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi1.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi10.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi10.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi11.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi11.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi12.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi12.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi13.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi13.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi14.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi14.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi15.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi15.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi16.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi16.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi2.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi2.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi3.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi3.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi4.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi4.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi5.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi5.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi6.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi6.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi7.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi7.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi8.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi8.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi9.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi9.Po]
-Warning: included file not found: ./test/vhpi/.deps/lib_vhpi_test_so-vhpi_test.Po [test/vhpi/.deps/lib_vhpi_test_so-vhpi_test.Po]
-Warning: included file not found: ./thirdparty/.deps/bin_sha1test-sha1.Po [thirdparty/.deps/bin_sha1test-sha1.Po]
-Warning: included file not found: ./thirdparty/.deps/cpustate.Po [thirdparty/.deps/cpustate.Po]
-Warning: included file not found: ./thirdparty/.deps/fastlz.Po [thirdparty/.deps/fastlz.Po]
-Warning: included file not found: ./thirdparty/.deps/fstapi.Po [thirdparty/.deps/fstapi.Po]
-Warning: included file not found: ./thirdparty/.deps/getdelim.Po [thirdparty/.deps/getdelim.Po]
-Warning: included file not found: ./thirdparty/.deps/getline.Po [thirdparty/.deps/getline.Po]
-Warning: included file not found: ./thirdparty/.deps/lz4.Po [thirdparty/.deps/lz4.Po]
-Warning: included file not found: ./thirdparty/.deps/memmem.Po [thirdparty/.deps/memmem.Po]
-Warning: included file not found: ./thirdparty/.deps/rawmemchr.Po [thirdparty/.deps/rawmemchr.Po]
-Warning: included file not found: ./thirdparty/.deps/sha1.Po [thirdparty/.deps/sha1.Po]
-Warning: included file not found: ./thirdparty/.deps/strcasestr.Po [thirdparty/.deps/strcasestr.Po]
-Warning: included file not found: ./thirdparty/.deps/strchrnul.Po [thirdparty/.deps/strchrnul.Po]
-Warning: included file not found: ./thirdparty/.deps/strndup.Po [thirdparty/.deps/strndup.Po]
-Warning: included file not found: ./thirdparty/.deps/svrand.Po [thirdparty/.deps/svrand.Po]
-Warning: Could not parse sub-makefile 'config.h': Cannot open config.h: No such file or directory at /home/user/smak/Smak.pm line 1259.
-
-echo "#define GIT_SHA \"\"" > gitsha.h
-rm -f stamp-h1
-cd . && /bin/bash ./config.status config.h
-test -f config.h || rm -f stamp-h1
-@test -f config.h || ../../smak  stamp-h1
 ../../smak  all-am
+CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' aclocal-1.16 -I m4
+for dep in $?; do 	  case '../nvc/m4/ax_append_flag.m4 	../nvc/m4/ax_check_compile_flag.m4 	../nvc/m4/ax_check_gnu_make.m4 	../nvc/m4/ax_check_link_flag.m4 	../nvc/m4/ax_compare_version.m4 	../nvc/m4/ax_compiler_vendor.m4 	../nvc/m4/ax_define_dir.m4 	../nvc/m4/ax_gcc_builtin.m4 	../nvc/m4/ax_gcc_func_attribute.m4 	../nvc/m4/ax_lib_readline.m4 	../nvc/m4/ax_llvm_c.m4 ../nvc/m4/ax_prog_flex.m4 	../nvc/m4/ax_pthread.m4 	../nvc/m4/ax_with_curses.m4 	../nvc/m4/dynamic_list.m4 	../nvc/m4/force_out_of_tree.m4 ../nvc/m4/nvc.m4 	../nvc/m4/pkg.m4 ../nvc/configure.ac  	../nvc/aclocal.m4' in 	    *$dep*) 	      echo ' cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' automake-1.16 --foreign'; 	      CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' automake-1.16 --foreign 		&& exit 0; 	      exit 1;; 	  esac; 	done; 	echo ' cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' automake-1.16 --foreign Makefile'; 	CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && 	  ${SHELL} '/mnt/y/nvc/missing' automake-1.16 --foreign Makefile
+CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' autoconf
+/bin/bash ./config.status --recheck
+case '$?' in 	  *config.status*) 	    echo ' /bin/bash ./config.status'; 	    /bin/bash ./config.status;; 	  *) 	    echo ' cd . && /bin/bash ./config.status Makefile depfiles'; 	    cd . && /bin/bash ./config.status Makefile depfiles;; 	esac;
+gcc -g -O2   -c -o src/nvc.o 
+gcc -g -O2   -c -o src/lib.o 
+gcc -g -O2   -c -o src/util.o 
+gcc -g -O2   -c -o src/ident.o 
+gcc -g -O2   -c -o src/parse.o 
+gcc -g -O2   -c -o src/lexer.o 
+gcc -g -O2   -c -o src/tree.o 
+gcc -g -O2   -c -o src/type.o 
+depbase=`echo src/sem.o | sed 's|[^/]*$|.deps/&|;s|\.o$||'`;	gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/sem.o -MD -MP -MF $depbase.Tpo -c -o src/sem.o src/sem.c &&	mv -f $depbase.Tpo $depbase.Po
+gcc -g -O2   -c -o src/elab.o 
+gcc -g -O2   -c -o src/simp.o 
+gcc -g -O2   -c -o src/dump.o 
+gcc -g -O2   -c -o src/common.o 
+gcc -g -O2   -c -o src/fbuf.o 
+gcc -g -O2   -c -o src/hash.o 
+gcc -g -O2   -c -o src/bounds.o 
+gcc -g -O2   -c -o src/make.o 
+gcc -g -O2   -c -o src/object.o 
+gcc -g -O2   -c -o src/lower.o 
+gcc -g -O2   -c -o src/vcode.o 
+gcc -g -O2   -c -o src/names.o 
+gcc -g -O2   -c -o src/debug.o 
+gcc -g -O2   -c -o src/eval.o 
+gcc -g -O2   -c -o src/option.o 
+gcc -g -O2   -c -o src/diag.o 
+gcc -g -O2   -c -o src/scan.o 
+gcc -g -O2   -c -o src/mask.o 
+gcc -g -O2   -c -o src/thread.o 
+gcc -g -O2   -c -o src/driver.o 
+gcc -g -O2   -c -o src/inst.o 
+gcc -g -O2   -c -o src/cgen.o 
+gcc -g -O2   -c -o src/printf.o 
+/usr/bin/mkdir -p src/cov && : > src/cov/.dirstamp
+/usr/bin/mkdir -p src/cov/.deps && : > src/cov/.deps/.dirstamp
+gcc -g -O2   -c -o src/cov/cov-data.o 
+gcc -g -O2   -c -o src/cov/cov-export.o 
+gcc -g -O2   -c -o src/cov/cov-report.o 
+gcc -g -O2   -c -o src/cov/cov-exclude.o 
+gcc -g -O2   -c -o src/cov/cov-html.o 
+/usr/bin/mkdir -p src/jit && : > src/jit/.dirstamp
+/usr/bin/mkdir -p src/jit/.deps && : > src/jit/.deps/.dirstamp
+gcc -g -O2   -c -o src/jit/jit-core.o 
+gcc -g -O2   -c -o src/jit/jit-irgen.o 
+gcc -g -O2   -c -o src/jit/jit-dump.o 
+gcc -g -O2   -c -o src/jit/jit-interp.o 
+gcc -g -O2   -c -o src/jit/jit-exits.o 
+gcc -g -O2   -c -o src/jit/jit-optim.o 
+gcc -g -O2   -c -o src/jit/jit-ffi.o 
+gcc -g -O2   -c -o src/jit/jit-code.o 
+gcc -g -O2   -c -o src/jit/jit-pack.o 
+gcc -g -O2   -c -o src/jit/jit-layout.o 
+gcc -g -O2   -c -o src/jit/jit-intrin.o 
+gcc -g -O2   -c -o src/jit/jit-x86.o 
+gcc -g -O2   -c -o src/jit/jit-llvm.o 
+/usr/bin/mkdir -p src/mir && : > src/mir/.dirstamp
+/usr/bin/mkdir -p src/mir/.deps && : > src/mir/.deps/.dirstamp
+gcc -g -O2   -c -o src/mir/mir-unit.o 
+gcc -g -O2   -c -o src/mir/mir-node.o 
+gcc -g -O2   -c -o src/mir/mir-type.o 
+gcc -g -O2   -c -o src/mir/mir-dump.o 
+gcc -g -O2   -c -o src/mir/mir-optim.o 
+gcc -g -O2   -c -o src/mir/mir-vcode.o 
+/usr/bin/mkdir -p src/psl && : > src/psl/.dirstamp
+/usr/bin/mkdir -p src/psl/.deps && : > src/psl/.deps/.dirstamp
+gcc -g -O2   -c -o src/psl/psl-node.o 
+gcc -g -O2   -c -o src/psl/psl-sem.o 
+gcc -g -O2   -c -o src/psl/psl-lower.o 
+gcc -g -O2   -c -o src/psl/psl-dump.o 
+gcc -g -O2   -c -o src/psl/psl-fsm.o 
+/usr/bin/mkdir -p src/rt && : > src/rt/.dirstamp
+/usr/bin/mkdir -p src/rt/.deps && : > src/rt/.deps/.dirstamp
+gcc -g -O2   -c -o src/rt/heap.o 
+gcc -g -O2   -c -o src/rt/cover.o 
+gcc -g -O2   -c -o src/rt/wave.o 
+gcc -g -O2   -c -o src/rt/mspace.o 
+gcc -g -O2   -c -o src/rt/stdenv.o 
+gcc -g -O2   -c -o src/rt/standard.o 
+gcc -g -O2   -c -o src/rt/simpkg.o 
+gcc -g -O2   -c -o src/rt/model.o 
+gcc -g -O2   -c -o src/rt/fileio.o 
+gcc -g -O2   -c -o src/rt/printer.o 
+gcc -g -O2   -c -o src/rt/reflect.o 
+gcc -g -O2   -c -o src/rt/assert.o 
+gcc -g -O2   -c -o src/rt/ename.o 
+gcc -g -O2   -c -o src/rt/copy.o 
+gcc -g -O2   -c -o src/rt/random.o 
+/usr/bin/mkdir -p src/sdf && : > src/sdf/.dirstamp
+/usr/bin/mkdir -p src/sdf/.deps && : > src/sdf/.deps/.dirstamp
+gcc -g -O2   -c -o src/sdf/sdf-parse.o 
+gcc -g -O2   -c -o src/sdf/sdf-util.o 
+/usr/bin/mkdir -p src/vhdl && : > src/vhdl/.dirstamp
+/usr/bin/mkdir -p src/vhdl/.deps && : > src/vhdl/.deps/.dirstamp
+gcc -g -O2   -c -o src/vhdl/vhdl-predef.o 
+gcc -g -O2   -c -o src/vhdl/vhdl-lower.o 
+gcc -g -O2   -c -o src/vhdl/vhdl-util.o 
+gcc -g -O2   -c -o src/vhdl/vhdl-inst.o 
+/usr/bin/mkdir -p src/vhpi && : > src/vhpi/.dirstamp
+/usr/bin/mkdir -p src/vhpi/.deps && : > src/vhpi/.deps/.dirstamp
+gcc -g -O2   -c -o src/vhpi/vhpi_sens.o 
+gcc -g -O2   -c -o src/vhpi/vhpi-str.o 
+gcc -g -O2   -c -o src/vhpi/vhpi-model.o 
+gcc -g -O2   -c -o src/vhpi/vhpi-util.o 
+/usr/bin/mkdir -p src/vlog && : > src/vlog/.dirstamp
+/usr/bin/mkdir -p src/vlog/.deps && : > src/vlog/.deps/.dirstamp
+gcc -g -O2   -c -o src/vlog/vlog-node.o 
+gcc -g -O2   -c -o src/vlog/vlog-dump.o 
+gcc -g -O2   -c -o src/vlog/vlog-lower.o 
+gcc -g -O2   -c -o src/vlog/vlog-number.o 
+gcc -g -O2   -c -o src/vlog/vlog-trans.o 
+gcc -g -O2   -c -o src/vlog/vlog-simp.o 
+gcc -g -O2   -c -o src/vlog/vlog-util.o 
+gcc -g -O2   -c -o src/vlog/vlog-sem.o 
+depbase=`echo src/vlog/vlog-pp.o | sed 's|[^/]*$|.deps/&|;s|\.o$||'`;	gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/vlog/vlog-pp.o -MD -MP -MF $depbase.Tpo -c -o src/vlog/vlog-pp.o src/vlog/vlog-pp.c &&	mv -f $depbase.Tpo $depbase.Po
+gcc -g -O2   -c -o src/vlog/vlog-parse.o 
+gcc -g -O2   -c -o src/vlog/vlog-udp.o 
+gcc -g -O2   -c -o src/vlog/vlog-inst.o 
+gcc -g -O2   -c -o src/vlog/vlog-symtab.o 
+/usr/bin/mkdir -p src/vpi && : > src/vpi/.dirstamp
+/usr/bin/mkdir -p src/vpi/.deps && : > src/vpi/.deps/.dirstamp
+gcc -g -O2   -c -o src/vpi/vpi-model.o 
+gcc -g -O2   -c -o src/vpi/vpi-str.o 
+gcc -g -O2   -c -o src/vpi/vpi-util.o 
+depbase=`echo src/vpi/vpi-systf.o | sed 's|[^/]*$|.deps/&|;s|\.o$||'`;	gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/vpi/vpi-systf.o -MD -MP -MF $depbase.Tpo -c -o src/vpi/vpi-systf.o src/vpi/vpi-systf.c &&	mv -f $depbase.Tpo $depbase.Po
+/usr/bin/mkdir -p lib && : > lib/.dirstamp
+(rm -f lib/libnvc.a || true) && gcc-ar cr lib/libnvc.a src/lib.o src/util.o 	src/ident.o src/parse.o src/lexer.o 	src/tree.o src/type.o src/sem.o 	src/elab.o src/simp.o src/dump.o 	src/common.o src/fbuf.o src/hash.o 	src/bounds.o src/make.o src/object.o 	src/lower.o src/vcode.o src/names.o 	src/debug.o src/eval.o src/option.o 	src/diag.o src/scan.o src/mask.o 	src/thread.o src/driver.o src/inst.o 	src/cgen.o src/printf.o  	src/cov/cov-data.o src/cov/cov-export.o 	src/cov/cov-report.o src/cov/cov-exclude.o 	src/cov/cov-html.o src/jit/jit-core.o 	src/jit/jit-irgen.o src/jit/jit-dump.o 	src/jit/jit-interp.o src/jit/jit-exits.o 	src/jit/jit-optim.o src/jit/jit-ffi.o 	src/jit/jit-code.o src/jit/jit-pack.o 	src/jit/jit-layout.o src/jit/jit-intrin.o 	src/jit/jit-x86.o src/jit/jit-llvm.o src/mir/mir-unit.o 	src/mir/mir-node.o src/mir/mir-type.o 	src/mir/mir-dump.o src/mir/mir-optim.o 	src/mir/mir-vcode.o src/psl/psl-node.o 	src/psl/psl-sem.o src/psl/psl-lower.o 	src/psl/psl-dump.o src/psl/psl-fsm.o 	src/rt/heap.o src/rt/cover.o 	src/rt/wave.o src/rt/mspace.o 	src/rt/stdenv.o src/rt/standard.o 	src/rt/simpkg.o src/rt/standard.o 	src/rt/model.o src/rt/fileio.o 	src/rt/printer.o src/rt/reflect.o 	src/rt/assert.o src/rt/ename.o 	src/rt/copy.o src/rt/random.o  	src/sdf/sdf-parse.o src/sdf/sdf-util.o 	src/vhdl/vhdl-predef.o src/vhdl/vhdl-lower.o 	src/vhdl/vhdl-util.o src/vhdl/vhdl-inst.o 	src/vhpi/vhpi_sens.o src/vhpi/vhpi-str.o 	src/vhpi/vhpi-model.o src/vhpi/vhpi-util.o 	src/vlog/vlog-node.o src/vlog/vlog-dump.o 	src/vlog/vlog-lower.o src/vlog/vlog-number.o 	src/vlog/vlog-trans.o src/vlog/vlog-simp.o 	src/vlog/vlog-util.o src/vlog/vlog-sem.o 	src/vlog/vlog-pp.o src/vlog/vlog-parse.o 	src/vlog/vlog-udp.o src/vlog/vlog-inst.o 	src/vlog/vlog-symtab.o src/vpi/vpi-model.o 	src/vpi/vpi-str.o src/vpi/vpi-util.o 	src/vpi/vpi-systf.o  && gcc-ranlib lib/libnvc.a
+/usr/bin/mkdir -p thirdparty && : > thirdparty/.dirstamp
+/usr/bin/mkdir -p thirdparty/.deps && : > thirdparty/.deps/.dirstamp
+gcc -g -O2   -c -o thirdparty/fstapi.o 
+gcc -g -O2   -c -o thirdparty/lz4.o 
+gcc -g -O2   -c -o thirdparty/fastlz.o 
+gcc -g -O2   -c -o thirdparty/cpustate.o 
+gcc -g -O2   -c -o thirdparty/sha1.o 
+gcc -g -O2   -c -o thirdparty/svrand.o 
+(rm -f lib/libthirdparty.a || true) && gcc-ar cr lib/libthirdparty.a thirdparty/fstapi.o 	thirdparty/lz4.o thirdparty/fastlz.o 	thirdparty/cpustate.o thirdparty/sha1.o 	thirdparty/svrand.o   	    && gcc-ranlib lib/libthirdparty.a
+/usr/bin/mkdir -p bin && : > bin/.dirstamp
+rm -f bin/nvc && gcc -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2   -L/usr/lib/llvm-18/lib  -lpthread -Wl,--dynamic-list=../nvc/src/symbols.txt 	 -o bin/nvc src/nvc.o lib/libnvc.a 	lib/libthirdparty.a 	-lz  	 	 	-lffi  	 	-lzstd  	 	-lLLVM-18  	 -lm 
+./bin/nvc --std=1993 --work=lib/std -a --relative=../nvc --bootstrap ../nvc/lib/std/standard.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/std_logic_1164.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/numeric_bit.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/numeric_std.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/std_logic_1164-body.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/sim_pkg.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/numeric_std-body.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/numeric_bit-body.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/math_real.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/math_real-body.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/math_complex.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/math_complex-body.vhdl
+./bin/nvc --std=2008 --work=lib/std.08 -a --relative=../nvc --bootstrap ../nvc/lib/std.08/standard.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/std.08 -a --relative=../nvc ../nvc/lib/std.08/textio.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/std_logic_1164.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_bit.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_bit_unsigned.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_std.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_std_unsigned.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/std_logic_1164-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/sim_pkg.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_std-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_std_unsigned-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_bit-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_bit_unsigned-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/std_logic_textio.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee/math_real.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee/math_real-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee/math_complex.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee/math_complex-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/fixed_float_types.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/fixed_generic_pkg.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/fixed_generic_pkg-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/fixed_pkg.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/float_generic_pkg.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/float_generic_pkg-body.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/float_pkg.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/ieee_std_context.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/ieee.08/ieee_bit_context.vhdl
+./bin/nvc --std=2019 --work=lib/std.19 -a --relative=../nvc --bootstrap ../nvc/lib/std.19/standard.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/std.19 -a --relative=../nvc ../nvc/lib/std.19/textio.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/std_logic_1164.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_bit.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_bit_unsigned.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_std.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_std_unsigned.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/std_logic_1164-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/sim_pkg.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_std-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_std_unsigned-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_bit-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/numeric_bit_unsigned-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/std_logic_textio.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee/math_real.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee/math_real-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee/math_complex.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee/math_complex-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/fixed_float_types.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/fixed_generic_pkg.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/fixed_generic_pkg-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/fixed_pkg.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/float_generic_pkg.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/float_generic_pkg-body.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/float_pkg.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/ieee_std_context.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/ieee.08/ieee_bit_context.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/sim_pkg-body.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/polyfill.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/polyfill-body.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/text_util.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/text_util-body.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/psl_support.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/psl_support-body.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/verilog.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/verilog-body.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/cover_pkg.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/cover_pkg-body.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/random.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/nvc -a --relative=../nvc ../nvc/lib/nvc/random-body.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/sim_pkg-body.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc.08/polyfill.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/text_util.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/text_util-body.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/psl_support.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/psl_support-body.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/verilog.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/verilog-body.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/cover_pkg.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/cover_pkg-body.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/random.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/nvc.08 -a --relative=../nvc ../nvc/lib/nvc/random-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/sim_pkg-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc.08/polyfill.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/text_util.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/text_util-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/psl_support.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/psl_support-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/verilog.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/verilog-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/cover_pkg.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/cover_pkg-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/random.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/nvc.19 -a --relative=../nvc ../nvc/lib/nvc/random-body.vhd
+./bin/nvc --std=1993 --work=lib/std -a --relative=../nvc ../nvc/lib/std/standard-body.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/std -a --relative=../nvc ../nvc/lib/std/textio.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/std -a --relative=../nvc ../nvc/lib/std/textio-body.vhd
+./bin/nvc --std=2008 --work=lib/std.08 -a --relative=../nvc ../nvc/lib/std/standard-body.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/std.08 -a --relative=../nvc ../nvc/lib/std/textio-body.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/std.08 -a --relative=../nvc ../nvc/lib/std.08/env.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/std.08 -a --relative=../nvc ../nvc/lib/std.08/env-body.vhd
+./bin/nvc --std=2019 --work=lib/std.19 -a --relative=../nvc ../nvc/lib/std/standard-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/std.19 -a --relative=../nvc ../nvc/lib/std.19/env.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/std.19 -a --relative=../nvc ../nvc/lib/std/textio-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/std.19 -a --relative=../nvc ../nvc/lib/std.19/env-body.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/std.19 -a --relative=../nvc ../nvc/lib/std.19/reflection.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/std.19 -a --relative=../nvc ../nvc/lib/std.19/reflection-body.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/synopsys/std_logic_arith.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/synopsys/std_logic_signed.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/synopsys/std_logic_unsigned.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/synopsys/std_logic_textio.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/synopsys/std_logic_misc.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/synopsys/std_logic_arith.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/synopsys/std_logic_signed.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/synopsys/std_logic_unsigned.vhd
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/synopsys/std_logic_misc.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/synopsys/std_logic_arith.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/synopsys/std_logic_signed.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/synopsys/std_logic_unsigned.vhd
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/synopsys/std_logic_misc.vhd
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/vital/timing_p.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/vital/timing_b.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/vital/prmtvs_p.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc --relaxed ../nvc/lib/vital/prmtvs_b.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/vital/memory_p.vhdl
+./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/vital/memory_b.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/vital/timing_p.vhdl
+./bin/nvc -

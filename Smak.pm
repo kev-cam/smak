@@ -4815,12 +4815,15 @@ sub build_target {
 
             EXECUTE_EXTERNAL_COMMAND:
             # Execute command - use job system if available, otherwise sequential
-            # BUT: built-in commands (rm, mv, recursive smak -C) should always be handled
-            # in-process to track file-system changes and avoid worker overhead
+            # Built-in commands (rm, mv, recursive smak -C) can be handled in-process,
+            # BUT only if the target has no dependencies. Targets with dependencies
+            # must go through the job server for proper dependency tracking.
             use Cwd 'getcwd';
             my $cwd = getcwd();
             my $use_builtin = is_builtin_command($cmd_line);
-            if ($job_server_socket && 0 != $jobs && !$use_builtin) {
+            # Submit to job server if: job server exists AND jobs > 0 AND
+            # (command is not built-in OR target has dependencies that need tracking)
+            if ($job_server_socket && 0 != $jobs && (!$use_builtin || @deps > 0)) {
                 warn "DEBUG[" . __LINE__ . "]:     Using job server ($jobs)\n" if $ENV{SMAK_DEBUG};
                 # Parallel mode - submit to job server (job master will echo the command)
                 submit_job($target, $cmd_line, $cwd);
@@ -11092,6 +11095,10 @@ sub run_job_master {
                     # Try to dispatch
                     dispatch_jobs();
 
+                    # Reset consistency check timer after job submission to avoid immediate check
+                    # (job submission with many dependencies can take several seconds)
+                    $last_consistency_check = time();
+
                     # Check if target is already complete AND no work was dispatched
                     # If so, send JOB_COMPLETE immediately so client doesn't hang
                     # Only do this if the target is truly done with no pending work
@@ -12007,15 +12014,12 @@ sub run_job_master {
                 }
 
             } else {
-                # Worker sent us something
-                my $line = <$socket>;
-                unless (defined $line) {
-                    # Worker disconnected
-                    vprint "Worker disconnected\n";
-                    $select->remove($socket);
-                    next;
-                }
-                chomp $line;
+                # Worker sent us something - drain all available messages
+                # (Perl's buffered I/O may have multiple lines ready but select only sees kernel buffer)
+                $socket->blocking(0);
+                while (my $line = <$socket>) {
+                    chomp $line;
+                    print STDERR "DEBUG: Worker read line: '$line'\n" if $ENV{SMAK_DEBUG};
 
                 if ($line eq 'READY') {
                     # Worker is ready for a job
@@ -12568,29 +12572,9 @@ sub run_job_master {
 
                     # Clean up dispatch tracking
                     delete $currently_dispatched{$job->{target}} if exists $currently_dispatched{$job->{target}};
-
-                    # Immediately check for READY message to enable streaming dispatch
-                    # Workers send TASK_END followed immediately by READY - process both together
-                    # to avoid waiting for the next select() iteration
-                    $socket->blocking(0);
-                    my $next_line = <$socket>;
-                    $socket->blocking(1);
-                    if (defined $next_line && $next_line =~ /\S/) {
-                        chomp $next_line;
-                        if ($next_line eq 'READY') {
-                            $worker_status{$socket}{ready} = 1;
-                            my $dispatched = dispatch_jobs(1);  # Try to dispatch one job
-                            if ($dispatched) {
-                                vprint "Worker received next job (streaming)\n";
-                            } else {
-                                vprint "Worker ready (no jobs available)\n";
-                            }
-                        } else {
-                            # Non-READY message - shouldn't happen but log for debugging
-                            print STDERR "Unexpected message after TASK_END: $next_line\n" if $ENV{SMAK_DEBUG};
-                        }
-                    }
                 }
+                } # end while loop for worker messages
+                $socket->blocking(1);
             }
         }
     }

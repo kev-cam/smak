@@ -64,13 +64,13 @@ sub run_worker {
     ) or die "Cannot connect to master at $host:$port: $!\n";
 
     $socket->autoflush(1);
-    # Disable Nagle's algorithm for low latency
-    setsockopt($socket, IPPROTO_TCP, TCP_NODELAY, 1) if !$is_dry_run;
+    # Disable Nagle's algorithm for low latency - always needed for responsive dispatch
+    setsockopt($socket, IPPROTO_TCP, TCP_NODELAY, 1);
     print STDERR "Worker connected to master\n" if $ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} ne 'w';
 
     # Send ready signal
     print $socket "READY\n";
-    $socket->flush() if $is_dry_run;
+    $socket->flush();
 
     # Receive environment from master
     my $env_done = 0;

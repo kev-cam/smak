@@ -1,7 +1,1 @@
 Warning: included file not found: ./src/grt/Makefile.inc [./src/grt/Makefile.inc]
-Warning: Could not parse sub-makefile './libraries/Makefile.inc': Cannot open ./libraries/Makefile.inc: No such file or directory at /home/user/smak/Smak.pm line 1259.
-
-if [ -e ./config.status ]; then 	  echo "./config.status --reconfigure"; 	  ./config.status --reconfigure; 	else 	  echo "config.status is lost, please configure manually" ; 	  exit 1; 	fi
-./config.status
-./config.status
-make -f ./libraries/Makefile.inc LIBSRC_DIR="./libraries"  LIBDST_DIR="lib/ghdl"  enable_gplcompat="false"  LN="ln -s" CP="cp" MKDIR="mkdir" GHDL="/home/user/smak/projects/ghdl/ghdl_mcode" XRUN= GHDL_FLAGS="" VHDL_COPY_OBJS=no vhdl.libs.all

@@ -240,7 +240,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
-our $CACHE_VERSION = 9;  # Increment to invalidate old caches
+our $CACHE_VERSION = 11;  # Increment to invalidate old caches (added suffix_rule, suffix_deps, suffixes)
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -2832,6 +2832,12 @@ sub save_state_cache {
     _save_hash($fh, "pattern_deps", \%pattern_deps);
     _save_hash($fh, "pseudo_rule", \%pseudo_rule);
     _save_hash($fh, "pseudo_deps", \%pseudo_deps);
+    _save_hash($fh, "suffix_rule", \%suffix_rule);
+    _save_hash($fh, "suffix_deps", \%suffix_deps);
+
+    # Save suffixes list
+    print $fh "# Suffixes\n";
+    print $fh "\@Smak::suffixes = (" . join(", ", map { _quote_string($_) } @suffixes) . ");\n\n";
 
     # Save vpath
     print $fh "# VPATH directories\n";
@@ -2880,6 +2886,14 @@ sub load_state_cache {
     our $_cache_version;
     if (!defined $_cache_version || $_cache_version != $CACHE_VERSION) {
         warn "DEBUG: Cache invalid - version mismatch (cache=$_cache_version, current=$CACHE_VERSION)\n" if $ENV{SMAK_DEBUG};
+        return 0;
+    }
+
+    # Check that the current Makefile is the one this cache was made for
+    use Cwd 'abs_path';
+    my $abs_makefile = abs_path($makefile_path) || $makefile_path;
+    unless (exists $parsed_file_mtimes{$abs_makefile}) {
+        warn "DEBUG: Cache invalid - current Makefile '$abs_makefile' not in cached files\n" if $ENV{SMAK_DEBUG};
         return 0;
     }
 

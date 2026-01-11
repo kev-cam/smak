@@ -9224,7 +9224,13 @@ sub run_job_master {
                 # File already exists, will mark complete after queuing deps
             } else {
                 # Register composite target early so it can be failed by dependencies
-                my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} && !exists $failed_targets{$_} } @deps;
+                # Split each dep on whitespace first (variables like $MV{PROGRAMS} may expand to multiple targets)
+                my @all_single_deps;
+                for my $dep (@deps) {
+                    push @all_single_deps, split /\s+/, $dep;
+                }
+                @all_single_deps = grep { /\S/ } @all_single_deps;
+                my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} && !exists $failed_targets{$_} } @all_single_deps;
                 if (@pending_deps) {
                     $in_progress{$target} = "pending";
                     $pending_composite{$target} = {
@@ -9492,7 +9498,13 @@ sub run_job_master {
                     print STDERR "Composite target '$target' FAILED due to failed dependency '$failed_deps[0]'\n";
 		    reprompt();
                 } else {
-                    my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} } @deps;
+                    # Split each dep on whitespace first (variables may expand to multiple targets)
+                    my @all_single_deps;
+                    for my $dep (@deps) {
+                        push @all_single_deps, split /\s+/, $dep;
+                    }
+                    @all_single_deps = grep { /\S/ } @all_single_deps;
+                    my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} } @all_single_deps;
                     if (@pending_deps) {
                         # Update the composite target (may have been pre-registered)
                         $in_progress{$target} = "pending";
@@ -10386,6 +10398,7 @@ sub run_job_master {
                 worker => $ready_worker,
                 dir => $job->{dir},
                 command => $job->{command},
+                siblings => $job->{siblings} || [],  # Multi-output siblings
                 started => 0,
                 output => [],  # Capture output for error analysis
             };
@@ -12286,6 +12299,17 @@ sub run_job_master {
                             $completed_targets{$job->{target}} = 1;
                             $in_progress{$job->{target}} = "done";
                             print STDERR "Task $task_id completed successfully: $job->{target}\n" if $ENV{SMAK_DEBUG};
+
+                            # If this job has siblings (multi-output pattern rule), mark them as complete too
+                            if ($job->{siblings} && @{$job->{siblings}} > 1) {
+                                for my $sibling (@{$job->{siblings}}) {
+                                    if ($sibling ne $job->{target}) {
+                                        $completed_targets{$sibling} = 1;
+                                        $in_progress{$sibling} = "done";
+                                        print STDERR "DEBUG: Marking sibling '$sibling' as complete (created with '$job->{target}')\n" if $ENV{SMAK_DEBUG};
+                                    }
+                                }
+                            }
                         } else {
                             # File doesn't exist even after retries - treat as failure
                             $in_progress{$job->{target}} = "failed";

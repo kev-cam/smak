@@ -10428,6 +10428,7 @@ sub run_job_master {
     my $last_consistency_check = time();
     my $jobs_received = 0;  # Track if we've received any job submissions
     my $idle_sent = 0;      # Track if we've sent IDLE to master
+    my $max_exit_code = 0;  # Track highest exit code from all jobs
 
     while (1) {
         # Check if all work is complete AND master has disconnected
@@ -10445,8 +10446,19 @@ sub run_job_master {
 
         # Check if all work is complete - notify master
         if ($jobs_received && !$idle_sent && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0 && defined($master_socket)) {
-            vprint "All jobs complete. Sending IDLE to master.\n";
-            print $master_socket "IDLE\n" if $master_socket;
+            # Determine final exit code from failed targets
+            my $final_exit = $max_exit_code;
+            if (!$final_exit && keys(%failed_targets)) {
+                # Use the first non-zero exit code from failed targets
+                for my $target (keys %failed_targets) {
+                    if ($failed_targets{$target} && $failed_targets{$target} > $final_exit) {
+                        $final_exit = $failed_targets{$target};
+                    }
+                }
+                $final_exit ||= 1;  # Default to 1 if we have failures but no exit code
+            }
+            vprint "All jobs complete. Sending IDLE $final_exit to master.\n";
+            print $master_socket "IDLE $final_exit\n" if $master_socket;
             $idle_sent = 1;
         }
 
@@ -10842,6 +10854,7 @@ sub run_job_master {
                                 if ($job->{target}) {
                                     $in_progress{$job->{target}} = "failed";
                                     $failed_targets{$job->{target}} = $exit_code;
+                                    $max_exit_code = $exit_code if $exit_code > $max_exit_code;
                                 }
                                 print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 

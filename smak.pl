@@ -922,6 +922,7 @@ if (!$debug) {
     # Wait for all submitted jobs to complete before shutting down
     # Only wait if there are jobs pending - if all commands were handled as built-ins,
     # no jobs were submitted and we can skip straight to shutdown
+    my $job_server_exit_code = 0;
     if ($Smak::job_server_socket && keys %Smak::in_progress) {
         # Keep reading until we get IDLE (all work complete) or connection closes
         while (1) {
@@ -935,10 +936,13 @@ if (!$debug) {
                 delete $Smak::in_progress{$target};
                 if ($exit_code != 0) {
                     warn "Job failed: $target (exit $exit_code)\n" unless $Smak::silent_mode;
+                    $job_server_exit_code = $exit_code if $exit_code > $job_server_exit_code;
                 }
             }
-            # IDLE means all work is complete
-            elsif ($response eq 'IDLE') {
+            # IDLE means all work is complete - includes final exit code
+            elsif ($response =~ /^IDLE\s*(\d*)$/) {
+                my $idle_exit = $1 || 0;
+                $job_server_exit_code = $idle_exit if $idle_exit > $job_server_exit_code;
                 last;
             }
             # Also handle other messages to prevent blocking
@@ -1057,8 +1061,8 @@ if (!$debug) {
         prompt_commit_bug_report($report_dir, $yes);
 
         # If build failed, exit with error after prompt
-        if ($build_failed) {
-            exit 1;
+        if ($build_failed || $job_server_exit_code) {
+            exit($job_server_exit_code || 1);
         }
     } else {
         # Not in report mode - re-throw the build error if it failed
@@ -1067,7 +1071,8 @@ if (!$debug) {
         }
     }
 
-    exit 0;
+    # Exit with job server exit code if any jobs failed
+    exit $job_server_exit_code;
 }
 
 sub prompt_commit_bug_report {

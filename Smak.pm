@@ -271,7 +271,7 @@ our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
 
 # Output control
-our $stomp_prompt = "\r";
+our $stomp_prompt = "\r        \r";  # Clear spinner area (8 chars) before printing
 
 sub set_report_mode {
     my ($enabled, $fh) = @_;
@@ -394,6 +394,7 @@ sub stop_job_server {
 
     # Send shutdown to job-master
     print $job_server_socket "SHUTDOWN\n";
+    $job_server_socket->flush();
 
     # Wait for acknowledgment
     my $ack = <$job_server_socket>;
@@ -9542,6 +9543,8 @@ sub run_job_master {
         }
     }
 
+    our ($last_queued, $last_running, $last_ready) = (0, 0, 0);
+
     sub check_queue_state {
         my ($label) = @_;
 
@@ -9550,68 +9553,99 @@ sub run_job_master {
             $ready_workers++ if $worker_status{$w}{ready};
         }
 
-	if (scalar(@workers) != $ready_workers || scalar(@job_queue)
-	                                       || scalar(keys %running_jobs)) {
-	    vprint $stomp_prompt,
-		   "[$label] Queue state: " . scalar(@job_queue) . " queued, ";
-	    vprint "$ready_workers/" . scalar(@workers) . " ready, ";
-	    vprint scalar(keys %running_jobs) . " running";
+        my $queued = scalar(@job_queue);
+        my $running = scalar(keys %running_jobs);
 
-	    # Show running targets (up to 5)
-	    # For each job, try to extract the actual file being built from the command
-	    if (keys %running_jobs) {
-	        my @running;
-	        for my $task_id (keys %running_jobs) {
-	            my $job = $running_jobs{$task_id};
-	            my $display_name = $job->{target};
+        # Check if state changed
+        my $changed = ($queued != $last_queued || $running != $last_running || $ready_workers != $last_ready);
 
-	            # Try to extract output filename from command (look for -o argument)
-	            my $cmd = $job->{command};
-	            if ($cmd =~ /-o\s+(\S+)/) {
-	                # Found -o outputfile
-	                my $output = $1;
-	                # Strip directory path, just show filename
-	                $output =~ s{.*/}{};
-	                $display_name = $output if $output;
-	            } elsif ($job->{target} =~ /\.(o|a|so|exe|out)$/) {
-	                # Target looks like a file, use it as-is
-	                $display_name = $job->{target};
-	            }
+        if ($changed) {
+            $last_queued = $queued;
+            $last_running = $running;
+            $last_ready = $ready_workers;
 
-	            push @running, $display_name;
-	        }
+            # Clear spinner before printing status
+            print STDERR "\r  \r";
 
-	        @running = sort @running;
-	        if (@running <= 5) {
-	            vprint " (" . join(", ", @running) . ")";
-	        } else {
-	            vprint " (" . join(", ", @running[0..4]) . ", ... " . (@running - 5) . " more)";
-	        }
-	    }
-	    vprint "\n";
-	}
-	
-	if (@job_queue > 0 && @job_queue <= 5) {
-	    for my $job (@job_queue) {
-		vprint "  queued: $job->{target}\n";
-	    }
-	} elsif (@job_queue > 5) {
-	    for my $i (0..4) {
-		vprint "  queued: $job_queue[$i]{target}\n";
-	    }
-	    vprint "  ... and " . (@job_queue - 5) . " more\n";
+            if (scalar(@workers) != $ready_workers || $queued || $running) {
+                vprint $stomp_prompt,
+                    "Queue: $queued queued, $ready_workers/" . scalar(@workers) . " ready, $running running";
+
+                # Show running targets (up to 5)
+                if ($running) {
+                    my @running_names;
+                    for my $task_id (keys %running_jobs) {
+                        my $job = $running_jobs{$task_id};
+                        my $display_name = $job->{target};
+
+                        # Try to extract output filename from command (look for -o argument)
+                        my $cmd = $job->{command};
+                        if ($cmd =~ /-o\s+(\S+)/) {
+                            my $output = $1;
+                            $output =~ s{.*/}{};
+                            $display_name = $output if $output;
+                        } elsif ($job->{target} =~ /\.(o|a|so|exe|out)$/) {
+                            $display_name = $job->{target};
+                        }
+                        push @running_names, $display_name;
+                    }
+
+                    @running_names = sort @running_names;
+                    if (@running_names <= 5) {
+                        vprint " (" . join(", ", @running_names) . ")";
+                    } else {
+                        vprint " (" . join(", ", @running_names[0..4]) . ", +" . (@running_names - 5) . ")";
+                    }
+                }
+                vprint "\n";
+            }
+        } else {
+            # No change - show spinning wheel for activity indicator
+            if ($queued || $running) {
+                print STDERR "\r" . $wheel_chars[$wheel_pos] . " ";
+                STDERR->flush();  # Ensure spinner updates immediately
+                $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
+            }
         }
 
-	# Assertion: Detect deadlock - queued work, available workers, but nothing running
+	# Deadlock detection - queued work, available workers, but nothing running
 	# Only check during intermittent checks (not at startup/dispatch where nothing running is normal)
 	# Skip in dry-run mode where missing files can cause false positives
 	if ($label =~ /intermittent/ && !$dry_run_mode) {
-	    assert_or_die(
-	        !(scalar(@job_queue) > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0),
-	        "Deadlock detected in $label: " . scalar(@job_queue) . " jobs queued, " .
-	        "$ready_workers workers ready, but nothing running. " .
-	        "First queued job: " . ($job_queue[0] ? $job_queue[0]{target} : "unknown")
-	    );
+	    if (scalar(@job_queue) > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0) {
+	        # Potential deadlock - try to fail jobs whose dependencies have failed
+	        my $failed_count = 0;
+	        my @remaining_jobs;
+	        for my $job (@job_queue) {
+	            my $target = $job->{target};
+	            my $failed_dep = has_failed_dependency($target);
+	            if (defined $failed_dep) {
+	                print STDERR "Job '$target' FAILED: dependency '$failed_dep' failed\n";
+	                $in_progress{$target} = "failed";
+	                $failed_targets{$target} = $failed_targets{$failed_dep} || 1;
+	                fail_dependent_composite_targets($target, $failed_targets{$target});
+	                $failed_count++;
+	            } else {
+	                push @remaining_jobs, $job;
+	            }
+	        }
+	        @job_queue = @remaining_jobs;
+
+	        # If we failed some jobs, try dispatch again
+	        if ($failed_count > 0) {
+	            vprint "Deadlock recovery: failed $failed_count jobs with failed dependencies\n";
+	            dispatch_jobs() if @job_queue > 0;
+	        }
+
+	        # If still stuck with jobs, that's a real deadlock
+	        if (@job_queue > 0 && scalar(keys %running_jobs) == 0) {
+	            assert_or_die(0,
+	                "Deadlock detected in $label: " . scalar(@job_queue) . " jobs queued, " .
+	                "$ready_workers workers ready, but nothing running. " .
+	                "First queued job: " . ($job_queue[0] ? $job_queue[0]{target} : "unknown")
+	            );
+	        }
+	    }
 	}
     }
 
@@ -10438,52 +10472,65 @@ sub run_job_master {
     }
 
     # Main event loop
-    my $last_consistency_check = time();
-    my $jobs_received = 0;  # Track if we've received any job submissions
-    my $idle_sent = 0;      # Track if we've sent IDLE to master
+    my $idle_timeouts = 0;  # Count consecutive select timeouts with no activity
     my $max_exit_code = 0;  # Track highest exit code from all jobs
+    my $idle_sent = 0;      # Track if we've sent IDLE (avoid flooding)
 
     while (1) {
-        # Check if all work is complete AND master has disconnected
-        # (In interactive mode, stay running even when idle)
-        if ($jobs_received && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0 && !defined($master_socket)) {
-            vprint "All jobs complete and master disconnected. Job-master exiting.\n";
+        # Check if idle (nothing queued, nothing running)
+        my $is_idle = (@job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0);
 
-            # Cleanup: remove symlink and port file
-            my $local_link = ".smak.connect";
-            unlink($local_link) if -l $local_link;
-            unlink($port_file) if -f $port_file;
-
-            last;
-        }
-
-        # Check if all work is complete - notify master
-        if ($jobs_received && !$idle_sent && @job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0 && defined($master_socket)) {
-            # Determine final exit code from failed targets
+        # If idle and master connected, send IDLE notification (only once per idle period)
+        if ($is_idle && defined($master_socket) && !$idle_sent) {
+            # Clear spinner before going idle
+            print STDERR "\r  \r";
             my $final_exit = $max_exit_code;
             if (!$final_exit && keys(%failed_targets)) {
-                # Use the first non-zero exit code from failed targets
                 for my $target (keys %failed_targets) {
                     if ($failed_targets{$target} && $failed_targets{$target} > $final_exit) {
                         $final_exit = $failed_targets{$target};
                     }
                 }
-                $final_exit ||= 1;  # Default to 1 if we have failures but no exit code
+                $final_exit ||= 1;
             }
-            vprint "All jobs complete. Sending IDLE $final_exit to master.\n";
-            print $master_socket "IDLE $final_exit\n" if $master_socket;
+            my $idle_time = Time::HiRes::time();
+            print $master_socket "IDLE $final_exit $idle_time\n" if $master_socket;
             $idle_sent = 1;
+        }
+
+        # Reset idle_sent when we have work
+        $idle_sent = 0 if !$is_idle;
+
+        # If idle and master disconnected, exit
+        if ($is_idle && !defined($master_socket)) {
+            vprint "Idle and master disconnected. Job-master exiting.\n";
+            my $local_link = ".smak.connect";
+            unlink($local_link) if -l $local_link;
+            unlink($port_file) if -f $port_file;
+            last;
+        }
+
+        # In non-CLI mode (batch mode), detect if parent process died
+        # When parent dies, getppid() returns 1 (init process)
+        # This means master crashed or exited unexpectedly - we should clean up
+        if (getppid() == 1 && !defined($master_socket)) {
+            print STDERR "Parent process died. Job-master cleaning up and exiting.\n";
+            # Kill any running workers
+            shutdown_workers();
+            my $local_link = ".smak.connect";
+            unlink($local_link) if -l $local_link;
+            unlink($port_file) if -f $port_file;
+            exit 1;
         }
 
         my @ready = $select->can_read(0.1);
 
-        # Periodic consistency check - run every 2 seconds
-        my $now = time();
-        if ($now - $last_consistency_check >= 2) {
-            $last_consistency_check = $now;
+        # On select timeout (nothing ready), do consistency check
+        if (@ready == 0) {
+            $idle_timeouts++;
 
-            # Report queue state during periodic check
-            check_queue_state("periodic check");
+            # Report queue state and check for deadlocks
+            check_queue_state("intermittent check");
 
             # Try to dispatch queued jobs if workers are available
             if (@job_queue > 0) {
@@ -10501,7 +10548,7 @@ sub run_job_master {
                 $worker->blocking(0);
                 while (my $line = <$worker>) {
                     chomp $line;
-                    vprint "Consistency check: processing pending message: $line\n";
+                    vprint "Timeout check: processing pending message: $line\n";
 
                     # Process the message inline (same logic as main event loop)
                     if ($line eq 'READY') {
@@ -10916,8 +10963,6 @@ sub run_job_master {
                 }
             }
 
-	    check_queue_state("intermittent check");
-
             # Perform auto-rescan if enabled
             if ($auto_rescan) {
                 my $stale_count = 0;
@@ -10972,6 +11017,9 @@ sub run_job_master {
                 }
             }
         }
+
+        # Reset timeout counter when we have activity
+        $idle_timeouts = 0 if @ready;
 
         for my $socket (@ready) {
             if ($socket == $master_server) {
@@ -11098,8 +11146,6 @@ sub run_job_master {
                     my $cmd = <$socket>; chomp $cmd if defined $cmd;
 
                     vprint "Received job request for target: $target\n";
-                    $jobs_received = 1;  # Mark that we've received at least one job
-                    $idle_sent = 0;      # Reset idle flag - we have new work
 
                     # Lookup dependencies using the key format "makefile\ttarget"
                     my $key = "$makefile\t$target";
@@ -11135,9 +11181,9 @@ sub run_job_master {
                     # Try to dispatch
                     dispatch_jobs();
 
-                    # Reset consistency check timer after job submission to avoid immediate check
-                    # (job submission with many dependencies can take several seconds)
-                    $last_consistency_check = time();
+                    # Reset timeout counter and idle flag after job submission
+                    $idle_timeouts = 0;
+                    $idle_sent = 0;
 
                     # Check if target is already complete AND no work was dispatched
                     # If so, send JOB_COMPLETE immediately so client doesn't hang

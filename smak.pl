@@ -7,6 +7,7 @@ use File::Path qw(make_path);
 use File::Spec;
 use Cwd qw(abs_path);
 use POSIX qw(strftime);
+use Time::HiRes qw(time);
 use lib $RealBin;
 use Smak qw(:all);
 
@@ -924,6 +925,9 @@ if (!$debug) {
     # no jobs were submitted and we can skip straight to shutdown
     my $job_server_exit_code = 0;
     if ($Smak::job_server_socket && keys %Smak::in_progress) {
+        # Record when we start waiting - ignore IDLE messages from before this time
+        my $wait_start_time = time();
+
         # Keep reading until we get IDLE (all work complete) or connection closes
         while (1) {
             # Read job completion notifications from job server
@@ -939,9 +943,11 @@ if (!$debug) {
                     $job_server_exit_code = $exit_code if $exit_code > $job_server_exit_code;
                 }
             }
-            # IDLE means all work is complete - includes final exit code
-            elsif ($response =~ /^IDLE\s*(\d*)$/) {
-                my $idle_exit = $1 || 0;
+            # IDLE means all work is complete - includes final exit code and timestamp
+            elsif ($response =~ /^IDLE\s+(\d+)\s+([\d.]+)$/) {
+                my ($idle_exit, $idle_time) = ($1, $2);
+                # Ignore IDLE messages from before we started waiting
+                next if $idle_time < $wait_start_time;
                 $job_server_exit_code = $idle_exit if $idle_exit > $job_server_exit_code;
                 last;
             }

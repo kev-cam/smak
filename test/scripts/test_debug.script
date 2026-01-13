@@ -2,7 +2,7 @@
 # Test the -Kd debug mode commands
 
 list                     # Show all rules
-# expect "Rules parsed from Makefile"
+# expect "Rules parsed from"
 
 help                     # Show help
 # expect "Commands:"

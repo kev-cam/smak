@@ -150,7 +150,7 @@ while (time() - $start < $timeout) {
         } elsif ($action->{type} eq 'expect') {
             if ($pending_output =~ /\Q$action->{text}\E/) {
                 vprint ">>> Found expected text: '$action->{text}'\n";
-                $pending_output = '';
+                $pending_output = $';  # Preserve content after the match (may include next prompt)
                 $action_index++;
             } elsif (time() - $last_output_time > 5) {
                 $test_failed = 1;
@@ -188,7 +188,8 @@ while (time() - $start < $timeout) {
                 print STDERR "FAIL: $failure_reason\n";
                 last;
             }
-            $pending_output = '';
+            # Preserve content after the match (use $' from the last successful match)
+            $pending_output = $';
             $action_index++;
 
         } elsif ($action->{type} eq 'command') {

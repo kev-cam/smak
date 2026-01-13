@@ -141,9 +141,14 @@ sub run_smak_interactive {
         while (my @fhs = $sel->can_read(0.2)) {
             for my $fh (@fhs) {
                 my $data;
-                sysread($fh, $data, 4096);
-                $output .= $data if $data;
-                vprint $data if $data;
+                my $n = sysread($fh, $data, 4096);
+                if (!$n) {
+                    # EOF or error - remove from select
+                    $sel->remove($fh);
+                } elsif ($data) {
+                    $output .= $data;
+                    vprint $data;
+                }
             }
         }
     }

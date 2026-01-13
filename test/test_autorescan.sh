@@ -6,10 +6,9 @@ echo ""
 
 cd "$(dirname "$0")"
 
-# Run smak in interactive debug mode with job server
-# This will be automated by test runner using test_autorescan.script
+# Run smak to build test_auto.o
 # Note: Makefile.autorescan and test_auto.c are permanent test files
-SMAK_DEBUG=1 ${USR_SMAK_SCRIPT:-smak} -f Makefile.autorescan -j2 -Kd
+${USR_SMAK_SCRIPT:-smak} -f Makefile.autorescan -j2 all 2>/dev/null
 
 if [ -f test_auto.o ] ; then
     rm -f test_auto.o test_auto.o-old

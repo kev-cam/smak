@@ -239,8 +239,8 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
-our %parsed_file_mtimes;  # Track mtimes of all parsed makefiles for cache validation
-our $CACHE_VERSION = 11;  # Increment to invalidate old caches (added suffix_rule, suffix_deps, suffixes)
+our %parsed_file_mtimes;  # Track [mtime, size] of all parsed makefiles for cache validation
+our $CACHE_VERSION = 12;  # Increment to invalidate old caches (mtime+size validation)
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -1517,10 +1517,11 @@ sub parse_makefile {
 
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
-    # Track file mtime for cache validation
+    # Track file mtime and size for cache validation
     use Cwd 'abs_path';
     my $abs_makefile = abs_path($makefile) || $makefile;
-    $parsed_file_mtimes{$abs_makefile} = (stat($makefile))[9];
+    my @st = stat($makefile);
+    $parsed_file_mtimes{$abs_makefile} = [$st[9], $st[7]];  # [mtime, size]
 
     my @current_targets;  # Array to handle multiple targets (e.g., "target1 target2:")
     my $current_rule = '';
@@ -2804,12 +2805,13 @@ sub save_state_cache {
     print $fh "# Cache version\n";
     print $fh "\$Smak::_cache_version = $CACHE_VERSION;\n\n";
 
-    # Save file mtimes for validation
-    print $fh "# File mtimes for cache validation\n";
+    # Save file mtimes and sizes for validation
+    print $fh "# File mtimes and sizes for cache validation\n";
     print $fh "\%Smak::parsed_file_mtimes = (\n";
     for my $file (sort keys %parsed_file_mtimes) {
-        my $mtime = $parsed_file_mtimes{$file};
-        print $fh "    " . _quote_string($file) . " => $mtime,\n";
+        my $info = $parsed_file_mtimes{$file};
+        my ($mtime, $size) = ref($info) eq 'ARRAY' ? @$info : ($info, 0);
+        print $fh "    " . _quote_string($file) . " => [$mtime, $size],\n";
     }
     print $fh ");\n\n";
 
@@ -2898,12 +2900,15 @@ sub load_state_cache {
         return 0;
     }
 
-    # Validate cache - check if any makefile is newer than cache
+    # Validate cache - check if any makefile has changed (mtime or size)
     my $cache_mtime = (stat($cache_file))[9];
     for my $file (keys %parsed_file_mtimes) {
         if (-f $file) {
-            my $file_mtime = (stat($file))[9];
-            if ($file_mtime != $parsed_file_mtimes{$file} || $file_mtime > $cache_mtime) {
+            my @st = stat($file);
+            my ($file_mtime, $file_size) = ($st[9], $st[7]);
+            my $cached = $parsed_file_mtimes{$file};
+            my ($cached_mtime, $cached_size) = ref($cached) eq 'ARRAY' ? @$cached : ($cached, 0);
+            if ($file_mtime != $cached_mtime || $file_size != $cached_size || $file_mtime > $cache_mtime) {
                 warn "DEBUG: Cache invalid - '$file' has changed\n" if $ENV{SMAK_DEBUG};
                 return 0;
             }

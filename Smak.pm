@@ -10226,11 +10226,10 @@ sub run_job_master {
                                 print STDERR "DEBUG dispatch:     Set deps_satisfied=0 for '$target' due to '$single_dep' in_progress (building)\n" if $ENV{SMAK_DEBUG};
                                 last;
                             } elsif ($dep_status =~ /^(queued|pending)$/) {
-                                # Dependency is queued but not yet dispatched
-                                # Don't wait - it should be dispatched in this same dispatch_jobs call
-                                # if its dependencies are satisfied
-                                print STDERR "DEBUG dispatch:     Dep '$single_dep' is queued/pending, will be checked for dispatch\n" if $ENV{SMAK_DEBUG};
-                                # Continue checking other dependencies
+                                # Dependency is queued but not yet dispatched - must wait
+                                $deps_satisfied = 0;
+                                print STDERR "DEBUG dispatch:     Dep '$single_dep' is queued/pending, must wait\n" if $ENV{SMAK_DEBUG};
+                                last;
                             } elsif ($dep_status =~ /^sibling:/) {
                                 # Dependency is part of a composite target being built
                                 $deps_satisfied = 0;

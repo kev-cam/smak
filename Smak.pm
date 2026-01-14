@@ -9569,8 +9569,8 @@ sub run_job_master {
             $last_running = $running;
             $last_ready = $ready_workers;
 
-            # Clear spinner before printing status
-            print STDERR "\r  \r";
+            # Clear spinner before printing status (skip in dry-run mode)
+            print STDERR "\r  \r" unless $dry_run_mode;
 
             if (scalar(@workers) != $ready_workers || $queued || $running) {
                 vprint $stomp_prompt,
@@ -9606,7 +9606,8 @@ sub run_job_master {
             }
         } else {
             # No change - show spinning wheel for activity indicator
-            if ($queued || $running) {
+            # Skip spinner in dry-run mode to avoid interfering with output
+            if (($queued || $running) && !$dry_run_mode) {
                 print STDERR "\r" . $wheel_chars[$wheel_pos] . " ";
                 STDERR->flush();  # Ensure spinner updates immediately
                 $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
@@ -10487,8 +10488,8 @@ sub run_job_master {
 
         # If idle and master connected, send IDLE notification (only once per idle period)
         if ($is_idle && defined($master_socket) && !$idle_sent) {
-            # Clear spinner before going idle
-            print STDERR "\r  \r";
+            # Clear spinner before going idle (skip in dry-run mode)
+            print STDERR "\r  \r" unless $dry_run_mode;
             my $final_exit = $max_exit_code;
             if (!$final_exit && keys(%failed_targets)) {
                 for my $target (keys %failed_targets) {
@@ -12145,7 +12146,12 @@ sub run_job_master {
                         print $master_socket "OUTPUT $output\n";
                     } else {
                         # Standalone job master - print to stdout directly
-                        print $stomp_prompt . "$output\n";
+                        # Skip stomp_prompt in dry-run mode (no spinner to clear)
+                        if ($dry_run_mode) {
+                            print "$output\n";
+                        } else {
+                            print $stomp_prompt . "$output\n";
+                        }
                     }
 
                 } elsif ($line =~ /^ERROR (.*)$/) {

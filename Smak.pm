@@ -939,8 +939,9 @@ sub execute_command_sequential {
     my ($clean_command, $cmd_silent, $ignore_errors) = strip_command_prefixes($command);
 
     # In dry-run mode, just print the command without executing it
+    # Note: In dry-run mode, @ prefix is ignored - all commands are shown (like make -n)
     if ($dry_run_mode) {
-        unless ($silent_mode || $cmd_silent) {
+        unless ($silent_mode) {
             print "$clean_command\n";
         }
         chdir($old_dir) if $old_dir;

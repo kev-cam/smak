@@ -81,6 +81,10 @@ test_debug_simple:
 test-default-target:
 	@bash $@.sh
 
+.PHONY: test_dnsmasq
+test_dnsmasq:
+	@bash $@.sh
+
 .PHONY: test_dryrun
 test_dryrun:
 	@bash $@.sh

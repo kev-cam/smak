@@ -1050,7 +1050,9 @@ sub expand_vars {
 
         while ($pos < $len && $depth > 0) {
             my $char = substr($text, $pos, 1);
-            if ($char eq '(' && substr($text, $pos-1, 1) eq '$') {
+            # Count ALL parentheses, not just $() - shell commands can have
+            # bare parens like ( md5sum ... ) which must be balanced
+            if ($char eq '(') {
                 $depth++;
             } elsif ($char eq ')') {
                 $depth--;
@@ -1072,12 +1074,13 @@ sub expand_vars {
             my $func = $1;
             my $args_str = $2;
 
-            # Split arguments by comma, but not within nested $()
+            # Split arguments by comma, but not within nested parentheses
+            # Count ALL parens, not just $() - shell commands can have bare parens
             my @args;
             my $depth = 0;
             my $current = '';
             for my $char (split //, $args_str) {
-                if ($char eq '(' && substr($current, -1) eq '$') {
+                if ($char eq '(') {
                     $depth++;
                     $current .= $char;
                 } elsif ($char eq ')') {
@@ -1413,7 +1416,9 @@ sub transform_make_vars {
 
         while ($scan_pos < $len && $depth > 0) {
             my $char = substr($text, $scan_pos, 1);
-            if ($char eq '(' && substr($text, $scan_pos-1, 1) eq '$') {
+            # Count ALL parentheses, not just $() - shell commands can contain
+            # bare parens like ( md5sum ... ) which must be balanced
+            if ($char eq '(') {
                 $depth++;
             } elsif ($char eq ')') {
                 $depth--;
@@ -1424,7 +1429,28 @@ sub transform_make_vars {
         if ($depth == 0) {
             # Found balanced parentheses, extract content
             my $content = substr($text, $start + 2, $scan_pos - $start - 3);
-            $result .= '$MV{' . $content . '}';
+
+            # Check if this is a function call - don't transform those
+            # Function calls have format: $(func arg...) or $(func,arg,...)
+            my @known_funcs = qw(patsubst subst strip findstring filter filter-out
+                sort word wordlist words firstword lastword dir notdir suffix
+                basename addsuffix addprefix join wildcard shell foreach
+                realpath abspath if or and call value eval origin flavor info warning error);
+            my $is_func = 0;
+            for my $func (@known_funcs) {
+                if ($content =~ /^\Q$func\E[\s,]/) {
+                    $is_func = 1;
+                    last;
+                }
+            }
+
+            if ($is_func) {
+                # Leave function calls as-is for expand_vars to handle
+                $result .= '$(' . $content . ')';
+            } else {
+                # Convert variable references to $MV{...}
+                $result .= '$MV{' . $content . '}';
+            }
             $pos = $scan_pos;
         } else {
             # Unbalanced, just copy the $( and continue
@@ -1482,8 +1508,9 @@ sub parse_makefile {
     @modifications = ();
     %parsed_file_mtimes = ();
 
-    # Reset suffix rules
-    @suffixes = ();
+    # Reset suffix rules - initialize with GNU make default suffixes
+    # These are the common suffixes used in C/C++ development
+    @suffixes = qw(.out .a .ln .o .c .cc .C .cpp .cxx .h .s .S);
     %suffix_rule = ();
     %suffix_deps = ();
 
@@ -1875,8 +1902,13 @@ sub parse_makefile {
                 # Transform back to internal format
                 $expanded = transform_make_vars($expanded);
                 $MV{$var} = $expanded;
+            } elsif ($op eq '?=') {
+                # ?= is conditional assignment - only set if not already defined
+                unless (exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '') {
+                    $MV{$var} = $value;
+                }
             } else {
-                # = and ?= operators do lazy assignment (no expansion)
+                # = operator is simple/lazy assignment (no expansion)
                 $MV{$var} = $value;
             }
 
@@ -1900,11 +1932,47 @@ sub parse_makefile {
 
         # Rule definition (target: dependencies)
         # Must not start with whitespace (tabs are recipe lines, spaces might be command output)
-        if ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
+        # Note: We can't use a simple regex split on ':' because Make allows colons
+        # inside variable references for substitution syntax: $(var:pattern=replacement)
+        # So we need to find the rule-separator colon that's NOT inside parentheses
+        if ($line =~ /^(\S)/ && $line =~ /:/) {
+            # Find the first colon that's outside of $() or ${}
+            my $colon_pos = -1;
+            my $paren_depth = 0;
+            my $brace_depth = 0;
+            my $len = length($line);
+            for (my $i = 0; $i < $len; $i++) {
+                my $char = substr($line, $i, 1);
+                if ($char eq '$' && $i + 1 < $len) {
+                    my $next = substr($line, $i + 1, 1);
+                    if ($next eq '(') {
+                        $paren_depth++;
+                        $i++;  # Skip the '('
+                    } elsif ($next eq '{') {
+                        $brace_depth++;
+                        $i++;  # Skip the '{'
+                    }
+                } elsif ($char eq '(' && $paren_depth > 0) {
+                    $paren_depth++;
+                } elsif ($char eq ')' && $paren_depth > 0) {
+                    $paren_depth--;
+                } elsif ($char eq '{' && $brace_depth > 0) {
+                    $brace_depth++;
+                } elsif ($char eq '}' && $brace_depth > 0) {
+                    $brace_depth--;
+                } elsif ($char eq ':' && $paren_depth == 0 && $brace_depth == 0) {
+                    # Found the rule-separator colon
+                    $colon_pos = $i;
+                    last;
+                }
+            }
+
+            # Only proceed if we found a valid colon separator
+            if ($colon_pos > 0) {
             $save_current_rule->();
 
-            my $targets_str = $1;
-            my $deps_str = $2;
+            my $targets_str = substr($line, 0, $colon_pos);
+            my $deps_str = substr($line, $colon_pos + 1);
 
             # Trim whitespace
             $targets_str =~ s/^\s+|\s+$//g;
@@ -1920,6 +1988,11 @@ sub parse_makefile {
                 my $var = $1;
                 my $val = $MV{$var} // '';
                 $targets_str =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            # Fully expand any remaining function calls like $(shell ...)
+            # This is needed for targets like $(copts_conf) which depend on $(shell ...)
+            if ($targets_str =~ /\$\(/) {
+                $targets_str = expand_vars($targets_str);
             }
 
             # Handle order-only prerequisites (after |)
@@ -2097,6 +2170,7 @@ sub parse_makefile {
             }
 
             next;
+            }  # end if ($colon_pos > 0)
         }
 
         # Rule command (starts with tab)
@@ -2419,8 +2493,13 @@ sub parse_included_makefile {
                 # Transform back to internal format
                 $expanded = transform_make_vars($expanded);
                 $MV{$var} = $expanded;
+            } elsif ($op eq '?=') {
+                # ?= is conditional assignment - only set if not already defined
+                unless (exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '') {
+                    $MV{$var} = $value;
+                }
             } else {
-                # = and ?= operators do lazy assignment (no expansion)
+                # = operator is simple/lazy assignment (no expansion)
                 $MV{$var} = $value;
             }
             next;
@@ -2428,11 +2507,47 @@ sub parse_included_makefile {
 
         # Rule definition (included files might have rules too)
         # Must not start with whitespace (tabs are recipe lines)
-        if ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
+        # Note: We can't use a simple regex split on ':' because Make allows colons
+        # inside variable references for substitution syntax: $(var:pattern=replacement)
+        # So we need to find the rule-separator colon that's NOT inside parentheses
+        if ($line =~ /^(\S)/ && $line =~ /:/) {
+            # Find the first colon that's outside of $() or ${}
+            my $colon_pos = -1;
+            my $paren_depth = 0;
+            my $brace_depth = 0;
+            my $len = length($line);
+            for (my $i = 0; $i < $len; $i++) {
+                my $char = substr($line, $i, 1);
+                if ($char eq '$' && $i + 1 < $len) {
+                    my $next = substr($line, $i + 1, 1);
+                    if ($next eq '(') {
+                        $paren_depth++;
+                        $i++;  # Skip the '('
+                    } elsif ($next eq '{') {
+                        $brace_depth++;
+                        $i++;  # Skip the '{'
+                    }
+                } elsif ($char eq '(' && $paren_depth > 0) {
+                    $paren_depth++;
+                } elsif ($char eq ')' && $paren_depth > 0) {
+                    $paren_depth--;
+                } elsif ($char eq '{' && $brace_depth > 0) {
+                    $brace_depth++;
+                } elsif ($char eq '}' && $brace_depth > 0) {
+                    $brace_depth--;
+                } elsif ($char eq ':' && $paren_depth == 0 && $brace_depth == 0) {
+                    # Found the rule-separator colon
+                    $colon_pos = $i;
+                    last;
+                }
+            }
+
+            # Only proceed if we found a valid colon separator
+            if ($colon_pos > 0) {
             $save_current_rule->();
 
-            my $targets_str = $1;
-            my $deps_str = $2;
+            my $targets_str = substr($line, 0, $colon_pos);
+            my $deps_str = substr($line, $colon_pos + 1);
 
             $targets_str =~ s/^\s+|\s+$//g;
             $deps_str =~ s/^\s+|\s+$//g;
@@ -2446,6 +2561,11 @@ sub parse_included_makefile {
                 my $var = $1;
                 my $val = $MV{$var} // '';
                 $targets_str =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            # Fully expand any remaining function calls like $(shell ...)
+            # This is needed for targets like $(copts_conf) which depend on $(shell ...)
+            if ($targets_str =~ /\$\(/) {
+                $targets_str = expand_vars($targets_str);
             }
 
             # Handle order-only prerequisites (after |)
@@ -2554,6 +2674,7 @@ sub parse_included_makefile {
             }
 
             next;
+            }  # end if ($colon_pos > 0)
         }
 
         # Rule command
@@ -3496,8 +3617,16 @@ sub parse_make_command {
     my ($cmd) = @_;
 
     # Check for shell operators that indicate a compound command
-    # If found, this can't be parsed as a simple make invocation
-    if ($cmd =~ /\s+(&&|\|\||;|\|)\s+/) {
+    # BUT skip operators inside quotes or backticks
+    my $check_cmd = $cmd;
+    # Remove single-quoted strings
+    $check_cmd =~ s/'[^']*'//g;
+    # Remove double-quoted strings (including those with backticks inside)
+    $check_cmd =~ s/"[^"]*"//g;
+    # Remove backtick strings
+    $check_cmd =~ s/`[^`]*`//g;
+
+    if ($check_cmd =~ /\s+(&&|\|\||;|\|)\s+/) {
         warn "DEBUG: Compound command detected with operator '$1', cannot parse as simple make\n" if $ENV{SMAK_DEBUG};
         # Return empty to signal this should be executed externally or handled specially
         return ('', '', ());
@@ -3506,9 +3635,43 @@ sub parse_make_command {
     my $makefile = '';
     my $directory = '';
     my @targets;
+    my %var_assignments;
 
-    # Split command line into tokens (simple split, doesn't handle quoted strings)
-    my @parts = split /\s+/, $cmd;
+    # Tokenize command line respecting quotes
+    my @parts;
+    my $pos = 0;
+    my $len = length($cmd);
+    while ($pos < $len) {
+        # Skip whitespace
+        if (substr($cmd, $pos, 1) =~ /\s/) {
+            $pos++;
+            next;
+        }
+
+        my $start = $pos;
+        my $in_quote = '';
+
+        # Parse a token
+        while ($pos < $len) {
+            my $char = substr($cmd, $pos, 1);
+
+            if ($in_quote) {
+                if ($char eq $in_quote) {
+                    $in_quote = '';
+                }
+                $pos++;
+            } elsif ($char eq '"' || $char eq "'" || $char eq '`') {
+                $in_quote = $char;
+                $pos++;
+            } elsif ($char =~ /\s/) {
+                last;
+            } else {
+                $pos++;
+            }
+        }
+
+        push @parts, substr($cmd, $start, $pos - $start) if $pos > $start;
+    }
 
     # Skip the command itself (make/smak/path)
     shift @parts;
@@ -3527,13 +3690,23 @@ sub parse_make_command {
             if ($parts[$i] =~ /^-(I|j|l|o|W)$/ && $i + 1 < @parts) {
                 $i++;  # Skip option argument
             }
+        } elsif ($parts[$i] =~ /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/) {
+            # Variable assignment (VAR=value)
+            # Store for the caller to set in %MV
+            my ($var, $val) = ($1, $2);
+            # Remove surrounding quotes from value if present
+            if ($val =~ /^"(.*)"$/ || $val =~ /^'(.*)'$/) {
+                $val = $1;
+            }
+            $var_assignments{$var} = $val;
+            next;
         } else {
             # It's a target
             push @targets, $parts[$i];
         }
     }
 
-    return ($makefile, $directory, @targets);
+    return ($makefile, $directory, \%var_assignments, @targets);
 }
 
 # Helper function to get first target from a makefile
@@ -3921,6 +4094,7 @@ sub build_target {
     my @deps;
     my $rule = '';
     my $stem = '';  # Track stem for $* automatic variable
+    my $suffix_source = '';  # Track source file for suffix rules ($< in .c.o:)
 
     # Helper function to find a rule key by trying variable expansion
     # Needed because rules are stored with unexpanded variables like $(EXEEXT)
@@ -4002,6 +4176,8 @@ sub build_target {
 
                         if ($source_exists || $source_can_build) {
                             $stem = $base;
+                            $suffix_source = $source;  # Save source for $< expansion
+                            warn "DEBUG[" . __LINE__ . "]:   Set suffix_source='$suffix_source' for suffix rule\n" if $ENV{SMAK_DEBUG};
                             # Keep existing deps from .deps/*.Po, add source if not present
                             push @deps, $source unless grep { $_ eq $source } @deps;
                             $rule = $suffix_rule{$suffix_key};
@@ -4296,12 +4472,10 @@ sub build_target {
     # Note: Variables like $O can expand to multiple space-separated values
     @deps = map {
         my $dep = $_;
-        # Expand $MV{VAR} references
-        while ($dep =~ /\$MV\{([^}]+)\}/) {
-            my $var = $1;
-            my $val = $MV{$var} // '';
-            $dep =~ s/\$MV\{\Q$var\E\}/$val/;
-        }
+        # First convert $MV{VAR} back to $(VAR) format
+        $dep = format_output($dep);
+        # Then do full variable expansion (handles $(shell ...) and other functions)
+        $dep = expand_vars($dep);
         # If expansion resulted in multiple space-separated values, split them
         if ($dep =~ /\s/) {
             split /\s+/, $dep;
@@ -4315,12 +4489,10 @@ sub build_target {
     # Process order-only prerequisites the same way as normal dependencies
     @order_only_prereqs = map {
         my $dep = $_;
-        # Expand $MV{VAR} references
-        while ($dep =~ /\$MV\{([^}]+)\}/) {
-            my $var = $1;
-            my $val = $MV{$var} // '';
-            $dep =~ s/\$MV\{\Q$var\E\}/$val/;
-        }
+        # First convert $MV{VAR} back to $(VAR) format
+        $dep = format_output($dep);
+        # Then do full variable expansion (handles $(shell ...) and other functions)
+        $dep = expand_vars($dep);
         # If expansion resulted in multiple space-separated values, split them
         if ($dep =~ /\s/) {
             split /\s+/, $dep;
@@ -4509,8 +4681,12 @@ sub build_target {
 
         # For suffix rules, $< should be the source file, not .dirstamp or other deps
         my $source_prereq = $deps[0] || '';
-        if ($stem && @deps > 0) {
-            # In suffix rule context, find the actual source file (not .dirstamp)
+        if ($suffix_source) {
+            # Use the source file we identified when matching the suffix rule
+            $source_prereq = $suffix_source;
+            warn "DEBUG[" . __LINE__ . "]:   Using suffix_source='$suffix_source' for \$<\n" if $ENV{SMAK_DEBUG};
+        } elsif ($stem && @deps > 0) {
+            # Fallback: in suffix rule context, find the actual source file (not .dirstamp)
             for my $dep (@deps) {
                 next if $dep =~ /dirstamp$/;  # Skip .dirstamp files
                 next if $dep =~ /\.deps\//;    # Skip .deps/ directory markers
@@ -4667,13 +4843,22 @@ sub build_target {
                         }
 
                         # Parse and execute as recursive make
-                        my ($sub_makefile, $sub_directory, @sub_targets) = parse_make_command($exec_part);
+                        my ($sub_makefile, $sub_directory, $sub_vars_ref, @sub_targets) = parse_make_command($exec_part);
 
                         if ($sub_directory || $sub_makefile || @sub_targets) {
                             # Save state
                             use Cwd 'getcwd';
                             my $saved_cwd = $sub_directory ? getcwd() : undef;
                             my $saved_makefile = $makefile;
+
+                            # Save and set command-line variable assignments
+                            my %saved_vars;
+                            if ($sub_vars_ref && %$sub_vars_ref) {
+                                for my $var (keys %$sub_vars_ref) {
+                                    $saved_vars{$var} = $MV{$var};
+                                    $MV{$var} = $sub_vars_ref->{$var};
+                                }
+                            }
 
                             # Change directory if needed
                             if ($sub_directory) {
@@ -4710,6 +4895,13 @@ sub build_target {
 
                             # Restore state
                             chdir($saved_cwd) if $saved_cwd;
+                            for my $var (keys %saved_vars) {
+                                if (defined $saved_vars{$var}) {
+                                    $MV{$var} = $saved_vars{$var};
+                                } else {
+                                    delete $MV{$var};
+                                }
+                            }
                             $makefile = $saved_makefile;
                         }
                     }
@@ -4745,8 +4937,8 @@ sub build_target {
             if ($normalized_cmd =~ /\b(make|smak)\s/ || $normalized_cmd =~ m{/smak(?:\s|$)}) {
                 warn "DEBUG[" . __LINE__ . "]: Detected recursive make/smak: $normalized_cmd\n" if $ENV{SMAK_DEBUG};
 
-                # Parse the make/smak command line to extract -f, -C directory, and targets
-                my ($sub_makefile, $sub_directory, @sub_targets) = parse_make_command($normalized_cmd);
+                # Parse the make/smak command line to extract -f, -C directory, variables, and targets
+                my ($sub_makefile, $sub_directory, $sub_vars_ref, @sub_targets) = parse_make_command($normalized_cmd);
 
                 warn "DEBUG[" . __LINE__ . "]: Parsed makefile='$sub_makefile' directory='$sub_directory' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
 
@@ -4763,8 +4955,32 @@ sub build_target {
                 }
 
                 if ($sub_makefile || $sub_directory) {
+                    # Check if any variable values contain backticks that need shell evaluation
+                    # If so, fall back to external execution so the shell can handle them
+                    if ($sub_vars_ref && %$sub_vars_ref) {
+                        for my $var (keys %$sub_vars_ref) {
+                            if ($sub_vars_ref->{$var} =~ /`/) {
+                                warn "DEBUG[" . __LINE__ . "]: Variable $var contains backticks, falling back to external execution\n" if $ENV{SMAK_DEBUG};
+                                if ($saved_cwd) {
+                                    chdir($saved_cwd) or warn "Warning: Could not restore directory to '$saved_cwd': $!\n";
+                                }
+                                goto EXECUTE_EXTERNAL_COMMAND;
+                            }
+                        }
+                    }
+
                     # Save current makefile state
                     my $saved_makefile = $makefile;
+
+                    # Save and set command-line variable assignments
+                    my %saved_vars;
+                    if ($sub_vars_ref && %$sub_vars_ref) {
+                        for my $var (keys %$sub_vars_ref) {
+                            $saved_vars{$var} = $MV{$var};
+                            $MV{$var} = $sub_vars_ref->{$var};
+                            warn "DEBUG[" . __LINE__ . "]: Set variable $var='$sub_vars_ref->{$var}'\n" if $ENV{SMAK_DEBUG};
+                        }
+                    }
 
                     # Determine the makefile name (use default if not specified)
                     $sub_makefile = 'Makefile' unless $sub_makefile;
@@ -4804,6 +5020,15 @@ sub build_target {
                     # Restore directory if changed
                     if ($saved_cwd) {
                         chdir($saved_cwd) or warn "Warning: Could not restore directory to '$saved_cwd': $!\n";
+                    }
+
+                    # Restore variable assignments
+                    for my $var (keys %saved_vars) {
+                        if (defined $saved_vars{$var}) {
+                            $MV{$var} = $saved_vars{$var};
+                        } else {
+                            delete $MV{$var};
+                        }
                     }
 
                     # Restore makefile state

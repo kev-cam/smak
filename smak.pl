@@ -1238,7 +1238,7 @@ if ($ENV{SMAK_JOB_SERVER} && !$ENV{SMAK_JOB_SERVER_RELAY_DONE}) {
         $parent_socket->autoflush(1);
 
         # Send the targets as a build request
-        # Format: BUILD target1 target2 target3
+        # Format: BUILD cwd target1 target2 target3
         print $parent_socket "BUILD $cwd @targets_str\n";
 
         # Wait for completion

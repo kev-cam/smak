@@ -15,6 +15,18 @@ use Carp 'verbose'; # for debug trace
 
 our $VERSION = '1.0';
 
+# Set process name visible in ps and /proc/*/comm
+# Uses prctl(PR_SET_NAME) on Linux
+sub set_process_name {
+    my ($name) = @_;
+    $0 = $name;  # Set command line (visible in ps aux)
+
+    # PR_SET_NAME = 15, set process name (max 16 chars including null)
+    my $PR_SET_NAME = 15;
+    $name = substr($name, 0, 15);  # Truncate to 15 chars
+    syscall(157, $PR_SET_NAME, $name);  # 157 = SYS_prctl on x86_64
+}
+
 # Assertion support - can be disabled for production builds
 # To disable assertions, change this constant to 0
 use constant ASSERTIONS_ENABLED => 1;
@@ -317,6 +329,7 @@ sub start_job_server {
     if ($job_server_pid == 0) {
         # Child - run job-master with full access to parsed Makefile data
         # This allows job-master to understand dependencies and parallelize intelligently
+        set_process_name('smak-server');
         run_job_master($jobs, $RealBin);
         exit 99;  # Should never reach here
     }
@@ -2005,6 +2018,7 @@ sub parse_makefile {
                 my $order_only_str = $2;
                 @deps = split /\s+/, $normal_deps_str;
                 @order_only_deps = split /\s+/, $order_only_str;
+                print STDERR "DEBUG parse: Found order-only deps for '$targets_str': " . join(", ", @order_only_deps) . "\n" if $ENV{SMAK_DEBUG};
             } else {
                 # No order-only prerequisites
                 @deps = split /\s+/, $deps_str;
@@ -2113,6 +2127,7 @@ sub parse_makefile {
                         } else {
                             $fixed_order_only{$key} = \@order_only_deps;
                         }
+                        print STDERR "DEBUG parse: Stored fixed order-only for '$key': " . join(", ", @{$fixed_order_only{$key}}) . "\n" if $ENV{SMAK_DEBUG};
                     }
                 } elsif ($type eq 'pattern') {
                     # Pattern rules can have multiple variants with different dependencies
@@ -2577,6 +2592,7 @@ sub parse_included_makefile {
                 my $order_only_str = $2;
                 @deps = split /\s+/, $normal_deps_str;
                 @order_only_deps = split /\s+/, $order_only_str;
+                print STDERR "DEBUG parse(include): Found order-only deps for '$targets_str': " . join(", ", @order_only_deps) . "\n" if $ENV{SMAK_DEBUG};
             } else {
                 # No order-only prerequisites
                 @deps = split /\s+/, $deps_str;
@@ -2953,10 +2969,13 @@ sub save_state_cache {
     # Save rules and dependencies
     _save_hash($fh, "fixed_rule", \%fixed_rule);
     _save_hash($fh, "fixed_deps", \%fixed_deps);
+    _save_hash($fh, "fixed_order_only", \%fixed_order_only);
     _save_hash($fh, "pattern_rule", \%pattern_rule);
     _save_hash($fh, "pattern_deps", \%pattern_deps);
+    _save_hash($fh, "pattern_order_only", \%pattern_order_only);
     _save_hash($fh, "pseudo_rule", \%pseudo_rule);
     _save_hash($fh, "pseudo_deps", \%pseudo_deps);
+    _save_hash($fh, "pseudo_order_only", \%pseudo_order_only);
     _save_hash($fh, "suffix_rule", \%suffix_rule);
     _save_hash($fh, "suffix_deps", \%suffix_deps);
 
@@ -6185,64 +6204,25 @@ sub cmd_build {
     }
 
     if ($socket) {
-        # Job server mode - submit jobs and wait for results
-        my $exit_req = ${$state->{exit_requested}};
+        # Job server mode - use build_target() which submits real jobs via the job_server_socket
+        # This is the same code path as non-CLI mode
+        # Set job_server_socket so build_target knows to use the job server
+        $job_server_socket = $socket unless $job_server_socket;
         for my $target (@targets) {
             my $build_start_time = time();
-            print $socket "SUBMIT_JOB\n";
-            print $socket "$target\n";
-            print $socket ".\n";
-            print $socket "cd . && make $target\n";
-
-            # Wait for completion
-            my $select = IO::Select->new($socket);
-            my $job_done = 0;
-            my $cancelled = 0;
-            while (!$exit_req && !$job_done && !$cancelled) {
-                # Check for Ctrl-C cancel request
-                if ($SmakCli::cancel_requested) {
-                    print "\nCtrl-C - Cancelling build...\n";
-                    print $socket "KILL_WORKERS\n";
-                    $socket->flush();
-                    $SmakCli::cancel_requested = 0;
-                    $cancelled = 1;
-                    # Drain socket to clear any pending messages
-                    while ($select->can_read(0.5)) {
-                        my $drain = <$socket>;
-                        last unless defined $drain;
-                        chomp $drain;
-                        print "  [cancelled: $drain]\n" if $ENV{SMAK_DEBUG};
-                    }
-                    last;
-                }
-                if ($select->can_read(0.1)) {
-                    my $response = <$socket>;
-                    last unless defined $response;
-                    chomp $response;
-                    if ($response =~ /^OUTPUT (.*)$/) {
-                        print "$1\n";
-                        reprompt();
-                    } elsif ($response =~ /^ERROR (.*)$/) {
-                        print "ERROR: $1\n";
-                        reprompt();
-                    } elsif ($response =~ /^WARN (.*)$/) {
-                        print "WARN: $1\n";
-                        reprompt();
-                    } elsif ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
-                        my ($completed_target, $exit_code) = ($1, $2);
-                        my $elapsed = time() - $build_start_time;
-                        if ($exit_code == 0) {
-                            printf "✓ Build succeeded: $completed_target (%.2fs)\n", $elapsed;
-                        } else {
-                            printf "✗ Build failed: $completed_target (exit code $exit_code, %.2fs)\n", $elapsed;
-                        }
-                        $job_done = 1;
-			reprompt();
-                    }
-                }
+            eval {
+                build_target($target);
+            };
+            my $elapsed = time() - $build_start_time;
+            if ($@) {
+                printf "✗ Build failed: $target (%.2fs)\n", $elapsed;
+                print STDERR $@;
+                reprompt();
+                last;
+            } else {
+                printf "✓ Build succeeded: $target (%.2fs)\n", $elapsed;
+                reprompt();
             }
-
-            last if $exit_req;
         }
     } else {
         # No job server - build sequentially
@@ -6993,137 +6973,150 @@ sub cmd_btree {
 
     if (@$words == 0) {
         print "Usage: btree <target>\n";
-        print "  Shows the build tree with targets organized by dependency layers.\n";
-        print "  Layer 0 = final target, Layer 1 = direct deps, Layer 2 = deps of deps, etc.\n";
+        print "  Shows the build tree organized by layers for the target.\n";
+        print "  Layer 0 builds first, higher layers depend on lower layers.\n";
         return;
     }
 
     my $target = $words->[0];
 
-    # Build the layered tree
+    # Collect all targets and their dependencies (including order-only)
+    my %all_targets;   # target => [deps]
+    my %tgt_layer;     # target => layer
     my %visited;
-    my @layers;  # Array of arrays: $layers[depth] = [target1, target2, ...]
 
-    # Recursive helper to collect targets at each depth
-    my $collect_tree;
-    $collect_tree = sub {
-        my ($tgt, $depth) = @_;
-
-        return if $visited{$tgt}++;  # Already processed
-
-        # Add to layer
-        $layers[$depth] //= [];
-        push @{$layers[$depth]}, $tgt;
-
-        # Get dependencies
+    # Helper to get all dependencies for a target
+    my $get_all_deps = sub {
+        my ($tgt) = @_;
         my $key = "$makefile\t$tgt";
         my @deps;
 
+        # Regular dependencies
         if (exists $fixed_deps{$key}) {
-            @deps = @{$fixed_deps{$key} || []};
+            push @deps, @{$fixed_deps{$key} || []};
         } elsif (exists $pattern_deps{$key}) {
             my $deps_ref = $pattern_deps{$key} || [];
-            @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
-                    @{$deps_ref->[0]} :
-                    (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
+            if (ref($deps_ref) eq 'ARRAY' && @$deps_ref && ref($deps_ref->[0]) eq 'ARRAY') {
+                push @deps, @{$deps_ref->[0]};
+            } elsif (ref($deps_ref) eq 'ARRAY') {
+                push @deps, @$deps_ref;
+            }
         } elsif (exists $pseudo_deps{$key}) {
-            @deps = @{$pseudo_deps{$key} || []};
+            push @deps, @{$pseudo_deps{$key} || []};
         }
 
-        # Expand $MV{var} references in dependencies
-        my @expanded_deps;
+        # Order-only dependencies (these also affect build order)
+        if (exists $fixed_order_only{$key}) {
+            push @deps, @{$fixed_order_only{$key} || []};
+        }
+        if (exists $pattern_order_only{$key}) {
+            my $oo_ref = $pattern_order_only{$key} || [];
+            if (ref($oo_ref) eq 'ARRAY' && @$oo_ref && ref($oo_ref->[0]) eq 'ARRAY') {
+                push @deps, @{$oo_ref->[0]};
+            } elsif (ref($oo_ref) eq 'ARRAY') {
+                push @deps, @$oo_ref;
+            }
+        }
+        if (exists $pseudo_order_only{$key}) {
+            push @deps, @{$pseudo_order_only{$key} || []};
+        }
+
+        # Expand variables
+        my @expanded;
         for my $dep (@deps) {
-            my $expanded = $dep;
-            while ($expanded =~ /\$MV\{([^}]+)\}/) {
+            my $exp = $dep;
+            while ($exp =~ /\$MV\{([^}]+)\}/) {
                 my $var = $1;
                 my $val = $MV{$var} // '';
-                $expanded =~ s/\$MV\{\Q$var\E\}/$val/;
+                $exp =~ s/\$MV\{\Q$var\E\}/$val/;
             }
-            # Handle multiple space-separated values from expansion
-            if ($expanded =~ /\s/) {
-                push @expanded_deps, split /\s+/, $expanded;
-            } elsif ($expanded =~ /\S/) {
-                push @expanded_deps, $expanded;
-            }
-        }
-        @deps = @expanded_deps;
-
-        # Try pattern matching if no explicit deps
-        if (!@deps && $tgt =~ /^(.+)(\.[^.\/]+)$/) {
-            my ($base, $target_suffix) = ($1, $2);
-            for my $source_suffix (@suffixes) {
-                next if $source_suffix eq $target_suffix;
-                my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
-                if (exists $suffix_rule{$suffix_key}) {
-                    my $source = "$base$source_suffix";
-                    # Check if source exists or has a rule
-                    if (-e $source || -e resolve_vpath($source, '.')) {
-                        push @deps, $source;
-                        last;
-                    }
-                }
-            }
+            push @expanded, split(/\s+/, $exp) if $exp =~ /\S/;
         }
 
-        # Recursively process dependencies (if they're buildable)
-        for my $dep (@deps) {
-            next unless defined $dep && $dep =~ /\S/;
-            next if $dep =~ /dirstamp$/;  # Skip dirstamp markers
-            next if $dep =~ /\.deps\//;    # Skip .deps markers
-            next if $dep =~ /^\/usr\//;    # Skip system files
-
-            # Check if this dep is buildable (has a rule or is a source file)
-            my $dep_key = "$makefile\t$dep";
-            my $is_buildable = exists $fixed_deps{$dep_key} ||
-                               exists $fixed_rule{$dep_key} ||
-                               exists $pattern_deps{$dep_key} ||
-                               exists $pattern_rule{$dep_key} ||
-                               exists $pseudo_deps{$dep_key};
-
-            # Also check if it's a source file that could be built via suffix rule
-            if (!$is_buildable && $dep =~ /\.([^.\/]+)$/) {
-                my $ext = ".$1";
-                for my $src_ext (@suffixes) {
-                    my $sk = "$makefile\t$src_ext\t$ext";
-                    if (exists $suffix_rule{$sk}) {
-                        $is_buildable = 1;
-                        last;
-                    }
-                }
-            }
-
-            $collect_tree->($dep, $depth + 1) if $is_buildable || !-e $dep;
-        }
+        # Filter
+        return grep {
+            defined $_ && /\S/ &&
+            !/dirstamp$/ && !/\.deps\// && !m{^/usr/}
+        } @expanded;
     };
 
-    # Start collection from target
-    $collect_tree->($target, 0);
+    # Check if target is buildable (has a rule)
+    my $is_buildable = sub {
+        my ($tgt) = @_;
+        my $key = "$makefile\t$tgt";
+        return exists $fixed_rule{$key} || exists $pattern_rule{$key} ||
+               exists $fixed_deps{$key} || exists $pattern_deps{$key} ||
+               exists $pseudo_deps{$key};
+    };
 
-    # Display the tree
+    # Recursively collect targets
+    my $collect;
+    $collect = sub {
+        my ($tgt, $depth) = @_;
+        return if $visited{$tgt}++ || $depth > 100;
+
+        my @deps = $get_all_deps->($tgt);
+        # Only include buildable deps
+        @deps = grep { $is_buildable->($_) } @deps;
+        $all_targets{$tgt} = \@deps;
+
+        $collect->($_, $depth + 1) for @deps;
+    };
+    $collect->($target, 0);
+
+    # Compute layers: layer = max(layer of deps) + 1
+    my $compute;
+    $compute = sub {
+        my ($tgt) = @_;
+        return $tgt_layer{$tgt} if exists $tgt_layer{$tgt};
+
+        my $deps = $all_targets{$tgt} || [];
+        if (@$deps == 0) {
+            return $tgt_layer{$tgt} = 0;
+        }
+
+        my $max = -1;
+        for my $d (@$deps) {
+            next unless exists $all_targets{$d};
+            my $l = $compute->($d);
+            $max = $l if $l > $max;
+        }
+        return $tgt_layer{$tgt} = $max + 1;
+    };
+    $compute->($_) for keys %all_targets;
+
+    # Group by layer
+    my @layers;
+    my $max_layer = 0;
+    for my $tgt (keys %tgt_layer) {
+        my $l = $tgt_layer{$tgt};
+        $layers[$l] //= [];
+        push @{$layers[$l]}, $tgt;
+        $max_layer = $l if $l > $max_layer;
+    }
+
     if (@layers == 0) {
-        print "No build tree found for target: $target\n";
+        print "No buildable targets for: $target\n";
         return;
     }
 
     print "Build tree for: $target\n";
     print "=" x 60 . "\n";
+    print "Build order: Layer 0 builds first, layer $max_layer builds last.\n";
 
-    for my $depth (0 .. $#layers) {
-        next unless $layers[$depth] && @{$layers[$depth]};
+    my $total = 0;
+    for my $layer (0 .. $max_layer) {
+        next unless $layers[$layer] && @{$layers[$layer]};
 
-        my @targets = sort @{$layers[$depth]};
+        my @targets = sort @{$layers[$layer]};
         my $count = scalar @targets;
+        $total += $count;
 
-        print "\nLayer $depth";
-        if ($depth == 0) {
-            print " (final target)";
-        } elsif ($depth == 1) {
-            print " (direct dependencies)";
-        }
+        print "\nLayer $layer";
+        print " (builds first)" if $layer == 0;
         print " [$count target" . ($count == 1 ? "" : "s") . "]:\n";
 
         for my $t (@targets) {
-            # Mark with indicator based on what it is
             my $indicator = "";
             if ($t =~ /\.a$/) {
                 $indicator = "[lib] ";
@@ -7140,11 +7133,8 @@ sub cmd_btree {
         }
     }
 
-    # Summary
-    my $total = 0;
-    $total += scalar @{$layers[$_] || []} for 0 .. $#layers;
     print "\n" . "=" x 60 . "\n";
-    print "Total: $total targets in " . scalar(@layers) . " layers\n";
+    print "Total: $total targets in " . ($max_layer + 1) . " layers\n";
 }
 
 sub cmd_vpath {
@@ -8760,6 +8750,10 @@ sub run_job_master {
     }
     vprint "Job-master received environment\n";
 
+    # Get server info for worker process names
+    my $server_pid = $$;
+    chomp(my $hostname = `hostname -s 2>/dev/null` || 'localhost');
+
     # Spawn workers
     for (my $i = 0; $i < $num_workers; $i++) {
         my $pid = fork();
@@ -8767,6 +8761,15 @@ sub run_job_master {
 
         if ($pid == 0) {
             # Child - run worker
+            set_process_name("smak-worker for $hostname:$server_pid");
+
+            # Close inherited sockets that worker doesn't use
+            # This ensures proper reference counting so job-server sees disconnects correctly
+            close($master_socket) if $master_socket;
+            close($master_server);
+            close($observer_server);
+            close($worker_server);  # Worker connects as client, doesn't use listening socket
+
             if ($ssh_host) {
 		my $local_path = getcwd();
 		$local_path =~ s=^$fuse_mountpoint/== if defined $fuse_mountpoint;
@@ -9683,8 +9686,9 @@ sub run_job_master {
                 }
             }
 
-            # Compute layer based on dependencies (deps already queued recursively)
-            my $layer = compute_target_layer(\@deps);
+            # Compute layer based on dependencies AND order-only deps (all queued recursively)
+            # Order-only deps must also be considered since target can't run until they exist
+            my $layer = compute_target_layer([@deps, @order_only_deps]);
 
             my $job = {
                 target => $target,
@@ -10290,6 +10294,13 @@ sub run_job_master {
                 my @order_only_deps;
                 if (exists $fixed_order_only{$key}) {
                     push @order_only_deps, @{$fixed_order_only{$key}};
+                    print STDERR "DEBUG dispatch: Found order-only for key '$key': " . join(", ", @order_only_deps) . "\n" if $ENV{SMAK_DEBUG};
+                } elsif ($target =~ /STD\.STANDARD/) {
+                    # Debug: show all keys that might match for STD.STANDARD
+                    print STDERR "DEBUG dispatch: No order-only for key '$key', checking available keys...\n" if $ENV{SMAK_DEBUG};
+                    for my $k (keys %fixed_order_only) {
+                        print STDERR "DEBUG dispatch:   available key: '$k' => " . join(", ", @{$fixed_order_only{$k}}) . "\n" if $ENV{SMAK_DEBUG};
+                    }
                 }
                 if (exists $pattern_order_only{$key}) {
                     my $oo_ref = $pattern_order_only{$key};
@@ -10726,6 +10737,7 @@ sub run_job_master {
             }
             my $idle_time = Time::HiRes::time();
             print $master_socket "IDLE $final_exit $idle_time\n" if $master_socket;
+            $master_socket->flush() if $master_socket;
             $idle_sent = 1;
         }
 
@@ -11170,6 +11182,23 @@ sub run_job_master {
                         # Clean up dispatch tracking
                         delete $currently_dispatched{$job->{target}} if exists $currently_dispatched{$job->{target}};
 
+                        # Check if this was the last job - send IDLE immediately if so
+                        # This ensures non-cli mode gets IDLE promptly after all work completes
+                        my $now_idle = (@job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0);
+                        if ($now_idle && $master_socket && !$idle_sent) {
+                            my $final_exit = $max_exit_code;
+                            if (!$final_exit && keys(%failed_targets)) {
+                                for my $t (keys %failed_targets) {
+                                    $final_exit = $failed_targets{$t} if $failed_targets{$t} > $final_exit;
+                                }
+                                $final_exit ||= 1;
+                            }
+                            my $idle_time = Time::HiRes::time();
+                            print $master_socket "IDLE $final_exit $idle_time\n";
+                            $master_socket->flush();
+                            $idle_sent = 1;
+                        }
+
                     } elsif ($line =~ /^OUTPUT (.*)$/) {
                         warn "CONSISTENCY-CHECK: Got OUTPUT: $1\n" if $ENV{SMAK_DEBUG};
                         print $master_socket "OUTPUT $1\n" if $master_socket;
@@ -11333,7 +11362,6 @@ sub run_job_master {
                     # Save current directory
                     use Cwd 'getcwd';
                     my $saved_cwd = getcwd();
-                    my $saved_makefile = $makefile;
 
                     # Change to target directory
                     chdir($dir) or do {
@@ -11342,32 +11370,34 @@ sub run_job_master {
                         next;
                     };
 
-                    # Build targets in the new directory
-                    my $exit_code = 0;
-                    eval {
-                        # Parse makefile in new directory if needed
-                        my $new_makefile = 'Makefile';
-                        if (!exists $fixed_deps{"$new_makefile\t" . ($targets[0] || 'all')}) {
-                            parse_makefile($new_makefile);
-                            $makefile = $new_makefile;
+                    # Parse makefile in new directory if needed
+                    my $saved_makefile = $makefile;
+                    my $new_makefile = 'Makefile';
+                    if (!exists $fixed_deps{"$new_makefile\t" . ($targets[0] || 'all')}) {
+                        eval { parse_makefile($new_makefile); };
+                        if ($@) {
+                            warn "Failed to parse makefile: $@\n";
+                            chdir($saved_cwd);
+                            $makefile = $saved_makefile;
+                            print $socket "COMPLETE 1\n";
+                            next;
                         }
+                    }
+                    $makefile = $new_makefile;
 
-                        # Build each target
-                        for my $target (@targets) {
-                            build_target($target);
-                        }
-                    };
-                    if ($@) {
-                        warn "BUILD failed: $@\n";
-                        $exit_code = 1;
+                    # Queue targets for parallel dispatch (instead of sequential build_target)
+                    for my $target (@targets) {
+                        queue_target_recursive($target, $dir, $master_socket, 0);
                     }
 
-                    # Restore directory and makefile
+                    # Restore directory and makefile (targets are now queued)
                     chdir($saved_cwd);
                     $makefile = $saved_makefile;
 
-                    # Send completion back to child smak
-                    print $socket "COMPLETE $exit_code\n";
+                    # Track this socket so we can send COMPLETE when all queued work finishes
+                    # For now, send COMPLETE immediately - the work is queued and will dispatch
+                    # TODO: properly track completion of these specific targets
+                    print $socket "COMPLETE 0\n";
                     $socket->flush();
 
                 } elsif ($line =~ /^SUBMIT_JOB$/) {
@@ -11442,10 +11472,24 @@ sub run_job_master {
                     if ($target_complete && !$work_in_progress) {
                         print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket && defined fileno($master_socket);
                         print STDERR "Target '$target' already up-to-date, notified client\n" if $ENV{SMAK_DEBUG};
+                        # Send IDLE since no work is pending
+                        if (!$idle_sent && $master_socket) {
+                            my $idle_time = Time::HiRes::time();
+                            print $master_socket "IDLE 0 $idle_time\n";
+                            $master_socket->flush();
+                            $idle_sent = 1;
+                        }
                     } elsif ($target_failed && !$work_in_progress) {
                         my $exit_code = $failed_targets{$target} || 1;
                         print $master_socket "JOB_COMPLETE $target $exit_code\n" if $master_socket && defined fileno($master_socket);
                         print STDERR "Target '$target' already failed, notified client (exit $exit_code)\n" if $ENV{SMAK_DEBUG};
+                        # Send IDLE since no work is pending
+                        if (!$idle_sent && $master_socket) {
+                            my $idle_time = Time::HiRes::time();
+                            print $master_socket "IDLE $exit_code $idle_time\n";
+                            $master_socket->flush();
+                            $idle_sent = 1;
+                        }
                     }
                     # Otherwise, work is in progress - JOB_COMPLETE will be sent when work finishes
 

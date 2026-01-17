@@ -6,6 +6,7 @@ use IO::Select;
 use Cwd 'abs_path';
 use Getopt::Long;
 use Term::ReadLine;
+use POSIX qw(WNOHANG);
 use Smak qw(:all);
 use SmakTest qw(run_interactive_tests);
 
@@ -15,11 +16,15 @@ my $target_port;
 my $pid_arg;
 my $kill_all = 0;
 my $test_mode = 0;
+my $pty_mode = 0;
+my $out_file;
 GetOptions(
     'pid=s' => \$pid_arg,
     'kill-all' => \$kill_all,
     'test' => \$test_mode,
-) or die "Usage: $0 [-pid <process-id>[:<port>]] [--kill-all] [--test]\n";
+    'pty' => \$pty_mode,
+    'out=s' => \$out_file,
+) or die "Usage: $0 [-pid <process-id>[:<port>]] [--kill-all] [--test] [--pty] [--out=<file>]\n";
 
 # Parse PID and optional port from -pid argument
 if ($pid_arg) {
@@ -417,6 +422,85 @@ if ($selected_js->{cwd}) {
 if ($test_mode) {
     # Enter test mode
     SmakTest::run_interactive_tests($socket);
+} elsif ($pty_mode) {
+    # PTY mode - create a PTY for external interaction
+    require IO::Pty;
+
+    my $pty = IO::Pty->new();
+    my $pty_name = $pty->ttyname();
+
+    print "PTY created: $pty_name\n";
+    print "Connect with: screen $pty_name\n";
+    print "Or send commands: echo 'ps' > $pty_name\n";
+    print "Output file: $out_file\n" if $out_file;
+    STDOUT->flush();
+
+    # Fork - child handles CLI on PTY slave, parent keeps PTY master alive
+    my $pid = fork();
+    die "Fork failed: $!\n" unless defined $pid;
+
+    if ($pid == 0) {
+        # Child process - become session leader and attach to PTY slave
+        use POSIX qw(setsid);
+        setsid();
+
+        my $slave = $pty->slave();
+        close($pty);  # Close master in child
+
+        # Redirect stdio to PTY slave
+        open(STDIN, '<&', $slave) or die "Can't dup slave to STDIN: $!\n";
+        open(STDOUT, '>&', $slave) or die "Can't dup slave to STDOUT: $!\n";
+        open(STDERR, '>&', $slave) or die "Can't dup slave to STDERR: $!\n";
+        close($slave);
+
+        # Enter unified CLI
+        my $prompt = 'smak-attach> ';
+        my $term = Term::ReadLine->new($prompt);
+
+        Smak::unified_cli(
+            mode => 'attached',
+            socket => $socket,
+            server_pid => $jobserver_pid,
+            own_server => 0,
+            jobs => 1,
+            makefile => 'Makefile',
+            prompt => $prompt,
+            term => $term,
+        );
+
+        close($socket);
+        exit 0;
+    } else {
+        # Parent - read from PTY master and optionally tee to file
+        close($socket);  # Child owns the socket now
+
+        my $out_fh;
+        if ($out_file) {
+            open($out_fh, '>', $out_file) or die "Can't open $out_file: $!\n";
+            $out_fh->autoflush(1);
+        }
+
+        # Read from PTY master and write to file
+        $pty->blocking(0);
+        my $select = IO::Select->new($pty);
+
+        while (1) {
+            # Check if child is still alive
+            my $kid = waitpid($pid, POSIX::WNOHANG());
+            last if $kid > 0;
+
+            if ($select->can_read(0.1)) {
+                my $buf;
+                my $n = sysread($pty, $buf, 4096);
+                if ($n && $n > 0) {
+                    print $out_fh $buf if $out_fh;
+                }
+            }
+        }
+
+        close($out_fh) if $out_fh;
+        exit($? >> 8);
+    }
 } else {
     # Enter unified CLI in attached mode
     my $prompt = 'smak-attach> ';

@@ -20,11 +20,14 @@ if ($help) {
     exit 0;
 }
 
+$0 =~ s/smak-ps(\S*)/smps/;
+
 # Main display function
 sub display_status {
     # Find all smak-worker processes and extract their server PIDs
     my %server_pids;
     my %worker_info;
+    my %scanner_info;  # Track smak-scan processes
 
     # Get worker processes with their full command line
     open(my $pgrep, '-|', 'pgrep', '-a', 'smak-') or die "pgrep failed: $!\n";
@@ -41,8 +44,13 @@ sub display_status {
             $server_pids{$server_pid} = 1;
             push @{$worker_info{$server_pid}}, { pid => $pid, host => $host };
         }
+        elsif ($cmd =~ /^smak-scan\s+for\s+(\S+):(\d+)/) {
+            my ($host, $server_pid) = ($1, $2);
+            $server_pids{$server_pid} = 1;
+            $scanner_info{$server_pid} = { pid => $pid, host => $host };
+        }
         elsif ($cmd =~ /^smak-watcher/) {
-            # Track watchers too
+            # Track watchers too (legacy name)
         }
     }
     close($pgrep);
@@ -112,6 +120,13 @@ sub display_status {
                 }
             } else {
                 $output .= "  Workers: (none connected)\n";
+                $line_count++;
+            }
+
+            # Show scanner if present
+            if (exists $scanner_info{$server_pid}) {
+                my $scan = $scanner_info{$server_pid};
+                $output .= "  Scanner: smak-scan [$scan->{pid}] running\n";
                 $line_count++;
             }
 

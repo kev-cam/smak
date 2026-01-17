@@ -1,0 +1,1 @@
+smak-cmake.pl

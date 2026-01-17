@@ -7347,7 +7347,13 @@ sub perform_auto_rescan {
 }
 
 sub auto_rescan_watcher {
-    my ($socket, $makefile_ref) = @_;
+    my ($socket, $makefile_ref, $parent_pid) = @_;
+
+    # Set process name for visibility in smak-ps
+    use Sys::Hostname;
+    my $hostname = hostname() || 'local';
+    $parent_pid //= getppid();  # Use parent PID if not passed
+    set_process_name("smak-scan for $hostname:$parent_pid");
 
     # Run at lower priority to avoid interfering with builds
     eval { setpriority(0, 0, 10); };  # Nice +10 (lower priority)
@@ -7377,9 +7383,14 @@ sub auto_rescan_watcher {
 
     # Main watcher loop
     while (1) {
-        # Check for commands from parent (non-blocking)
-        $socket->blocking(0);
-        while (my $cmd = <$socket>) {
+        # Check for commands from parent using select (avoid eof() issues with non-blocking)
+        my $select = IO::Select->new($socket);
+        while ($select->can_read(0)) {  # Non-blocking check
+            my $cmd = <$socket>;
+            unless (defined $cmd) {
+                # Actual EOF - parent closed socket
+                exit 0;
+            }
             chomp $cmd;
 
             if ($cmd eq 'SHUTDOWN') {
@@ -8873,6 +8884,42 @@ sub run_job_master {
     # Disable in dry-run mode since targets are never actually built
     our $auto_rescan = $dry_run_mode ? 0 : ($has_fuse ? 0 : 1);
 
+    # Spawn scanner process if auto_rescan is enabled
+    # Scanner runs in background and sends events using same protocol as FUSE
+    our $scanner_socket;
+    our $scanner_pid;
+    if ($auto_rescan) {
+        use Socket;
+        socketpair(my $parent_sock, my $child_sock, AF_UNIX, SOCK_STREAM, PF_UNSPEC)
+            or die "socketpair failed: $!";
+        $parent_sock->autoflush(1);
+        $child_sock->autoflush(1);
+
+        my $job_master_pid = $$;  # Save job-master PID before forking
+        $scanner_pid = fork();
+        die "fork scanner failed: $!" unless defined $scanner_pid;
+
+        if ($scanner_pid == 0) {
+            # Child process - run scanner
+            close($parent_sock);
+            close($master_socket) if $master_socket;
+            close($master_server);
+            close($observer_server);
+            close($worker_server);
+            for my $w (@workers) {
+                close($w);
+            }
+            auto_rescan_watcher($child_sock, \$makefile, $job_master_pid);
+            exit 0;
+        } else {
+            # Parent process - keep parent socket
+            close($child_sock);
+            $scanner_socket = $parent_sock;
+            $select->add($scanner_socket);
+            vprint "Auto-rescan scanner spawned (PID $scanner_pid)\n";
+        }
+    }
+
     # FUSE auto-clear: Enable by default when FUSE is detected
     # When enabled, FUSE events automatically clear failed targets (like rescan -auto)
     # When disabled (unwatch), FUSE events are collected but manual rescan is needed
@@ -9465,7 +9512,16 @@ sub run_job_master {
                     push @all_single_deps, split /\s+/, $dep;
                 }
                 @all_single_deps = grep { /\S/ } @all_single_deps;
-                my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} && !exists $failed_targets{$_} } @all_single_deps;
+                # Filter out deps that are already tracked as complete/failed
+                # NOTE: Don't filter based on file existence - needs_rebuild check happens later
+                my @pending_deps = grep {
+                    my $dep = $_;
+                    # Skip if already tracked as complete/failed in this session
+                    # NOTE: Use expressions, not 'return' - return exits the subroutine!
+                    !(exists $completed_targets{$dep} ||
+                      exists $phony_ran_this_session{$dep} ||
+                      exists $failed_targets{$dep})
+                } @all_single_deps;
                 if (@pending_deps) {
                     $in_progress{$target} = "pending";
                     $pending_composite{$target} = {
@@ -9474,6 +9530,7 @@ sub run_job_master {
                     };
                     print STDERR "Pre-registering composite target '$target' with " . scalar(@pending_deps) . " pending deps\n" if $ENV{SMAK_DEBUG};
                 }
+                # If no pending deps, continue to process - deps may still need building
             }
         }
 
@@ -9492,9 +9549,50 @@ sub run_job_master {
                 if (-e $dep_path && !exists $fixed_deps{"$makefile\t$single_dep"}
                     && !exists $pattern_deps{"$makefile\t$single_dep"}
                     && !exists $pseudo_deps{"$makefile\t$single_dep"}) {
-                    $completed_targets{$single_dep} = 1;
-                    print STDERR "Dependency '$single_dep' exists at '$dep_path', marking complete\n" if $ENV{SMAK_DEBUG};
-                    next;
+                    # File exists with no explicit rule - check if a suffix/pattern rule could build it
+                    # If so, we need to recurse to check needs_rebuild()
+                    my $has_implicit_rule = 0;
+
+                    # Check suffix rules
+                    if ($single_dep =~ /^(.+)(\.[^.\/]+)$/) {
+                        my ($base, $target_suffix) = ($1, $2);
+                        for my $source_suffix (@suffixes) {
+                            my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                            if (exists $suffix_rule{$suffix_key}) {
+                                my $source = "$base$source_suffix";
+                                my $resolved_source = resolve_vpath($source, $dir);
+                                if (-f $resolved_source || -f "$dir/$source") {
+                                    $has_implicit_rule = 1;
+                                    print STDERR "Dependency '$single_dep' has matching suffix rule $source_suffix$target_suffix\n" if $ENV{SMAK_DEBUG};
+                                    last;
+                                }
+                            }
+                        }
+                    }
+
+                    # Check pattern rules if no suffix rule found
+                    if (!$has_implicit_rule) {
+                        for my $pkey (keys %pattern_rule) {
+                            if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                                my $pattern = $1;
+                                my $pattern_re = $pattern;
+                                $pattern_re =~ s/%/(.+)/g;
+                                if ($single_dep =~ /^$pattern_re$/) {
+                                    $has_implicit_rule = 1;
+                                    print STDERR "Dependency '$single_dep' has matching pattern rule '$pattern'\n" if $ENV{SMAK_DEBUG};
+                                    last;
+                                }
+                            }
+                        }
+                    }
+
+                    # Only mark complete if no implicit rule - it's a pure source file
+                    if (!$has_implicit_rule) {
+                        $completed_targets{$single_dep} = 1;
+                        print STDERR "Dependency '$single_dep' exists at '$dep_path', no rules, marking complete\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
+                    # Otherwise fall through to recurse and check needs_rebuild
                 }
 
                 # Recursively queue this dependency
@@ -9524,9 +9622,45 @@ sub run_job_master {
                 if (-e $dep_path && !exists $fixed_deps{"$makefile\t$single_dep"}
                     && !exists $pattern_deps{"$makefile\t$single_dep"}
                     && !exists $pseudo_deps{"$makefile\t$single_dep"}) {
-                    $completed_targets{$single_dep} = 1;
-                    print STDERR "Order-only dep '$single_dep' exists at '$dep_path', marking complete\n" if $ENV{SMAK_DEBUG};
-                    next;
+                    # Check for implicit rules (same logic as regular deps)
+                    my $has_implicit_rule = 0;
+
+                    # Check suffix rules
+                    if ($single_dep =~ /^(.+)(\.[^.\/]+)$/) {
+                        my ($base, $target_suffix) = ($1, $2);
+                        for my $source_suffix (@suffixes) {
+                            my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                            if (exists $suffix_rule{$suffix_key}) {
+                                my $source = "$base$source_suffix";
+                                my $resolved_source = resolve_vpath($source, $dir);
+                                if (-f $resolved_source || -f "$dir/$source") {
+                                    $has_implicit_rule = 1;
+                                    last;
+                                }
+                            }
+                        }
+                    }
+
+                    # Check pattern rules
+                    if (!$has_implicit_rule) {
+                        for my $pkey (keys %pattern_rule) {
+                            if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                                my $pattern = $1;
+                                my $pattern_re = $pattern;
+                                $pattern_re =~ s/%/(.+)/g;
+                                if ($single_dep =~ /^$pattern_re$/) {
+                                    $has_implicit_rule = 1;
+                                    last;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!$has_implicit_rule) {
+                        $completed_targets{$single_dep} = 1;
+                        print STDERR "Order-only dep '$single_dep' exists at '$dep_path', no rules, marking complete\n" if $ENV{SMAK_DEBUG};
+                        next;
+                    }
                 }
 
                 if ($depth > $recurse_limit) {
@@ -9690,6 +9824,20 @@ sub run_job_master {
             # Order-only deps must also be considered since target can't run until they exist
             my $layer = compute_target_layer([@deps, @order_only_deps]);
 
+            # Sanity check: ensure layer is higher than all order-only deps
+            # (order-only deps must complete before this target can run)
+            for my $oo_dep (@order_only_deps) {
+                next unless defined $oo_dep && $oo_dep =~ /\S/;
+                for my $single_oo (split /\s+/, $oo_dep) {
+                    next unless $single_oo =~ /\S/;
+                    if (exists $target_layer{$single_oo} && $target_layer{$single_oo} >= $layer) {
+                        my $new_layer = $target_layer{$single_oo} + 1;
+                        print STDERR "DEBUG: Bumping layer for '$target' from $layer to $new_layer (order-only dep '$single_oo' is in layer $target_layer{$single_oo})\n" if $ENV{SMAK_DEBUG};
+                        $layer = $new_layer;
+                    }
+                }
+            }
+
             my $job = {
                 target => $target,
                 dir => $dir,
@@ -9791,8 +9939,8 @@ sub run_job_master {
         my $queued = scalar(@job_queue);
         my $running = scalar(keys %running_jobs);
 
-        # Check if state changed
-        my $changed = ($queued != $last_queued || $running != $last_running || $ready_workers != $last_ready);
+        # Check if state changed (use // 0 to handle uninitialized case on first call)
+        my $changed = ($queued != ($last_queued // 0) || $running != ($last_running // 0) || $ready_workers != ($last_ready // 0));
 
         if ($changed) {
             $last_queued = $queued;
@@ -10021,7 +10169,7 @@ sub run_job_master {
     # Get next job from the layered queue (O(1) operation)
     # Returns job or undef if no jobs available at current or lower layers
     sub get_next_job_from_layers {
-        # Advance layer if current is empty
+        # Advance layer if current is empty AND no running jobs in current layer
         while ($current_dispatch_layer <= $max_dispatch_layer) {
             my $layer_jobs = $job_layers[$current_dispatch_layer];
             if ($layer_jobs && @$layer_jobs > 0) {
@@ -10039,7 +10187,23 @@ sub run_job_master {
                 print STDERR "DEBUG: Dispatching '$job->{target}' from layer $current_dispatch_layer\n" if $ENV{SMAK_DEBUG};
                 return $job;
             }
-            # Current layer empty, advance to next
+
+            # Current layer queue is empty - check if any jobs from this layer are still running
+            my $layer_jobs_running = 0;
+            for my $task_id (keys %running_jobs) {
+                my $rj = $running_jobs{$task_id};
+                if (defined $rj->{layer} && $rj->{layer} == $current_dispatch_layer) {
+                    $layer_jobs_running++;
+                }
+            }
+
+            if ($layer_jobs_running > 0) {
+                # Jobs from current layer still running - can't advance yet
+                print STDERR "DEBUG: Layer $current_dispatch_layer queue empty but $layer_jobs_running jobs still running, waiting\n" if $ENV{SMAK_DEBUG};
+                return undef;  # Wait for running jobs to complete
+            }
+
+            # Current layer fully complete, advance to next
             $current_dispatch_layer++;
             print STDERR "DEBUG: Advanced to dispatch layer $current_dispatch_layer\n" if $ENV{SMAK_DEBUG};
         }
@@ -10167,6 +10331,8 @@ sub run_job_master {
 
             # Find next job whose dependencies are all satisfied
             my $job_index = -1;
+            my $skipped_for_order_only = 0;  # Track jobs skipped due to order-only deps
+            my $skipped_for_layer = 0;       # Track jobs skipped due to layer
             for my $i (0 .. $#job_queue) {
                 my $job;
                 my $target;
@@ -10194,7 +10360,16 @@ sub run_job_master {
 	        # If we've gone past the end of the queue, exit the for loop
 	        last if ($i > $#job_queue);
 
-                print STDERR "\n=== DEBUG dispatch: Checking job [$i] '$target' ===\n" if $ENV{SMAK_DEBUG};
+                # LAYER CHECK: Skip jobs in layers higher than current dispatch layer
+                # Jobs in higher layers depend on jobs in lower layers - can't run until
+                # all lower layer jobs are complete (skip silently to avoid log spam)
+                my $job_layer = $job->{layer} // 0;
+                if ($job_layer > $current_dispatch_layer) {
+                    $skipped_for_layer++;
+                    next;
+                }
+
+                print STDERR "\n=== DEBUG dispatch: Checking job [$i] '$target' (layer $job_layer) ===\n" if $ENV{SMAK_DEBUG};
 
                 # Check if this job's dependencies are satisfied
                 my $key = "$makefile\t$target";
@@ -10339,9 +10514,64 @@ sub run_job_master {
                 print STDERR "DEBUG dispatch: Checking job '$target', deps: [" . join(", ", @deps) . "]" .
                              (@order_only_deps ? ", order-only: [" . join(", ", @order_only_deps) . "]" : "") . "\n" if $ENV{SMAK_DEBUG};
 
-                # Combine regular deps and order-only deps for checking
-                # Order-only deps must be checked for completion but don't affect $< expansion
-                my @all_deps_to_check = (@deps, @order_only_deps);
+                # IMPORTANT: Check order-only deps FIRST before checking regular deps
+                # Order-only deps must exist/be complete before we even consider this job
+                # This prevents us from checking regular deps (which may be queued) when the
+                # order-only prerequisite (like bin/nvc) hasn't been built yet
+                my $order_only_satisfied = 1;
+                my $order_only_failed = 0;
+                for my $dep (@order_only_deps) {
+                    next if $dep =~ /^\.PHONY$/;
+                    next if $dep !~ /\S/;
+                    for my $single_dep (split /\s+/, $dep) {
+                        next unless $single_dep =~ /\S/;
+
+                        # First check if order-only dep has failed
+                        if (exists $failed_targets{$single_dep}) {
+                            print STDERR "Job '$target' FAILED: order-only dependency '$single_dep' failed (exit $failed_targets{$single_dep})\n";
+                            $in_progress{$target} = "failed";
+                            $failed_targets{$target} = $failed_targets{$single_dep};
+                            splice(@job_queue, $i, 1);
+                            fail_dependent_composite_targets($target, $failed_targets{$single_dep});
+                            $order_only_failed = 1;
+                            last;
+                        }
+
+                        my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$job->{dir}/$single_dep";
+
+                        # Order-only dep is satisfied if:
+                        # 1. It exists as a file, OR
+                        # 2. It's marked as completed
+                        my $is_complete = exists $completed_targets{$single_dep} ||
+                                         exists $phony_ran_this_session{$single_dep} ||
+                                         -e $dep_path;
+
+                        # But NOT if it's currently being built
+                        if ($is_complete && exists $in_progress{$single_dep}) {
+                            my $status = $in_progress{$single_dep};
+                            if ($status && $status ne 'done' && $status ne 'failed') {
+                                $is_complete = 0;  # Still building
+                            }
+                        }
+
+                        unless ($is_complete) {
+                            print STDERR "DEBUG dispatch:   Order-only dep '$single_dep' not satisfied, skipping job '$target'\n" if $ENV{SMAK_DEBUG};
+                            $order_only_satisfied = 0;
+                            last;
+                        }
+                    }
+                    last if $order_only_failed;
+                    last unless $order_only_satisfied;
+                }
+                next if $order_only_failed;
+                unless ($order_only_satisfied) {
+                    # Order-only deps not ready - skip this job entirely for now
+                    $skipped_for_order_only++;
+                    next;
+                }
+
+                # Now check regular deps (order-only deps already verified above)
+                my @all_deps_to_check = @deps;
 
                 # Check if any dependency has failed - if so, fail this job too
                 my $has_failed_dep = 0;
@@ -10533,13 +10763,53 @@ sub run_job_master {
             if ($job_index < 0) {
                 # Restore worker to ready state since we didn't use it
                 $worker_status{$ready_worker}{ready} = 1;
-                if ($ENV{SMAK_DEBUG}) {
+
+                # Try to advance to next layer if current layer is complete
+                # Current layer is complete when: no queued jobs in this layer AND no running jobs in this layer
+                my $current_layer_queued = 0;
+                my $current_layer_running = 0;
+
+                for my $qjob (@job_queue) {
+                    my $jl = $qjob->{layer} // 0;
+                    if ($jl == $current_dispatch_layer) {
+                        $current_layer_queued++;
+                    }
+                }
+
+                for my $task_id (keys %running_jobs) {
+                    my $rj = $running_jobs{$task_id};
+                    if (defined $rj->{layer} && $rj->{layer} == $current_dispatch_layer) {
+                        $current_layer_running++;
+                    }
+                }
+
+                if ($current_layer_queued == 0 && $current_layer_running == 0 && $current_dispatch_layer < $max_dispatch_layer) {
+                    # Current layer fully complete - advance to next layer
+                    $current_dispatch_layer++;
+                    print STDERR "DEBUG: Layer complete, advancing to dispatch layer $current_dispatch_layer\n" if $ENV{SMAK_DEBUG};
+                    next;  # Retry with new layer
+                }
+
+                if ($current_layer_running > 0) {
+                    # Jobs still running in current layer - wait for them
+                    print STDERR "DEBUG: Layer $current_dispatch_layer has $current_layer_running running jobs, waiting\n" if $ENV{SMAK_DEBUG};
+                    last;  # Exit dispatch loop, will retry when jobs complete
+                }
+
+                # Determine why we couldn't dispatch - waiting for layer vs truly stuck
+                if ($skipped_for_order_only > 0 || $skipped_for_layer > 0) {
+                    # Not stuck - just waiting for earlier layers to complete
+                    print STDERR "DEBUG: Waiting for layer $current_dispatch_layer to drain " .
+                                 "($skipped_for_layer higher-layer, $skipped_for_order_only order-only skipped)\n" if $ENV{SMAK_DEBUG};
+                } elsif ($ENV{SMAK_DEBUG}) {
                     print STDERR "No jobs with satisfied dependencies (stuck!)\n";
+                    print STDERR "Current layer: $current_dispatch_layer, max layer: $max_dispatch_layer\n";
                     print STDERR "Job queue has " . scalar(@job_queue) . " jobs:\n";
                     my $max_show = @job_queue < 10 ? $#job_queue : 9;
                     for my $i (0 .. $max_show) {
                         my $job = $job_queue[$i];
-                        print STDERR "  [$i] $job->{target}\n";
+                        my $jl = $job->{layer} // 0;
+                        print STDERR "  [$i] $job->{target} (layer $jl)\n";
                     }
                     print STDERR "  ...\n" if @job_queue > 10;
                 }
@@ -10717,10 +10987,12 @@ sub run_job_master {
     my $idle_timeouts = 0;  # Count consecutive select timeouts with no activity
     my $max_exit_code = 0;  # Track highest exit code from all jobs
     my $idle_sent = 0;      # Track if we've sent IDLE (avoid flooding)
+    # Auto-rescan is now handled by the smak-scan background process
 
     while (1) {
         # Check if idle (nothing queued, nothing running)
-        my $is_idle = (@job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0);
+        # Note: pending_composite doesn't matter - if nothing queued/running, no progress possible
+        my $is_idle = (@job_queue == 0 && keys(%running_jobs) == 0);
 
         # If idle and master connected, send IDLE notification (only once per idle period)
         if ($is_idle && defined($master_socket) && !$idle_sent) {
@@ -10743,6 +11015,20 @@ sub run_job_master {
 
         # Reset idle_sent when we have work
         $idle_sent = 0 if !$is_idle;
+
+        # Diagnostic: detect "stuck" state - jobs queued but nothing running and can't dispatch
+        if (!$is_idle && keys(%running_jobs) == 0 && @job_queue > 0) {
+            our $stuck_warned;
+            if (!$stuck_warned && $ENV{SMAK_DEBUG}) {
+                print STDERR "WARNING: Jobs queued (" . scalar(@job_queue) . ") but nothing running\n";
+                print STDERR "  current_dispatch_layer=$current_dispatch_layer, max_dispatch_layer=$max_dispatch_layer\n";
+                for my $i (0 .. ($#job_queue < 5 ? $#job_queue : 4)) {
+                    my $j = $job_queue[$i];
+                    print STDERR "  [$i] $j->{target} (layer " . ($j->{layer} // '?') . ")\n";
+                }
+                $stuck_warned = 1;
+            }
+        }
 
         # If idle and master disconnected, exit
         if ($is_idle && !defined($master_socket)) {
@@ -10783,6 +11069,28 @@ sub run_job_master {
                 }
                 if ($ready_workers > 0) {
                     dispatch_jobs();
+                }
+
+                # After dispatch attempt: if nothing is running and we have ready workers,
+                # but jobs couldn't be dispatched, we're effectively idle (stuck or done)
+                # Recount ready workers after dispatch (some may have been assigned jobs)
+                $ready_workers = 0;
+                for my $w (@workers) {
+                    $ready_workers++ if $worker_status{$w}{ready};
+                }
+                if (keys(%running_jobs) == 0 && $ready_workers > 0 && !$idle_sent && $master_socket) {
+                    my $final_exit = $max_exit_code;
+                    if (!$final_exit && keys(%failed_targets)) {
+                        for my $t (keys %failed_targets) {
+                            $final_exit = $failed_targets{$t} if $failed_targets{$t} > $final_exit;
+                        }
+                        $final_exit ||= 1;
+                    }
+                    my $idle_time = Time::HiRes::time();
+                    print $master_socket "IDLE $final_exit $idle_time\n";
+                    $master_socket->flush();
+                    $idle_sent = 1;
+                    print STDERR "DEBUG: Sent IDLE - jobs queued but none dispatchable, nothing running\n" if $ENV{SMAK_DEBUG};
                 }
             }
 
@@ -11184,7 +11492,7 @@ sub run_job_master {
 
                         # Check if this was the last job - send IDLE immediately if so
                         # This ensures non-cli mode gets IDLE promptly after all work completes
-                        my $now_idle = (@job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0);
+                        my $now_idle = (@job_queue == 0 && keys(%running_jobs) == 0);
                         if ($now_idle && $master_socket && !$idle_sent) {
                             my $final_exit = $max_exit_code;
                             if (!$final_exit && keys(%failed_targets)) {
@@ -11223,59 +11531,8 @@ sub run_job_master {
                 }
             }
 
-            # Perform auto-rescan if enabled
-            if ($auto_rescan) {
-                my $stale_count = 0;
-                # Get makefile directory for relative path resolution
-                my $makefile_dir = $makefile;
-                $makefile_dir =~ s{/[^/]*$}{};  # Remove filename
-                $makefile_dir = '.' if $makefile_dir eq $makefile;  # No dir separator found
-
-                # Get list of phony targets to skip (they don't create files)
-                my $phony_key = "$makefile\t.PHONY";
-                my @phony_list = exists $pseudo_deps{$phony_key} ? @{$pseudo_deps{$phony_key}} : ();
-                my %is_phony = map { $_ => 1 } @phony_list;
-
-                for my $target (keys %completed_targets) {
-                    # Skip phony targets - they don't create files so shouldn't be checked
-                    # Check both explicit .PHONY declarations and auto-detected common phony targets
-                    next if exists $is_phony{$target};
-
-                    # Auto-detect common phony target names (same as in build logic)
-                    if ($target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
-                        next;  # Skip auto-detected phony targets
-                    }
-
-                    my $target_path = $target =~ m{^/} ? $target : "$makefile_dir/$target";
-
-                    # If target was deleted, mark as stale
-                    if (!-e $target_path) {
-                        delete $completed_targets{$target};
-                        delete $in_progress{$target};
-                        $stale_targets_cache{$target} = time();
-                        $stale_count++;
-                        print STDERR "Auto-rescan: marked stale (deleted) '$target'\n" if $ENV{SMAK_DEBUG};
-                        next;
-                    }
-
-                    # Check if existing target needs rebuilding
-                    if (needs_rebuild($target)) {
-                        delete $completed_targets{$target};
-                        delete $in_progress{$target};  # Also clear from in_progress
-                        $stale_targets_cache{$target} = time();
-                        $stale_count++;
-                        print STDERR "Auto-rescan: marked stale (modified) '$target'\n" if $ENV{SMAK_DEBUG};
-                    }
-                }
-                if ($stale_count > 0) {
-                    print STDERR "[auto-rescan] Found $stale_count stale target(s)\n" if $ENV{SMAK_DEBUG};
-                    # Send notification to CLI
-                    if ($master_socket) {
-                        print $master_socket "OUTPUT [auto-rescan] Found $stale_count stale target(s)\n";
-                    }
-                    dispatch_jobs();  # Try to dispatch new jobs for stale targets
-                }
-            }
+            # Auto-rescan is now handled by the smak-scan background process
+            # which sends events via scanner_socket using the FUSE protocol
         }
 
         # Reset timeout counter when we have activity
@@ -11334,6 +11591,77 @@ sub run_job_master {
                     shutdown_workers();
                     print $master_socket "SHUTDOWN_ACK\n";
                     exit 0;
+
+                } elsif ($line eq 'STATUS') {
+                    # Report job-master status for debugging
+                    my $queue_size = scalar(@job_queue);
+                    my $running_count = keys(%running_jobs);
+                    my $completed_count = keys(%completed_targets);
+                    my $failed_count = keys(%failed_targets);
+                    my $in_progress_count = keys(%in_progress);
+                    my $pending_composite_count = keys(%pending_composite);
+
+                    print $master_socket "STATUS_START\n";
+                    print $master_socket "=== Job-Master Status ===\n";
+                    print $master_socket "Queue: $queue_size jobs\n";
+                    print $master_socket "Running: $running_count jobs\n";
+                    print $master_socket "Completed: $completed_count targets\n";
+                    print $master_socket "Failed: $failed_count targets\n";
+                    print $master_socket "In-progress: $in_progress_count\n";
+                    print $master_socket "Pending composite: $pending_composite_count\n";
+
+                    # Show running job details
+                    if ($running_count > 0) {
+                        print $master_socket "Running jobs:\n";
+                        for my $task_id (sort { $a <=> $b } keys %running_jobs) {
+                            my $job = $running_jobs{$task_id};
+                            print $master_socket "  [$task_id] $job->{target}\n";
+                        }
+                    }
+
+                    # Show failed targets
+                    if ($failed_count > 0) {
+                        print $master_socket "Failed targets:\n";
+                        for my $target (sort keys %failed_targets) {
+                            print $master_socket "  $target (exit=$failed_targets{$target})\n";
+                        }
+                    }
+
+                    # Show worker status
+                    my $ready_workers = 0;
+                    my $busy_workers = 0;
+                    for my $w (@workers) {
+                        if ($worker_status{$w}{ready}) {
+                            $ready_workers++;
+                        } else {
+                            $busy_workers++;
+                        }
+                    }
+                    print $master_socket "Workers: $ready_workers ready, $busy_workers busy (total " . scalar(@workers) . ")\n";
+                    print $master_socket "Auto-rescan: " . ($auto_rescan ? "enabled" : "disabled") . "\n";
+
+                    # Show pending composite targets (blocking completion)
+                    if ($pending_composite_count > 0) {
+                        print $master_socket "Pending composite targets:\n";
+                        for my $target (sort keys %pending_composite) {
+                            my $comp = $pending_composite{$target};
+                            my $dep_count = scalar(@{$comp->{deps} || []});
+                            print $master_socket "  $target (waiting for $dep_count deps)\n";
+                            # Show first few pending deps
+                            my @deps = @{$comp->{deps} || []};
+                            my $max_show = $#deps < 4 ? $#deps : 4;
+                            for my $i (0 .. $max_show) {
+                                print $master_socket "    - $deps[$i]\n";
+                            }
+                            if (@deps > 5) {
+                                print $master_socket "    ... and " . (@deps - 5) . " more\n";
+                            }
+                        }
+                    }
+
+                    print $master_socket "=== End Status ===\n";
+                    print $master_socket "STATUS_END\n";
+                    $master_socket->flush();
 
                 } elsif ($line =~ /^CLI_OWNER (\d+)$/) {
                     # Update CLI owner in job master
@@ -12242,6 +12570,39 @@ sub run_job_master {
                     close($socket);
                     $select->remove($socket);
                     @observers = grep { $_ != $socket } @observers;
+                }
+
+            } elsif ($scanner_socket && $socket == $scanner_socket) {
+                # Scanner (smak-scan) event - same protocol as FUSE but with paths directly
+                my $line = <$socket>;
+                unless (defined $line) {
+                    # Scanner disconnected (normal at shutdown, only log in debug mode)
+                    print STDERR "Scanner disconnected\n" if $ENV{SMAK_DEBUG};
+                    $select->remove($scanner_socket);
+                    $scanner_socket = undef;
+                    next;
+                }
+                chomp $line;
+
+                # Parse scanner event: OP:PID:path
+                if ($line =~ /^(DELETE|CREATE|MODIFY):(\d+):(.+)$/) {
+                    my ($op, $pid, $path) = ($1, $2, $3);
+                    print STDERR "Scanner: $op $path\n" if $ENV{SMAK_DEBUG};
+
+                    # Get basename for matching
+                    my $basename = $path;
+                    $basename =~ s{^.*/}{};
+
+                    if ($op eq 'DELETE') {
+                        # File was deleted - mark as stale
+                        delete $completed_targets{$basename};
+                        delete $completed_targets{$path};
+                        delete $in_progress{$basename};
+                        delete $in_progress{$path};
+                        $stale_targets_cache{$basename} = time();
+                    }
+                    # CREATE and MODIFY are tracked but don't need special handling
+                    # (the file exists now, needs_rebuild check will happen at build time)
                 }
 
             } elsif ($fuse_socket && $socket == $fuse_socket) {

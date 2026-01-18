@@ -7,7 +7,7 @@ use Cwd 'abs_path';
 
 # Find the smak directory (where this script lives)
 my $script_dir = dirname(abs_path($0));
-my $cmake_link = "$script_dir/cmake";
+my $cmake_link = "$script_dir/cmake-install";
 my $cmake_bin = "$cmake_link/bin/cmake";
 
 # CMake version to download

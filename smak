@@ -54,7 +54,7 @@ while [ 0 != $# ] ; do
 		 cd $1
 	         if [ 0 != $? ] ; then exit 1 ; fi
 		 shift ;;
-	-attach|-man|-ps)
+	-attach|-cmake|-man|-ps)
 	         script=${script}$1 ; shift ;;
 	*)       break ;;
     esac

@@ -1,1 +1,1 @@
-cmake-3.31.4-linux-x86_64
+smak-cmake.pl

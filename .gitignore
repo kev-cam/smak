@@ -27,3 +27,7 @@ projects/nvc/thirdparty/
 
 # Test artifacts
 test/failures-*/
+
+# Downloaded cmake
+cmake
+cmake-*

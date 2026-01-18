@@ -6971,14 +6971,18 @@ sub cmd_deps {
 sub cmd_btree {
     my ($words, $socket) = @_;
 
+    my $target;
     if (@$words == 0) {
-        print "Usage: btree <target>\n";
-        print "  Shows the build tree organized by layers for the target.\n";
-        print "  Layer 0 builds first, higher layers depend on lower layers.\n";
-        return;
+        $target = get_default_target();
+        if (!defined $target) {
+            print "No default target defined.\n";
+            print "Usage: btree <target>\n";
+            return;
+        }
+        print "Using default target: $target\n";
+    } else {
+        $target = $words->[0];
     }
-
-    my $target = $words->[0];
 
     # Collect all targets and their dependencies (including order-only)
     my %all_targets;   # target => [deps]

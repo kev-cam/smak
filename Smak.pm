@@ -281,6 +281,7 @@ our $remote_cd = '';  # Remote directory for SSH workers
 our $job_server_socket;  # Socket to job-master
 our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
+our $project_root;  # Root directory of project (set by job-master at startup)
 
 # Output control
 our $stomp_prompt = "\r        \r";  # Clear spinner area (8 chars) before printing
@@ -434,18 +435,20 @@ sub submit_job {
 	return -1;
     }
 
-    if (my $prog = $in_progress{$target}) {
+    # Use dir-qualified key for in_progress tracking to handle same target name in different directories
+    my $progress_key = "$dir\t$target";
+    if (my $prog = $in_progress{$progress_key}) {
 	if ("queued" eq $prog) {
 	    dispatch_jobs(1);
-	    $prog = $in_progress{$target};
+	    $prog = $in_progress{$progress_key};
 	    return 1 if ("queued" ne $prog);
 	}
 	return 2;
     }
 
-    $in_progress{$target} = "queued";
+    $in_progress{$progress_key} = "queued";
 
-    warn "SUBMIT_JOB: target=$target, command=$command\n" if $ENV{SMAK_DEBUG};
+    warn "SUBMIT_JOB: target=$target, dir=$dir, command=$command\n" if $ENV{SMAK_DEBUG};
 
     # Send job to job-master via socket protocol
     print $job_server_socket "SUBMIT_JOB\n";
@@ -471,6 +474,22 @@ sub strip_command_prefixes {
     }
 
     return ($cmd, $silent, $ignore_errors);
+}
+
+# Compute full target path by combining prefix with target name
+# The prefix accumulates as we recurse into subdirectories
+# Example: prefix="ivlpp", target="lexor.o" => "ivlpp/lexor.o"
+sub target_with_prefix {
+    my ($target, $prefix) = @_;
+
+    # If target is already an absolute path, return as-is
+    return $target if $target =~ m{^/};
+
+    # If no prefix, return target as-is
+    return $target unless defined $prefix && $prefix ne '';
+
+    # Combine prefix with target
+    return "$prefix/$target";
 }
 
 # Check if a command should be handled as a built-in (fast in-process execution)
@@ -951,12 +970,8 @@ sub execute_command_sequential {
     # Strip command prefixes (@ for silent, - for ignore errors)
     my ($clean_command, $cmd_silent, $ignore_errors) = strip_command_prefixes($command);
 
-    # In dry-run mode, just print the command without executing it
-    # Note: In dry-run mode, @ prefix is ignored - all commands are shown (like make -n)
+    # In dry-run mode, skip execution - caller (build_target) already printed the command
     if ($dry_run_mode) {
-        unless ($silent_mode) {
-            print "$clean_command\n";
-        }
         chdir($old_dir) if $old_dir;
         return 0;
     }
@@ -1794,7 +1809,9 @@ sub parse_makefile {
             if ($line =~ /^\t/ && !@current_targets) {
                 # Recipe line but no target - skip
             } elsif ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
-                # New rule while skipping - clear current targets
+                # New target definition while skipping - SAVE current rule first, then clear
+                # This prevents losing rules defined before the inactive conditional
+                $save_current_rule->() if @current_targets;
                 @current_targets = ();
                 @current_suffix_targets = ();
                 $current_rule = '';
@@ -4069,8 +4086,11 @@ sub build_target {
         return;
     }
 
-    # Track visited targets per makefile to handle same target names in different makefiles
-    my $visit_key = "$makefile\t$target";
+    # Track visited targets per makefile AND directory to handle same target names in different directories
+    # Using cwd in the key ensures that "Makefile\tall" in the root is different from "Makefile\tall" in subdirs
+    use Cwd 'getcwd';
+    my $cwd_for_visit = getcwd();
+    my $visit_key = "$cwd_for_visit\t$makefile\t$target";
     return if $visited->{$visit_key};
     $visited->{$visit_key} = 1;
 
@@ -4660,10 +4680,14 @@ sub build_target {
     }
 
     # Recursively build dependencies
-    # In parallel mode, skip this - let job-master handle dependency expansion
+    # In parallel mode (non-dry-run), skip this - let job-master handle dependency expansion
+    # In dry-run mode, always expand locally to print all commands
     warn "DEBUG[" . __LINE__ . "]:   Checking job_server_socket: " . (defined $job_server_socket ? "SET (fd=" . fileno($job_server_socket) . ")" : "NOT SET") . "\n" if $ENV{SMAK_DEBUG};
-    unless ($job_server_socket) {
-        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies sequentially (no job server)...\n" if $ENV{SMAK_DEBUG};
+    if (!$job_server_socket || $dry_run_mode) {
+        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies" . ($dry_run_mode ? " (dry-run mode)" : " sequentially (no job server)") . "...\n" if $ENV{SMAK_DEBUG};
+        # In dry-run mode, temporarily disable job server for recursive builds
+        # This ensures commands are printed locally, not submitted to job-server
+        local $job_server_socket = $dry_run_mode ? undef : $job_server_socket;
         for my $dep (@deps) {
             warn "DEBUG[" . __LINE__ . "]:     Building dependency: $dep\n" if $ENV{SMAK_DEBUG};
             build_target($dep, $visited, $depth + 1);
@@ -4805,7 +4829,11 @@ sub build_target {
             # This MUST come before the simple rm check below, otherwise compound commands
             # starting with rm will be caught by the simple rm handler
             # Split and execute each as a built-in (rm, make/smak, etc.)
-            if ($clean_cmd =~ /&&/) {
+            # NOTE: Handle in-process when:
+            # - There's NO job server (sequential mode), OR
+            # - In dry-run mode (need to expand all commands for printing)
+            # Otherwise let the job-server handle compound commands (parallel mode)
+            if (($dry_run_mode || !$job_server_socket) && $clean_cmd =~ /&&/) {
                 warn "DEBUG[" . __LINE__ . "]: Found compound command: $clean_cmd\n" if $ENV{SMAK_DEBUG};
                 # Split on && and check if we can handle all parts as built-ins
                 my @parts = split(/\s+&&\s+/, $clean_cmd);
@@ -4870,6 +4898,12 @@ sub build_target {
                             my $saved_cwd = $sub_directory ? getcwd() : undef;
                             my $saved_makefile = $makefile;
 
+                            # In dry-run mode, temporarily disable job server for in-process recursive builds
+                            # This ensures commands are printed locally, not skipped for job-master
+                            # In normal build mode, keep job server enabled for parallelism
+                            my $saved_job_server_socket = $job_server_socket;
+                            local $job_server_socket = $dry_run_mode ? undef : $job_server_socket;
+
                             # Save and set command-line variable assignments
                             my %saved_vars;
                             if ($sub_vars_ref && %$sub_vars_ref) {
@@ -4887,10 +4921,14 @@ sub build_target {
                                 };
                             }
 
-                            # Set makefile
+                            # Set makefile to full path to avoid key collisions between directories
+                            my $new_cwd = getcwd();
                             $makefile = $sub_makefile || 'Makefile';
+                            my $full_makefile = "$new_cwd/$makefile";
+                            $full_makefile =~ s{//+}{/}g;  # Clean up double slashes
+                            $makefile = $full_makefile;
 
-                            # Parse makefile if needed
+                            # Parse makefile if needed - use full path to avoid collisions
                             my $test_key = "$makefile\t" . ($sub_targets[0] || 'all');
                             unless (exists $fixed_deps{$test_key} || exists $pattern_deps{$test_key} || exists $pseudo_deps{$test_key}) {
                                 eval { parse_makefile($makefile); };
@@ -4960,6 +4998,13 @@ sub build_target {
                 my ($sub_makefile, $sub_directory, $sub_vars_ref, @sub_targets) = parse_make_command($normalized_cmd);
 
                 warn "DEBUG[" . __LINE__ . "]: Parsed makefile='$sub_makefile' directory='$sub_directory' targets=(" . join(',', @sub_targets) . ")\n" if $ENV{SMAK_DEBUG};
+
+                # If parse returned nothing useful (e.g., compound command like "smak -C a && smak -C b"),
+                # fall through to external command execution - let the shell handle it
+                if (!$sub_makefile && !$sub_directory && !@sub_targets) {
+                    warn "DEBUG[" . __LINE__ . "]: Parse returned nothing - falling through to external execution\n" if $ENV{SMAK_DEBUG};
+                    goto EXECUTE_EXTERNAL_COMMAND;
+                }
 
                 # Handle -C directory option
                 my $saved_cwd;
@@ -5095,17 +5140,19 @@ sub build_target {
             } else {
                 warn "DEBUG[" . __LINE__ . "]:     Sequential execution (job_server_socket=" . (defined $job_server_socket ? "defined" : "undef") . ", jobs=$jobs, dry_run=$dry_run_mode, builtin=$use_builtin)\n" if $ENV{SMAK_DEBUG};
                 # Sequential mode or built-in command - echo command here, then execute directly
-                # In dry-run mode, skip printing here since the dummy worker will print it
-                unless ($silent_mode || $silent || $dry_run_mode) {
+                # In dry-run mode without job server, we must print here since there's no dummy worker
+                # In dry-run mode, always print (like make -n) - ignore @ prefix
+                unless ($silent_mode || (!$dry_run_mode && $silent)) {
                     print "$display_cmd\n";
                 }
                 execute_command_sequential($target, $cmd_line, $cwd);
                 warn "DEBUG[" . __LINE__ . "]:     Command completed\n" if $ENV{SMAK_DEBUG};
             }
         }
-    } elsif ($job_server_socket && @deps > 0) {
+    } elsif ($job_server_socket && @deps > 0 && !$dry_run_mode) {
         # In parallel mode with no rule but has dependencies
         # Submit to job-master for dependency expansion
+        # (Skip in dry-run mode - we already printed all commands recursively)
         use Cwd 'getcwd';
         my $cwd = getcwd();
         warn "DEBUG: Submitting composite target '$target' to job-master\n" if $ENV{SMAK_DEBUG};
@@ -5421,9 +5468,38 @@ sub dry_run_target {
                     $line =~ s/^\s+//;  # Remove leading whitespace temporarily
                 }
                 my ($clean_line, $silent, $ignore_errors) = strip_command_prefixes($line);
-                # In dry-run mode, show all commands even if marked silent
-                # (unlike real execution where @ suppresses output)
-                print $leading_space, $clean_line, "\n";
+
+                # Check if this line contains recursive smak/make -C calls
+                # If so, execute them with -n to show what they would do (like make does)
+                if ($clean_line =~ m{\b(?:smak|make)\s.*-C\s+\S+}) {
+                    # Split on && to handle compound commands
+                    my @parts = split(/\s+&&\s+/, $clean_line);
+                    for my $part (@parts) {
+                        $part =~ s/^\s+|\s+$//g;
+                        next if $part eq 'true' || $part eq ':' || $part eq '';
+
+                        if ($part =~ m{^(.*?\b(?:smak|make))\s+(.*-C\s+(\S+).*)$}) {
+                            my $cmd = $1;
+                            my $args = $2;
+                            my $dir = $3;
+
+                            # Add -n flag for dry-run if not already present
+                            $args = "-n $args" unless $args =~ /(?:^|\s)-n(?:\s|$)/;
+
+                            # Execute the recursive call and show its output
+                            my $full_cmd = "$cmd $args 2>&1";
+                            warn "DEBUG: Recursive dry-run: $full_cmd\n" if $ENV{SMAK_DEBUG};
+                            my $output = `$full_cmd`;
+                            print $output if defined $output;
+                        } else {
+                            # Not a recursive make, just print it
+                            print $leading_space, $part, "\n";
+                        }
+                    }
+                } else {
+                    # Regular command, just print it
+                    print $leading_space, $clean_line, "\n";
+                }
             } else {
                 print $line, "\n";
             }
@@ -8564,7 +8640,11 @@ sub run_job_master {
     use IO::Socket::INET;
     use IO::Select;
     use POSIX qw(:sys_wait_h);
-    use Cwd 'abs_path';
+    use Cwd qw(abs_path getcwd);
+
+    # Set project root to current directory at job-master startup
+    # All target paths will be computed relative to this
+    $project_root = getcwd();
 
     # Job-master should ignore SIGINT (Ctrl-C)
     # The CLI process handles cancellation - job-master should keep running
@@ -8963,6 +9043,47 @@ sub run_job_master {
         return join(" && ", @processed);
     }
 
+    # Split a command string into external commands and trailing builtins
+    # Returns (external_parts_arrayref, trailing_builtins_arrayref)
+    sub split_command_parts {
+        my ($command) = @_;
+        return ([], []) unless defined $command && $command =~ /\S/;
+
+        my @cmd_parts = split(/\s*&&\s*/, $command);
+        my @external_parts;
+        my @trailing_builtins;
+        my $in_trailing_builtins = 0;
+
+        # Scan from the end to find trailing built-in commands
+        for my $i (reverse 0 .. $#cmd_parts) {
+            my $part = $cmd_parts[$i];
+            $part =~ s/^\s+|\s+$//g;
+            my $clean_part = $part;
+            $clean_part =~ s/^[@-]+//;  # Strip prefixes for checking
+
+            # Check if it's a built-in command
+            if ($clean_part =~ /^\s*(rm|mkdir|mv|cp|echo|true|false|cd|:|touch)\b/) {
+                if (!$in_trailing_builtins && $i == $#cmd_parts) {
+                    # Found trailing built-in
+                    unshift @trailing_builtins, $part;
+                    $in_trailing_builtins = 1;
+                } elsif ($in_trailing_builtins) {
+                    # Continue collecting trailing built-ins
+                    unshift @trailing_builtins, $part;
+                } else {
+                    # Built-in in the middle, can't optimize
+                    unshift @external_parts, $part;
+                }
+            } else {
+                # Non-builtin command
+                $in_trailing_builtins = 0;  # Stop collecting trailing builtins
+                unshift @external_parts, $part;
+            }
+        }
+
+        return (\@external_parts, \@trailing_builtins);
+    }
+
     sub expand_job_command {
         my ($cmd, $target, $deps_ref) = @_;
         return '' unless defined $cmd && $cmd =~ /\S/;
@@ -9117,8 +9238,19 @@ sub run_job_master {
 
     # Verify that a target file actually exists on disk
     # Retries with fsync if needed to handle filesystem buffering delays
+    # Handles compound targets (e.g., "parse.cc&parse.h") by checking all parts
     sub verify_target_exists {
         my ($target, $dir) = @_;
+
+        # Handle compound targets (multi-output pattern rules)
+        # A compound target like "parse.cc&parse.h" means both files must exist
+        if ($target =~ /&/) {
+            my @parts = split(/&/, $target);
+            for my $part (@parts) {
+                return 0 unless verify_target_exists($part, $dir);
+            }
+            return 1;
+        }
 
         # Construct full path
         my $target_path = $dir ? "$dir/$target" : $target;
@@ -9213,8 +9345,12 @@ sub run_job_master {
     our @recurse_log; # for debug
     our $recurse_limit = 20;
     sub queue_target_recursive {
-        my ($target, $dir, $msocket, $depth) = @_;
+        my ($target, $dir, $msocket, $depth, $prefix) = @_;
         $msocket ||= $master_socket;  # Use provided or fall back to global
+        $prefix //= '';  # Path prefix from project root (e.g., "ivlpp" for targets in ivlpp/)
+
+        # Compute full target path for storage/tracking
+        my $full_target = target_with_prefix($target, $prefix);
 
         # FIRST: Skip source control files entirely (prevents infinite recursion)
         # Check for ,v suffix (RCS) or other source control patterns
@@ -9237,18 +9373,18 @@ sub run_job_master {
             return;
         }
 
-        # Skip if already handled
-        return if is_target_pending($target);
+        # Skip if already handled (use full_target for tracking)
+        return if is_target_pending($full_target);
 
         # Check if target is assumed (marked as already built)
-        if (exists $assumed_targets{$target}) {
-            $completed_targets{$target} = 1;
-            $in_progress{$target} = "done";
-            warn "Target '$target' is assumed (marked as already built), skipping\n" if $ENV{SMAK_DEBUG};
+        if (exists $assumed_targets{$full_target}) {
+            $completed_targets{$full_target} = 1;
+            $in_progress{$full_target} = "done";
+            warn "Target '$full_target' is assumed (marked as already built), skipping\n" if $ENV{SMAK_DEBUG};
             return;
         }
 
-	$recurse_log[$depth] = "${dir}:$target";
+	$recurse_log[$depth] = "${dir}:$full_target";
 	
         # Lookup dependencies
         my $key = "$makefile\t$target";
@@ -9516,6 +9652,8 @@ sub run_job_master {
                     push @all_single_deps, split /\s+/, $dep;
                 }
                 @all_single_deps = grep { /\S/ } @all_single_deps;
+                # Apply prefix to deps for tracking
+                my @full_single_deps = map { target_with_prefix($_, $prefix) } @all_single_deps;
                 # Filter out deps that are already tracked as complete/failed
                 # NOTE: Don't filter based on file existence - needs_rebuild check happens later
                 my @pending_deps = grep {
@@ -9525,14 +9663,14 @@ sub run_job_master {
                     !(exists $completed_targets{$dep} ||
                       exists $phony_ran_this_session{$dep} ||
                       exists $failed_targets{$dep})
-                } @all_single_deps;
+                } @full_single_deps;
                 if (@pending_deps) {
-                    $in_progress{$target} = "pending";
-                    $pending_composite{$target} = {
+                    $in_progress{$full_target} = "pending";
+                    $pending_composite{$full_target} = {
                         deps => \@pending_deps,
                         master_socket => $msocket,
                     };
-                    print STDERR "Pre-registering composite target '$target' with " . scalar(@pending_deps) . " pending deps\n" if $ENV{SMAK_DEBUG};
+                    print STDERR "Pre-registering composite target '$full_target' with " . scalar(@pending_deps) . " pending deps\n" if $ENV{SMAK_DEBUG};
                 }
                 # If no pending deps, continue to process - deps may still need building
             }
@@ -9592,8 +9730,9 @@ sub run_job_master {
 
                     # Only mark complete if no implicit rule - it's a pure source file
                     if (!$has_implicit_rule) {
-                        $completed_targets{$single_dep} = 1;
-                        print STDERR "Dependency '$single_dep' exists at '$dep_path', no rules, marking complete\n" if $ENV{SMAK_DEBUG};
+                        my $full_dep = target_with_prefix($single_dep, $prefix);
+                        $completed_targets{$full_dep} = 1;
+                        print STDERR "Dependency '$full_dep' exists at '$dep_path', no rules, marking complete\n" if $ENV{SMAK_DEBUG};
                         next;
                     }
                     # Otherwise fall through to recurse and check needs_rebuild
@@ -9608,7 +9747,7 @@ sub run_job_master {
 		    }
 		    return;
 		} else {
-		    queue_target_recursive($single_dep, $dir, $msocket, $depth+1);
+		    queue_target_recursive($single_dep, $dir, $msocket, $depth+1, $prefix);
 		}
             }
         }
@@ -9661,8 +9800,9 @@ sub run_job_master {
                     }
 
                     if (!$has_implicit_rule) {
-                        $completed_targets{$single_dep} = 1;
-                        print STDERR "Order-only dep '$single_dep' exists at '$dep_path', no rules, marking complete\n" if $ENV{SMAK_DEBUG};
+                        my $full_dep = target_with_prefix($single_dep, $prefix);
+                        $completed_targets{$full_dep} = 1;
+                        print STDERR "Order-only dep '$full_dep' exists at '$dep_path', no rules, marking complete\n" if $ENV{SMAK_DEBUG};
                         next;
                     }
                 }
@@ -9671,7 +9811,7 @@ sub run_job_master {
                     warn "Recursion queuing order-only ${dir}:$single_dep\n";
                     return;
                 } else {
-                    queue_target_recursive($single_dep, $dir, $msocket, $depth+1);
+                    queue_target_recursive($single_dep, $dir, $msocket, $depth+1, $prefix);
                 }
             }
         }
@@ -9698,8 +9838,8 @@ sub run_job_master {
                     # Target exists - check if it needs rebuilding
                     $needs_build = needs_rebuild($target);
                     if ($needs_build) {
-                        $stale_targets_cache{$target} = time();
-                        warn "Target '$target' needs rebuilding\n" if $ENV{SMAK_DEBUG};
+                        $stale_targets_cache{$full_target} = time();
+                        warn "Target '$full_target' needs rebuilding\n" if $ENV{SMAK_DEBUG};
                     } else {
                         # Target is up-to-date
                         warn "Target '$target' is up-to-date, checking for missing intermediates...\n" if $ENV{SMAK_DEBUG};
@@ -9724,14 +9864,14 @@ sub run_job_master {
                                         warn "smak: Rebuilding missing intermediate '$dep' (even though '$target' is up-to-date)\n";
                                         $has_missing_intermediates = 1;
                                         # Queue the missing intermediate for building
-                                        queue_target_recursive($dep, $dir, $msocket, $depth + 1);
+                                        queue_target_recursive($dep, $dir, $msocket, $depth + 1, $prefix);
                                     }
                                 }
                             }
 
                             # If we queued missing intermediates, don't mark target as complete yet
                             if ($has_missing_intermediates) {
-                                $in_progress{$target} = "pending";
+                                $in_progress{$full_target} = "pending";
                                 return;
                             }
                         } else {
@@ -9753,17 +9893,17 @@ sub run_job_master {
                         }
 
                         # Mark target as complete and done
-                        $completed_targets{$target} = 1;
-                        $in_progress{$target} = "done";
-                        warn "Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
-                        delete $stale_targets_cache{$target} if exists $stale_targets_cache{$target};
+                        $completed_targets{$full_target} = 1;
+                        $in_progress{$full_target} = "done";
+                        warn "Target '$full_target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
+                        delete $stale_targets_cache{$full_target} if exists $stale_targets_cache{$full_target};
                         return;
                     }
                 } else {
                     # Target doesn't exist - needs building
                     $needs_build = 1;
-                    $stale_targets_cache{$target} = time();
-                    warn "Target '$target' doesn't exist, needs building\n" if $ENV{SMAK_DEBUG};
+                    $stale_targets_cache{$full_target} = time();
+                    warn "Target '$full_target' doesn't exist, needs building\n" if $ENV{SMAK_DEBUG};
                 }
             }
 
@@ -9792,8 +9932,10 @@ sub run_job_master {
             my $processed_rule = process_command($expanded_rule);
 
             # Handle multi-output pattern rules (e.g., parse%cc parse%h: parse%y)
-            # If this target is part of a multi-output group, check if a sibling is already being built
+            # Create a compound pseudo-target (e.g., "parse.cc&parse.h") that holds the build command.
+            # Individual targets depend on the compound target.
             my @sibling_targets;
+            my $compound_target;
             if ($matched_pattern_key) {
                 # matched_pattern_key should be set when we matched a pattern rule
                 # Extract just the pattern part (after the tab)
@@ -9805,22 +9947,35 @@ sub run_job_master {
                     @sibling_targets = map { my $s = $_; $s =~ s/%/$stem/g; $s } @{$multi_output_siblings{$target_key}};
                     warn "DEBUG: Multi-output target '$target' has siblings: @sibling_targets\n" if $ENV{SMAK_DEBUG};
 
-                    # Check if any sibling is already queued or in progress
-                    my $sibling_building = '';
-                    for my $sibling (@sibling_targets) {
-                        if ($sibling ne $target && exists $in_progress{$sibling} && $in_progress{$sibling} ne "done") {
-                            $sibling_building = $sibling;
-                            last;
+                    # Create compound target name from all siblings (sorted for consistency)
+                    my @full_siblings = map { target_with_prefix($_, $prefix) } sort @sibling_targets;
+                    $compound_target = join('&', @full_siblings);
+
+                    # Check if compound target is already queued or in progress
+                    if (exists $in_progress{$compound_target}) {
+                        my $status = $in_progress{$compound_target};
+                        if ($status eq "done") {
+                            # Compound already completed - mark this individual target as done
+                            $completed_targets{$full_target} = 1;
+                            $in_progress{$full_target} = "done";
+                            warn "DEBUG: Target '$full_target' already built via compound '$compound_target'\n" if $ENV{SMAK_DEBUG};
+                            return;
+                        } else {
+                            # Compound is building - mark this target as depending on it
+                            $in_progress{$full_target} = "compound:$compound_target";
+                            warn "DEBUG: Target '$full_target' waiting for compound '$compound_target'\n" if $ENV{SMAK_DEBUG};
+                            return;
                         }
                     }
 
-                    if ($sibling_building) {
-                        # A sibling is already being built - don't queue duplicate job
-                        # Mark this target as waiting for its sibling
-                        $in_progress{$target} = "sibling:$sibling_building";
-                        warn "DEBUG: Target '$target' waiting for sibling '$sibling_building' to complete\n" if $ENV{SMAK_DEBUG};
-                        return;
+                    # Register all individual targets as depending on the compound
+                    for my $full_sibling (@full_siblings) {
+                        next if $full_sibling eq $full_target;
+                        $in_progress{$full_sibling} = "compound:$compound_target";
                     }
+
+                    # Use compound target for the job instead of individual target
+                    $full_target = $compound_target;
                 }
             }
 
@@ -9842,48 +9997,57 @@ sub run_job_master {
                 }
             }
 
+            # Split command into external parts and trailing builtins for efficient execution
+            my ($external_parts, $trailing_builtins) = split_command_parts($processed_rule);
+
             my $job = {
-                target => $target,
+                target => $full_target,  # Use full path from project root
                 dir => $dir,
-                command => $processed_rule,
+                command => $processed_rule,  # Keep original for display
+                external_commands => $external_parts,  # Commands needing external execution
+                trailing_builtins => $trailing_builtins,  # Builtins to run after externals
                 silent => $any_silent,  # Track if any command has @ prefix
-                siblings => [@sibling_targets],  # Track siblings that will also be created
+                siblings => [map { target_with_prefix($_, $prefix) } @sibling_targets],  # Track siblings with full paths
                 layer => $layer,  # Store layer for reference
+                deps => [map { target_with_prefix($_, $prefix) } @deps],  # Store deps for dispatch lookup (compound targets)
+                order_only_deps => [map { target_with_prefix($_, $prefix) } @order_only_deps],  # Store order-only deps
             };
             add_job_to_layer($job, $layer);
-            $in_progress{$target} = "queued";
+            $in_progress{$full_target} = "queued";
             # Mark all siblings as queued too (they'll be created by the same command)
             for my $sibling (@sibling_targets) {
-                if ($sibling ne $target) {
-                    $in_progress{$sibling} = "sibling:$target";
+                my $full_sibling = target_with_prefix($sibling, $prefix);
+                if ($full_sibling ne $full_target) {
+                    $in_progress{$full_sibling} = "sibling:$full_target";
                 }
             }
-            vprint "Queued target: $target" . (@sibling_targets > 1 ? " (with siblings: " . join(", ", grep { $_ ne $target } @sibling_targets) . ")" : "") . "\n";
+            vprint "Queued target: $full_target" . (@sibling_targets > 1 ? " (with siblings: " . join(", ", grep { $_ ne $target } @sibling_targets) . ")" : "") . "\n";
         } elsif (@deps > 0) {
             # Composite target or target with dependencies but no rule
             if ($ENV{SMAK_DEBUG}) {
-                print STDERR "Target '$target' has " . scalar(@deps) . " dependencies but no rule\n";
+                print STDERR "Target '$full_target' has " . scalar(@deps) . " dependencies but no rule\n";
                 print STDERR "  Dependencies: " . join(", ", @deps) . "\n";
             }
             # If file exists (relative to working directory), consider it satisfied
             my $target_path = $target =~ m{^/} ? $target : "$dir/$target";
             if (-e $target_path) {
-                $completed_targets{$target} = 1;
-                $in_progress{$target} = "done";
-                print STDERR "Target '$target' exists at '$target_path', marking complete (no rule found)\n" if $ENV{SMAK_DEBUG};
+                $completed_targets{$full_target} = 1;
+                $in_progress{$full_target} = "done";
+                print STDERR "Target '$full_target' exists at '$target_path', marking complete (no rule found)\n" if $ENV{SMAK_DEBUG};
             } else {
                 # Update or finalize composite target registration
                 # Check if any dependencies failed during recursive queuing
-                my @failed_deps = grep { exists $failed_targets{$_} } @deps;
+                my @full_deps = map { target_with_prefix($_, $prefix) } @deps;
+                my @failed_deps = grep { exists $failed_targets{$_} } @full_deps;
                 if (@failed_deps) {
                     # One or more dependencies failed - this should have been caught already
                     # but handle it here as a safety net
-                    if (exists $pending_composite{$target}) {
-                        delete $pending_composite{$target};
+                    if (exists $pending_composite{$full_target}) {
+                        delete $pending_composite{$full_target};
                     }
-                    $in_progress{$target} = "failed";
-                    $failed_targets{$target} = $failed_targets{$failed_deps[0]};
-                    print STDERR "Composite target '$target' FAILED due to failed dependency '$failed_deps[0]'\n";
+                    $in_progress{$full_target} = "failed";
+                    $failed_targets{$full_target} = $failed_targets{$failed_deps[0]};
+                    print STDERR "Composite target '$full_target' FAILED due to failed dependency '$failed_deps[0]'\n";
 		    reprompt();
                 } else {
                     # Split each dep on whitespace first (variables may expand to multiple targets)
@@ -9892,24 +10056,26 @@ sub run_job_master {
                         push @all_single_deps, split /\s+/, $dep;
                     }
                     @all_single_deps = grep { /\S/ } @all_single_deps;
-                    my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} } @all_single_deps;
+                    # Apply prefix to deps for tracking
+                    my @full_single_deps = map { target_with_prefix($_, $prefix) } @all_single_deps;
+                    my @pending_deps = grep { !exists $completed_targets{$_} && !exists $phony_ran_this_session{$_} } @full_single_deps;
                     if (@pending_deps) {
                         # Update the composite target (may have been pre-registered)
-                        $in_progress{$target} = "pending";
-                        $pending_composite{$target} = {
+                        $in_progress{$full_target} = "pending";
+                        $pending_composite{$full_target} = {
                             deps => \@pending_deps,
                             master_socket => $msocket,
                         };
-                        vprint "Composite target $target waiting for " . scalar(@pending_deps) . " dependencies\n";
+                        vprint "Composite target $full_target waiting for " . scalar(@pending_deps) . " dependencies\n";
                         print STDERR "  Pending: " . join(", ", @pending_deps) . "\n" if $ENV{SMAK_DEBUG};
                     } else {
                         # All deps already complete
-                        if (exists $pending_composite{$target}) {
-                            delete $pending_composite{$target};
+                        if (exists $pending_composite{$full_target}) {
+                            delete $pending_composite{$full_target};
                         }
-                        $completed_targets{$target} = 1;
-                        $in_progress{$target} = "done";
-                        print $msocket "JOB_COMPLETE $target 0\n" if $msocket;
+                        $completed_targets{$full_target} = 1;
+                        $in_progress{$full_target} = "done";
+                        print $msocket "JOB_COMPLETE $full_target 0\n" if $msocket;
                     }
                 }
             }
@@ -9917,15 +10083,15 @@ sub run_job_master {
             # No command and no deps - check if file exists
             my $target_path = $target =~ m{^/} ? $target : "$dir/$target";
             if (-e $target_path) {
-                $completed_targets{$target} = 1;
-                $in_progress{$target} = "done";
-                print STDERR "Target '$target' exists at '$target_path', marking complete (no rule or deps)\n" if $ENV{SMAK_DEBUG};
+                $completed_targets{$full_target} = 1;
+                $in_progress{$full_target} = "done";
+                print STDERR "Target '$full_target' exists at '$target_path', marking complete (no rule or deps)\n" if $ENV{SMAK_DEBUG};
             } else {
                 # Target doesn't exist and has no rule to build it
                 # Like make, assume it exists (e.g., source files, .git metadata, etc.)
-                $completed_targets{$target} = 1;
-                $in_progress{$target} = "done";
-                print STDERR "No rule for target '$target', assuming it exists\n" if $ENV{SMAK_DEBUG};
+                $completed_targets{$full_target} = 1;
+                $in_progress{$full_target} = "done";
+                print STDERR "No rule for target '$full_target', assuming it exists\n" if $ENV{SMAK_DEBUG};
             }
         }
     }
@@ -10019,14 +10185,25 @@ sub run_job_master {
 	        }
 	        @job_queue = @remaining_jobs;
 
-	        # If we failed some jobs, try dispatch again
+	        # If we failed some jobs, report it
 	        if ($failed_count > 0) {
 	            vprint "Deadlock recovery: failed $failed_count jobs with failed dependencies\n";
-	            dispatch_jobs() if @job_queue > 0;
+	        }
+
+	        # Always try to dispatch before concluding deadlock
+	        # This handles the race condition where workers just became ready
+	        if (@job_queue > 0) {
+	            dispatch_jobs();
+	        }
+
+	        # Recount ready workers after dispatch attempt
+	        $ready_workers = 0;
+	        for my $w (@workers) {
+	            $ready_workers++ if $worker_status{$w}{ready};
 	        }
 
 	        # If still stuck with jobs, that's a real deadlock
-	        if (@job_queue > 0 && scalar(keys %running_jobs) == 0) {
+	        if (@job_queue > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0) {
 	            assert_or_die(0,
 	                "Deadlock detected in $label: " . scalar(@job_queue) . " jobs queued, " .
 	                "$ready_workers workers ready, but nothing running. " .
@@ -10248,10 +10425,24 @@ sub run_job_master {
             layer => $job->{layer} // 0,
         };
 
-        # Send task to worker
+        # Send task to worker with split commands for efficient execution
         print $worker "TASK $task_id\n";
         print $worker "DIR $job->{dir}\n";
-        print $worker "CMD $job->{command}\n";
+
+        # Send external commands (each executed directly without shell)
+        my @ext_cmds = $job->{external_commands} ? @{$job->{external_commands}} : ();
+        my @builtins = $job->{trailing_builtins} ? @{$job->{trailing_builtins}} : ();
+
+        print $worker "EXTERNAL_CMDS " . scalar(@ext_cmds) . "\n";
+        for my $cmd (@ext_cmds) {
+            print $worker "$cmd\n";
+        }
+
+        print $worker "TRAILING_BUILTINS " . scalar(@builtins) . "\n";
+        for my $cmd (@builtins) {
+            print $worker "$cmd\n";
+        }
+
         $worker->flush();
 
         vprint "Dispatched task $task_id: $target (layer " . ($job->{layer} // 0) . ")\n";
@@ -10380,7 +10571,12 @@ sub run_job_master {
                 my @deps;
                 my $stem;  # For pattern expansion
                 my $has_explicit_rule = 0;  # Track if target has explicit rule (don't apply pattern rules)
-                if (exists $fixed_deps{$key}) {
+
+                # FIRST: Check if the job has stored deps (set during queueing, required for compound targets)
+                if ($job->{deps} && @{$job->{deps}}) {
+                    @deps = @{$job->{deps}};
+                    print STDERR "DEBUG dispatch: Using stored deps for '$target': [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                } elsif (exists $fixed_deps{$key}) {
                     @deps = @{$fixed_deps{$key} || []};
                     # Check if there's an explicit rule for this target
                     $has_explicit_rule = exists $fixed_rule{$key} && $fixed_rule{$key} =~ /\S/;
@@ -10471,28 +10667,35 @@ sub run_job_master {
                 # Also check order-only prerequisites (specified after | in makefile rules)
                 # These must be built before the target can run, but don't affect rebuild decisions
                 my @order_only_deps;
-                if (exists $fixed_order_only{$key}) {
-                    push @order_only_deps, @{$fixed_order_only{$key}};
-                    print STDERR "DEBUG dispatch: Found order-only for key '$key': " . join(", ", @order_only_deps) . "\n" if $ENV{SMAK_DEBUG};
-                } elsif ($target =~ /STD\.STANDARD/) {
-                    # Debug: show all keys that might match for STD.STANDARD
-                    print STDERR "DEBUG dispatch: No order-only for key '$key', checking available keys...\n" if $ENV{SMAK_DEBUG};
-                    for my $k (keys %fixed_order_only) {
-                        print STDERR "DEBUG dispatch:   available key: '$k' => " . join(", ", @{$fixed_order_only{$k}}) . "\n" if $ENV{SMAK_DEBUG};
-                    }
-                }
-                if (exists $pattern_order_only{$key}) {
-                    my $oo_ref = $pattern_order_only{$key};
-                    if (ref($oo_ref) eq 'ARRAY') {
-                        if (@$oo_ref && ref($oo_ref->[0]) eq 'ARRAY') {
-                            push @order_only_deps, @{$oo_ref->[0]};
-                        } else {
-                            push @order_only_deps, @$oo_ref;
+                # FIRST: Check if the job has stored order_only_deps (for compound targets)
+                if ($job->{order_only_deps} && @{$job->{order_only_deps}}) {
+                    @order_only_deps = @{$job->{order_only_deps}};
+                    print STDERR "DEBUG dispatch: Using stored order-only deps for '$target': [" . join(", ", @order_only_deps) . "]\n" if $ENV{SMAK_DEBUG};
+                } else {
+                    # No stored deps, look them up by key
+                    if (exists $fixed_order_only{$key}) {
+                        push @order_only_deps, @{$fixed_order_only{$key}};
+                        print STDERR "DEBUG dispatch: Found order-only for key '$key': " . join(", ", @order_only_deps) . "\n" if $ENV{SMAK_DEBUG};
+                    } elsif ($target =~ /STD\.STANDARD/) {
+                        # Debug: show all keys that might match for STD.STANDARD
+                        print STDERR "DEBUG dispatch: No order-only for key '$key', checking available keys...\n" if $ENV{SMAK_DEBUG};
+                        for my $k (keys %fixed_order_only) {
+                            print STDERR "DEBUG dispatch:   available key: '$k' => " . join(", ", @{$fixed_order_only{$k}}) . "\n" if $ENV{SMAK_DEBUG};
                         }
                     }
-                }
-                if (exists $pseudo_order_only{$key}) {
-                    push @order_only_deps, @{$pseudo_order_only{$key}};
+                    if (exists $pattern_order_only{$key}) {
+                        my $oo_ref = $pattern_order_only{$key};
+                        if (ref($oo_ref) eq 'ARRAY') {
+                            if (@$oo_ref && ref($oo_ref->[0]) eq 'ARRAY') {
+                                push @order_only_deps, @{$oo_ref->[0]};
+                            } else {
+                                push @order_only_deps, @$oo_ref;
+                            }
+                        }
+                    }
+                    if (exists $pseudo_order_only{$key}) {
+                        push @order_only_deps, @{$pseudo_order_only{$key}};
+                    }
                 }
                 # Expand % in order-only deps if we have a stem
                 if ($stem && @order_only_deps) {
@@ -10917,6 +11120,82 @@ sub run_job_master {
 
                     $j++;
                     next;  # Continue to next job
+                }
+
+                # Check if this is a recursive smak/make command that should be expanded
+                # This handles commands like: smak -C ivlpp all && smak -C driver all
+                if (is_builtin_command($peek_cmd)) {
+                    # Parse the recursive commands and expand them into the job queue
+                    my @cmd_parts = split(/\s*&&\s*/, $peek_cmd);
+                    my $all_expanded = 1;
+
+                    for my $cmd_part (@cmd_parts) {
+                        $cmd_part =~ s/^\s+|\s+$//g;
+                        $cmd_part =~ s/^[@-]+//;
+                        next if $cmd_part eq 'true' || $cmd_part eq ':' || $cmd_part eq '';
+
+                        # Check if it's a recursive smak/make call
+                        if ($cmd_part =~ m{(?:smak|make)\s.*-C\s+(\S+)}) {
+                            my ($sub_makefile, $sub_directory, $sub_vars_ref, @sub_targets) = parse_make_command($cmd_part);
+
+                            if ($sub_directory) {
+                                print STDERR "DEBUG: Expanding recursive smak -C $sub_directory\n" if $ENV{SMAK_DEBUG};
+
+                                # Save state
+                                my $saved_cwd = getcwd();
+                                my $saved_makefile = $makefile;
+
+                                # Change to subdirectory
+                                if (chdir($sub_directory)) {
+                                    my $new_dir = getcwd();
+
+                                    # Set makefile to FULL path so keys are unique per directory
+                                    my $sub_mf_name = $sub_makefile || 'Makefile';
+                                    $makefile = "$new_dir/$sub_mf_name";
+
+                                    # Parse makefile if needed (use full path for key uniqueness)
+                                    my $test_key = "$makefile\t" . ($sub_targets[0] || 'all');
+                                    unless (exists $fixed_deps{$test_key} || exists $pattern_deps{$test_key} || exists $pseudo_deps{$test_key}) {
+                                        # Use parse_included_makefile to accumulate without resetting state
+                                        eval { parse_included_makefile($makefile); };
+                                        if ($@) {
+                                            warn "Warning: Could not parse '$makefile' in '$sub_directory': $@\n";
+                                            chdir($saved_cwd);
+                                            $makefile = $saved_makefile;
+                                            $all_expanded = 0;
+                                            last;
+                                        }
+                                    }
+
+                                    # Queue targets with subdirectory as relative dir (no prefix needed)
+                                    # Worker sits at project root, so dir should be relative path like "ivlpp"
+                                    my @targets_to_build = @sub_targets ? @sub_targets : (get_first_target($makefile) || 'all');
+                                    for my $sub_target (@targets_to_build) {
+                                        queue_target_recursive($sub_target, $sub_directory, $master_socket, 0, '');
+                                    }
+
+                                    # Restore state
+                                    chdir($saved_cwd);
+                                    $makefile = $saved_makefile;
+                                } else {
+                                    warn "Warning: Could not chdir to '$sub_directory': $!\n";
+                                    $all_expanded = 0;
+                                    last;
+                                }
+                            }
+                        }
+                    }
+
+                    if ($all_expanded) {
+                        # Remove from queue and mark complete
+                        splice(@job_queue, $job_index, 1);
+                        $worker_status{$ready_worker}{ready} = 1;
+                        $completed_targets{$target} = 1;
+                        $in_progress{$target} = "done";
+                        print $master_socket "JOB_COMPLETE $target 0\n" if $master_socket;
+                        $j++;
+                        next;
+                    }
                 }
                 # Not a built-in - continue with normal worker dispatch
             }

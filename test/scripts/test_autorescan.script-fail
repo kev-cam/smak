@@ -19,7 +19,7 @@ rescan -noauto
 build all
 # expect "Built test_auto.o"
 
-# Clean up
-! rm -f test_auto.o test_auto.c Makefile.autorescan
+# Don't clean up test_auto.o here - the bash script needs to check it exists
+! rm -f test_auto.o-old
 
-quit
+# Script ends here

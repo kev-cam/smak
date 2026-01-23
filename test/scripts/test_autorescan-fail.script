@@ -8,4 +8,4 @@ rescan -auto
 build all
 # expect "No such file"
 
-quit
+# Script ends here

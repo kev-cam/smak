@@ -1,1 +1,1 @@
-smak-cmake.pl
+cmake-install/bin/cmake

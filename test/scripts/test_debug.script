@@ -7,4 +7,4 @@ list                     # Show all rules
 help                     # Show help
 # expect "Commands:"
 
-quit                     # Exit debugger
+# Script ends here - debugger exits when script completes

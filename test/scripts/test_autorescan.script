@@ -18,4 +18,4 @@ build all
 # Don't clean up test_auto.o here - the bash script needs to check it exists
 ! rm -f test_auto.o-old
 
-quit
+# Script ends here - no explicit quit needed

@@ -1,4 +1,4 @@
 # Simple debug test - just verify debugger starts and quits
 help
 # expect "Commands:"
-quit
+# Script ends here

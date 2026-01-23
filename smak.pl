@@ -31,6 +31,7 @@ my $dry_run = 0;
 my $silent = 0;
 my $yes = 0;  # Auto-answer yes to prompts
 my $jobs = 0;  # Number of parallel jobs (default: 0 => sequential)
+my $jobs_specified = 0;  # Track if -j was explicitly specified
 my $cli = 0;  # CLI mode (interactive shell)
 my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
@@ -223,7 +224,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'n|just-print|dry-run|recon' => \$dry_run,
         's|silent|quiet' => \$silent,
         'yes' => \$yes,
-        'j|jobs:i' => \$jobs,
+        'j|jobs:i' => sub { $jobs = $_[1]; $jobs_specified = 1; },
         'cli' => \$cli,
         'v|verbose' => \$verbose,
         'ssh=s' => \$ssh_host,
@@ -247,7 +248,7 @@ GetOptions(
     'n|just-print|dry-run|recon' => \$dry_run,
     's|silent|quiet' => \$silent,
     'yes' => \$yes,
-    'j|jobs:i' => \$jobs,
+    'j|jobs:i' => sub { $jobs = $_[1]; $jobs_specified = 1; },
     'cli' => \$cli,
     'v|verbose' => \$verbose,
     'ssh=s' => \$ssh_host,
@@ -727,10 +728,10 @@ sub execute_script_file {
 # Set dry-run mode if requested
 if ($dry_run) {
     set_dry_run_mode(1);
-    # Force -j1 in dry-run mode to ensure job server is available with dry-worker
-    # Built-ins (rm, recursive make) execute directly without going to workers
-    # This keeps the infrastructure available while avoiding worker overhead for most commands
-    $jobs = 1;
+    # Dry-run implies -j1: use job server with dry-worker
+    # This ensures dry-run exercises the same code path as parallel builds
+    # But only if -j wasn't explicitly specified (-j0 forces sequential)
+    $jobs = 1 unless $jobs_specified;
 }
 
 # Set silent mode if requested
@@ -787,6 +788,14 @@ my $auto_script = "$makefile.smak";
 if (-f $auto_script) {
     print "Auto-loading script: $auto_script\n" if $ENV{SMAK_DEBUG};
     execute_script_file($auto_script);
+}
+
+# When SMAK_JOB_SERVER is set, we're a child of another smak with a job server
+# Just run sequentially - the parallelism is handled by the parent job-master
+# dispatching multiple jobs to workers. Don't try to spawn a new job server.
+if ($ENV{SMAK_JOB_SERVER}) {
+    warn "Running as child of job server (sequential mode)\n" if $ENV{SMAK_DEBUG};
+    # Continue with sequential build - $jobs stays at 0
 }
 
 # Start job server if parallel builds are requested
@@ -954,6 +963,7 @@ if (!$debug) {
             # Also handle other messages to prevent blocking
             elsif ($response =~ /^OUTPUT (.*)$/) {
                 print "$1\n" unless $Smak::silent_mode;
+                STDOUT->flush();
             }
             elsif ($response =~ /^ERROR (.*)$/) {
                 warn "ERROR: $1\n";
@@ -1211,52 +1221,7 @@ sub prompt_commit_bug_report {
     chdir($original_dir);
 }
 
-# Check if we're being run as a child of another smak with a job server
-# If so, relay our command-line to the parent job server instead of building
-if ($ENV{SMAK_JOB_SERVER} && !$ENV{SMAK_JOB_SERVER_RELAY_DONE}) {
-    warn "Detected parent job server at $ENV{SMAK_JOB_SERVER}, relaying command\n" if $ENV{SMAK_DEBUG};
-
-    # Reconstruct the command-line
-    use Cwd 'getcwd';
-    my $cwd = getcwd();
-    my @targets_str = @targets ? @targets : ('all');
-    my $cmd = "smak";
-    $cmd .= " -C $cwd" if $cwd ne $ENV{PWD};
-    $cmd .= " @targets_str";
-
-    # Connect to parent job server
-    my ($host, $port) = split(/:/, $ENV{SMAK_JOB_SERVER});
-    use IO::Socket::INET;
-    my $parent_socket = IO::Socket::INET->new(
-        PeerHost => $host,
-        PeerPort => $port,
-        Proto    => 'tcp',
-        Timeout  => 10,
-    );
-
-    if ($parent_socket) {
-        $parent_socket->autoflush(1);
-
-        # Send the targets as a build request
-        # Format: BUILD cwd target1 target2 target3
-        print $parent_socket "BUILD $cwd @targets_str\n";
-
-        # Wait for completion
-        my $response = <$parent_socket>;
-        chomp $response if defined $response;
-
-        close($parent_socket);
-
-        # Exit with appropriate status
-        if ($response && $response =~ /^COMPLETE (\d+)$/) {
-            exit $1;
-        } else {
-            exit 0;  # Success by default
-        }
-    } else {
-        warn "Failed to connect to parent job server, building normally\n";
-    }
-}
+# Job server relay check moved earlier in the file (before start_job_server)
 
 # Debug mode - enter interactive debugger
 # Job server is optional - auto-rescan works without it via select() timeout

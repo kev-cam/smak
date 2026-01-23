@@ -41,7 +41,12 @@ fi
 export SMAK_INVOKED_AS="$SCRIPT_DIR/$script"
 
 # Set MAKE to smak so $(MAKE) in Makefiles uses smak instead of make
-export MAKE="$SCRIPT_DIR/$script"
+# But only when running as make/smak, not when running as cmake wrapper
+case $script in
+    smak|make|gmake)
+        export MAKE="$SCRIPT_DIR/$script"
+        ;;
+esac
 
 # Set launcher path for bug reports
 export SMAK_LAUNCHER="$SCRIPT_DIR/$script"

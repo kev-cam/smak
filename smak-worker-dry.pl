@@ -468,8 +468,25 @@ while (my $line = <$socket>) {
         # DEBUG: Show we're in dry-run worker
         warn "DRY-RUN WORKER: task_id=$task_id, command=$command\n" if $ENV{SMAK_DEBUG};
 
-        # Print the command (job master will display it)
-        print $socket "OUTPUT $command\n";
+        # Check if this is a recursive smak/make call that needs expansion
+        # Match: smak -C dir target, smak -n -C dir target, make -C dir, etc.
+        if ($command =~ m{\b(?:smak|make)\s+(?:-\w+\s+)*-C\s}) {
+            # Execute with -n flag to expand recursive calls
+            my $dry_cmd = $command;
+            $dry_cmd =~ s{((?:^|/|&&\s*|\s)(?:\S*/)?smak)\s+}{$1 -n }g;
+            warn "DRY-RUN WORKER: expanding recursive: $dry_cmd\n" if $ENV{SMAK_DEBUG};
+            my $pid = open(my $cmd_fh, '-|', "$dry_cmd 2>&1");
+            if ($pid) {
+                while (my $line = <$cmd_fh>) {
+                    chomp $line;
+                    print $socket "OUTPUT $line\n";
+                }
+                close($cmd_fh);
+            }
+        } else {
+            # Leaf command: just print it
+            print $socket "OUTPUT $command\n";
+        }
         $socket->flush();
 
         # Skip all the execution logic - just pretend it succeeded

@@ -8,6 +8,8 @@ SMAK is a parallel make replacement with a job-server architecture:
 2. **Job Master**: Manages job queue, tracks task completion, dispatches to workers
 3. **Workers**: Execute commands, report results back to job master
 4. **Child SMAK Processes**: For recursive builds (`smak -C dir`), relay expanded rules back to parent job-server via `SMAK_JOB_SERVER` environment variable
+5. ** Command Execution **: the job-server may refactor a build command, handling common functions (like mv, rm, touch, etc.) with built-in Perl functions, and doing direct execution rather than invoking the shell (bash).
+6. **Command line interface**: in -jN mode the command-line processing is a detachable component that can be reattached to exist job-server processes. In use none of the components need to be on the same machine.
 
 ## Key Data Structures
 
@@ -34,16 +36,37 @@ SMAK is a parallel make replacement with a job-server architecture:
 
 **Problem**: Compound commands (`cmd1 && cmd2 && ...`) were being handled in-process even when a job server was running, which broke parallel builds.
 
-**Fix**: Changed the compound handler check at line 4830 from:
-```perl
-if ($clean_cmd =~ /&&/) {
-```
-to:
+**Initial Fix**: Changed the compound handler check to skip in-process handling when job server is active:
 ```perl
 if (!$job_server_socket && $clean_cmd =~ /&&/) {
 ```
 
-This ensures the job-server handles compound commands in parallel mode.
+**Follow-up Fix**: Dry-run mode also uses a job server (with dry workers), but needs to expand compound commands in-process to properly show all commands. Updated condition to:
+```perl
+if (($dry_run_mode || !$job_server_socket) && $clean_cmd =~ /&&/) {
+```
+
+This ensures:
+- Parallel mode (with job server): Job server handles compound commands
+- Sequential mode (no job server): In-process handling
+- Dry-run mode: In-process handling for proper command expansion
+
+### 2026-01-21: Dry-Run Dependency Expansion
+
+**Problem**: In dry-run mode with job server (`smak -n`), dependency expansion was skipped because `$job_server_socket` was set. This caused only partial output compared to sequential mode (`smak -n -j0`).
+
+**Fix**: Changed the dependency expansion condition to include dry-run mode:
+```perl
+if (!$job_server_socket || $dry_run_mode) {
+    # Temporarily disable job server for recursive builds in dry-run
+    local $job_server_socket = $dry_run_mode ? undef : $job_server_socket;
+    for my $dep (@deps) {
+        build_target($dep, $visited, $depth + 1);
+    }
+}
+```
+
+This ensures dry-run mode expands all dependencies locally and prints all commands, matching the behavior of `make -n`.
 
 ### 2026-01-21: Directory-Qualified In-Progress Keys
 
@@ -152,7 +175,8 @@ parse%cc parse%h: parse%y
    - The job-server can display them with `btree` (build tree)
 
 4. **Recursive Handling**: When encountering `smak -C dir target`:
-   - Add `-n` flag to the recursive call
+   - Add `-n` flag to the recursive call, noting that "smak" commands
+     are handled as a built-in whever possible
    - Recurse and collect all sub-commands
    - Print them in order
 
@@ -171,9 +195,50 @@ smak -n
 - `$dry_run_mode`: Set to 1 when `-n` flag is passed
 - Worker script: `smak-worker-dry` (vs `smak-worker` for real builds)
 
+### 2026-01-21: Compound Command and Subdirectory Build Fixes
+
+**Problem 1**: When `parse_make_command` returned empty for compound commands (like `smak -C dir1 && smak -C dir2 && ...`), the code would call `get_first_target()` which returns a random target from the hash.
+
+**Fix**: Added check after `parse_make_command` returns - if no makefile, directory, or targets were parsed, fall through to external command execution instead of building a random target:
+```perl
+if (!$sub_makefile && !$sub_directory && !@sub_targets) {
+    goto EXECUTE_EXTERNAL_COMMAND;
+}
+```
+
+**Problem 2**: Subdirectory Makefiles weren't being parsed because the key (e.g., `Makefile\tall`) collided with the main Makefile's keys.
+
+**Fix**: Use full path for $makefile when parsing subdirectory Makefiles:
+```perl
+$makefile = "$new_dir/$sub_mf_name";
+```
+And use `parse_included_makefile` instead of `parse_makefile` to accumulate rather than reset state.
+
+**Problem 3**: Path duplication when verifying targets. A target like `vhdlpp/foo.o` in directory `/path/vhdlpp` would be checked at `/path/vhdlpp/vhdlpp/foo.o`.
+
+**Fix**: Added prefix stripping in `verify_target_exists` and other path construction sites:
+```perl
+if ($dir && $target =~ m{^([^/]+)/(.+)$}) {
+    my ($prefix, $base) = ($1, $2);
+    if ($dir =~ m{/\Q$prefix\E$}) {
+        $adjusted_target = $base;
+    }
+}
+```
+
 ## Open Issues
 
-1. Parallel build may execute wrong targets (install targets instead of build targets)
-2. Some regression tests still failing
-3. Need to implement proper layer-based compound target handling
-4. Dry-run mode needs to fully expand and print all commands like make -n
+1. Some regression tests still failing
+2. Need to implement proper layer-based compound target handling
+
+## To Do
+
+1. Add rules for invalidating target when its rules change (through Makefile
+   updates), but don't invalidate just because the make-file changed.
+   I.e. rules depend on the make-files, targets are marked stale if their
+   rules change. Add a test for that where you do a code build and then modify
+   C compiler flags in the make-file and build again.
+
+2. Slurm support
+
+3. Test with Fuse-NFS

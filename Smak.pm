@@ -10130,7 +10130,11 @@ sub run_job_master {
                     if (exists $suffix_rule{$suffix_key}) {
                         my $source = "$base$source_suffix";
                         my $resolved_source = resolve_vpath($source, $dir);
-                        if (-f $resolved_source || -f "$dir/$source") {
+                        # Check if source exists OR can be built (has a rule)
+                        my $source_exists = (-f $resolved_source || -f "$dir/$source");
+                        my $source_key = "$makefile\t$source";
+                        my $source_can_be_built = exists $fixed_rule{$source_key} || exists $pattern_rule{$source_key};
+                        if ($source_exists || $source_can_be_built) {
                             $stem = $base;
                             push @deps, $source unless grep { $_ eq $source } @deps;
                             $rule = $suffix_rule{$suffix_key};
@@ -10143,7 +10147,7 @@ sub run_job_master {
                                 } @$suffix_deps_ref;
                                 push @deps, @suffix_deps_expanded;
                             }
-                            print STDERR "Using suffix rule $source_suffix$target_suffix for $target (no fixed deps)\n" if $ENV{SMAK_DEBUG};
+                            print STDERR "Using suffix rule $source_suffix$target_suffix for $target (source " . ($source_exists ? "exists" : "can be built") . ")\n" if $ENV{SMAK_DEBUG};
                             last;
                         }
                     }
@@ -10183,11 +10187,15 @@ sub run_job_master {
                                     $d;
                                 } @variant_deps;
                                 my @resolved_deps = map { resolve_vpath($_, $dir) } @variant_deps;
-                                # Check if the first dep (source file) exists
-                                if (@resolved_deps && -f $resolved_deps[0]) {
+                                # Check if the first dep (source file) exists or can be built
+                                my $first_dep = $variant_deps[0] // '';
+                                my $first_dep_key = "$makefile\t$first_dep";
+                                my $source_exists = @resolved_deps && -f $resolved_deps[0];
+                                my $source_can_be_built = exists $fixed_rule{$first_dep_key} || exists $pattern_rule{$first_dep_key};
+                                if ($source_exists || $source_can_be_built) {
                                     @deps = @resolved_deps;
                                     $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[$vi] : $rule_ref;
-                                    print STDERR "Matched pattern rule '$pattern' variant $vi for target '$target' (stem='$stem', source exists)\n" if $ENV{SMAK_DEBUG};
+                                    print STDERR "Matched pattern rule '$pattern' variant $vi for target '$target' (stem='$stem', source " . ($source_exists ? "exists" : "can be built") . ")\n" if $ENV{SMAK_DEBUG};
                                     $found_variant = 1;
                                     last PATTERN_LOOP;
                                 }
@@ -10218,10 +10226,14 @@ sub run_job_master {
                             } @candidate_deps;
                             my @resolved_deps = map { resolve_vpath($_, $dir) } @candidate_deps;
 
-                            # Check if the first dep (source file) exists
-                            if (@resolved_deps && !-f $resolved_deps[0] && !-f "$dir/$candidate_deps[0]") {
-                                # Source file doesn't exist, skip this pattern rule
-                                print STDERR "Skipping pattern rule '$pattern' for target '$target' (stem='$stem', source '$resolved_deps[0]' not found)\n" if $ENV{SMAK_DEBUG};
+                            # Check if the first dep (source file) exists or can be built
+                            my $first_dep = $candidate_deps[0] // '';
+                            my $first_dep_key = "$makefile\t$first_dep";
+                            my $source_exists = @resolved_deps && (-f $resolved_deps[0] || -f "$dir/$candidate_deps[0]");
+                            my $source_can_be_built = exists $fixed_rule{$first_dep_key} || exists $pattern_rule{$first_dep_key};
+                            if (@resolved_deps && !$source_exists && !$source_can_be_built) {
+                                # Source file doesn't exist and can't be built, skip this pattern rule
+                                print STDERR "Skipping pattern rule '$pattern' for target '$target' (stem='$stem', source '$resolved_deps[0]' not found and no rule to build it)\n" if $ENV{SMAK_DEBUG};
                                 $matched_pattern_key = undef;
                                 $stem = '';
                                 # Don't break - continue looking for other pattern rules

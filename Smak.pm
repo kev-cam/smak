@@ -51,9 +51,11 @@ sub vprint {
     my $mode;
 
     return if (! defined ($mode = $ENV{SMAK_VERBOSE}));
-    
+
     if ($mode eq 'w') {
         # Spinning wheel mode - update in place
+        # Only show wheel if STDERR is a real terminal
+        return unless -t STDERR;
         # Clear line, show wheel, flush
         print STDERR "\r" . $wheel_chars[$wheel_pos] . "  \r";
         STDERR->flush();
@@ -137,6 +139,16 @@ our %multi_output_groups;
 # Key format: "makefile\ttarget_pattern"
 # Value: ["target1", "target2", ...] (all targets including this one)
 our %multi_output_siblings;
+
+# Runtime mapping: individual target -> compound target that builds it
+# Populated when compound targets are queued, consulted when queueing dependencies
+# Key: full target path (e.g., "vhdlpp/parse.h")
+# Value: compound target name (e.g., "vhdlpp/parse.cc&vhdlpp/parse.h")
+our %target_to_compound;
+
+# Post-build hooks: target -> command string to run after successful build
+# For compound targets, defaults to "check-siblings <sibling1> <sibling2> ..."
+our %post_build;
 
 # VPATH search directories: pattern => [directories]
 our %vpath;
@@ -252,7 +264,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track [mtime, size] of all parsed makefiles for cache validation
-our $CACHE_VERSION = 12;  # Increment to invalidate old caches (mtime+size validation)
+our $CACHE_VERSION = 13;  # Increment to invalidate old caches (bumped: always-on caching)
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -666,6 +678,21 @@ sub execute_builtin {
         my $dir = $parts[0] || $ENV{HOME};
         unless (chdir($dir)) {
             print STDERR "cd: $dir: $!\n" unless $silent;
+            return 1 unless $ignore_errors;
+        }
+        return 0;
+    }
+
+    # check-siblings <file1> <file2> ... - verify sibling files from compound target exist
+    elsif ($command eq 'check-siblings') {
+        my @missing;
+        for my $file (@parts) {
+            unless (-e $file) {
+                push @missing, $file;
+            }
+        }
+        if (@missing) {
+            print STDERR "check-siblings: missing files: " . join(', ', @missing) . "\n" unless $silent;
             return 1 unless $ignore_errors;
         }
         return 0;
@@ -2906,10 +2933,8 @@ sub get_cache_dir {
     use Cwd 'abs_path';
     use File::Basename;
 
-    # Check if caching is enabled (automatic in debug mode, or via SMAK_CACHE_DIR)
-    return undef unless ($ENV{SMAK_DEBUG} || $ENV{SMAK_CACHE_DIR});
-
     # Determine cache directory
+    # Caching is always enabled by default (rules don't change unless makefiles change)
     my $cdir = $ENV{SMAK_CACHE_DIR};
     if (defined $cdir) {
         # Disable caching for "off" or "0"
@@ -5190,9 +5215,14 @@ sub build_target {
 }
 
 sub dry_run_target {
-    my ($target, $visited, $depth) = @_;
+    my ($target, $visited, $depth, $opts) = @_;
     $visited ||= {};
     $depth ||= 0;
+    $opts ||= {};
+
+    # Options:
+    #   capture => \%hash   - capture target info to this hash
+    #   no_commands => 1    - suppress printing commands (log targets only)
 
     # Skip RCS/SCCS implicit rule patterns (these create infinite loops)
     # Make's built-in rules try: RCS/file,v, SCCS/s.file, etc.
@@ -5472,13 +5502,72 @@ sub dry_run_target {
         print "${indent}  Dependencies: ", join(', ', @deps), "\n";
     }
 
-    # Recursively dry-run dependencies
-    for my $dep (@deps) {
-        dry_run_target($dep, $visited, $depth + 1);
+    # Check for multi-output siblings (needed for both capture and regular dry-run)
+    my @siblings;
+    for my $pkey (keys %pattern_rule) {
+        if ($pkey =~ /^[^\t]+\t(.+)$/) {
+            my $pattern = $1;
+            my $pattern_re = $pattern;
+            $pattern_re =~ s/%/(.+)/g;
+            if ($target =~ /^$pattern_re$/) {
+                my $s = $1;
+                my ($mf_part, $pattern_part) = split(/\t/, $pkey, 2);
+                my $target_key = "$makefile\t$pattern_part";
+                if (exists $multi_output_siblings{$target_key}) {
+                    @siblings = map { my $t = $_; $t =~ s/%/$s/g; $t } @{$multi_output_siblings{$target_key}};
+                }
+                last;
+            }
+        }
     }
 
-    # Print rule if it exists
-    if ($rule && $rule =~ /\S/) {
+    # If this target has siblings (part of compound), mark ALL siblings as visited
+    # This prevents the same rule from running multiple times
+    if (@siblings > 1) {
+        for my $sib (@siblings) {
+            my $sib_key = "$makefile\t$sib";
+            $visited->{$sib_key} = 1;
+        }
+    }
+
+    # Capture target info if requested (for btree)
+    if ($opts->{capture}) {
+        use Cwd 'getcwd';
+        my $exec_dir = getcwd();
+
+        # Store to capture hash
+        my $compound_parent = '';
+        if (@siblings > 1) {
+            my $compound = join('&', sort @siblings);
+            # If we're a sibling but not the "primary" (first alphabetically), point to compound
+            if ($target ne (sort @siblings)[0]) {
+                $compound_parent = $compound;
+            }
+            # Also store compound target
+            $opts->{capture}{$compound} = {
+                deps => [@deps],
+                rule => $rule,
+                exec_dir => $exec_dir,
+                siblings => [@siblings],
+            } unless exists $opts->{capture}{$compound};
+        }
+
+        $opts->{capture}{$target} = {
+            deps => [@deps],
+            rule => $rule,
+            exec_dir => $exec_dir,
+            siblings => \@siblings,
+            compound_parent => $compound_parent,
+        };
+    }
+
+    # Recursively dry-run dependencies
+    for my $dep (@deps) {
+        dry_run_target($dep, $visited, $depth + 1, $opts);
+    }
+
+    # Print rule if it exists (skip if no_commands mode)
+    if ($rule && $rule =~ /\S/ && !$opts->{no_commands}) {
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($rule);
         # Expand variables
@@ -5877,6 +5966,7 @@ sub unified_cli {
     my $cli = SmakCli->new(
         prompt => $prompt,
         get_prompt => sub { $busy ? "[busy]" : $prompt },
+        is_busy => sub { $busy },
         socket => $socket,
         check_notifications => $check_notifications,
     );
@@ -5957,10 +6047,13 @@ sub unified_cli {
         $check_notifications->();
 
         # If reprompt was requested, show prompt before next readline
+        # But suppress when busy (jobs running)
         if ($SmakCli::reprompt_requested) {
             $SmakCli::reprompt_requested = 0;
-            print $prompt;
-            STDOUT->flush();
+            unless ($busy) {
+                print $prompt;
+                STDOUT->flush();
+            }
         }
     }
 
@@ -6036,6 +6129,9 @@ sub dispatch_command {
 
     } elsif ($cmd eq 'build' || $cmd eq 'b') {
         cmd_build($words, $socket, $opts, $state);
+
+    } elsif ($cmd eq 'dry-run' || $cmd eq 'dry' || $cmd eq 'n') {
+        cmd_dry_run($words, $socket);
 
     } elsif ($cmd eq 'rebuild') {
         cmd_rebuild($words, $socket, $opts);
@@ -6222,6 +6318,7 @@ sub show_unified_help {
     print <<'HELP';
 Available commands:
   build <target>      Build the specified target (or default if none given)
+  dry-run <target>    Show what commands would be executed (aliases: dry, n)
   rebuild [-auto] <t> Rebuild only if stale (-auto rebuilds all matching pattern)
   watch, w            Monitor file changes from FUSE filesystem
   unwatch             Stop monitoring file changes
@@ -6244,7 +6341,10 @@ Available commands:
   list [pattern]      List all targets (optionally matching pattern)
   vars [pattern]      Show all variables (optionally matching pattern)
   deps <target>       Show dependencies for target
-  btree <target>      Show layered build tree (layers of dependencies)
+  btree [opts] [target] - Show layered build tree with status colors
+                        -html[=file]    Generate HTML output (default: btree.html)
+                        -launch[=browser] Open in browser (default: xdg-open)
+                        Colors: green=ok, red=stale, blue=dirty
   vpath <file>        Test vpath resolution for a file
   add-rule <t> <d> <r> Add a new rule (rule text can use \n and \t)
   mod-rule <t> <r>    Modify the rule for a target
@@ -6292,7 +6392,7 @@ sub enable_cli {
 
 sub cmd_build {
     my ($words, $socket, $opts, $state) = @_;
-    
+
     $busy = 1;
 
     my @targets = @$words;
@@ -6304,29 +6404,86 @@ sub cmd_build {
             print "Building default target: $default\n";
         } else {
             print "No default target found.\n";
+            $busy = 0;
             return;
         }
     }
 
     if ($socket) {
-        # Job server mode - use build_target() which submits real jobs via the job_server_socket
-        # This is the same code path as non-CLI mode
-        # Set job_server_socket so build_target knows to use the job server
+        # Job server mode - submit jobs and wait for completion
         $job_server_socket = $socket unless $job_server_socket;
+
+        use IO::Select;
+        use Cwd 'getcwd';
+        my $cwd = getcwd();
+
         for my $target (@targets) {
             my $build_start_time = time();
-            eval {
-                build_target($target);
-            };
+
+            # Submit the job to job server
+            print $socket "SUBMIT_JOB\n";
+            print $socket "$target\n";
+            print $socket "$cwd\n";
+            print $socket "true\n";  # Composite target placeholder
+            $socket->flush();
+
+            # Wait for job completion, processing output as it arrives
+            my $select = IO::Select->new($socket);
+            my $job_done = 0;
+            my $cancelled = 0;
+            my $exit_code = 0;
+
+            while (!$job_done && !$cancelled) {
+                # Check for Ctrl-C cancel request
+                if ($SmakCli::cancel_requested) {
+                    print "\nCtrl-C - Cancelling build...\n";
+                    print $socket "KILL_WORKERS\n";
+                    $socket->flush();
+                    $SmakCli::cancel_requested = 0;
+                    $cancelled = 1;
+                    # Drain socket to clear pending messages
+                    while ($select->can_read(0.3)) {
+                        my $drain = <$socket>;
+                        last unless defined $drain;
+                    }
+                    last;
+                }
+
+                # Process messages from job server
+                if ($select->can_read(0.1)) {
+                    my $response = <$socket>;
+                    unless (defined $response) {
+                        print "Connection to job server lost\n";
+                        last;
+                    }
+                    chomp $response;
+
+                    if ($response =~ /^OUTPUT (.*)$/) {
+                        print "$1\n";
+                    } elsif ($response =~ /^ERROR (.*)$/) {
+                        print STDERR "ERROR: $1\n";
+                    } elsif ($response =~ /^WARN (.*)$/) {
+                        print STDERR "WARN: $1\n";
+                    } elsif ($response =~ /^JOB_COMPLETE\s+(\S+)\s+(\d+)$/) {
+                        my ($completed_target, $code) = ($1, $2);
+                        # Stop when we get completion for our requested target
+                        if ($completed_target eq $target) {
+                            $job_done = 1;
+                            $exit_code = $code;
+                        }
+                    }
+                }
+            }
+
             my $elapsed = time() - $build_start_time;
-            if ($@) {
+            if ($cancelled) {
+                print "Build cancelled\n";
+                last;
+            } elsif ($exit_code != 0) {
                 printf "✗ Build failed: $target (%.2fs)\n", $elapsed;
-                print STDERR $@;
-                reprompt();
                 last;
             } else {
                 printf "✓ Build succeeded: $target (%.2fs)\n", $elapsed;
-                reprompt();
             }
         }
     } else {
@@ -6341,18 +6498,58 @@ sub cmd_build {
             if ($@) {
                 printf "✗ Build failed: $target (%.2fs)\n", $elapsed;
                 print STDERR $@;
-                reprompt();
                 last;
             } else {
                 printf "✓ Build succeeded: $target (%.2fs)\n", $elapsed;
-                reprompt();
             }
         }
     }
 
     $busy = 0;
-    if ($rp_pending) {
-	reprompt();
+}
+
+sub cmd_dry_run {
+    my ($words, $socket) = @_;
+
+    my @targets = @$words;
+    if (@targets == 0) {
+        my $default = get_default_target();
+        if ($default) {
+            @targets = ($default);
+            print "Dry-run for default target: $default\n";
+        } else {
+            print "No default target found.\n";
+            print "Usage: dry-run <target>\n";
+            return;
+        }
+    }
+
+    # Fork a child process for dry-run so state changes are discarded
+    # This prevents polluting the job-server's state
+    my $pid = fork();
+    if (!defined $pid) {
+        print STDERR "Error: fork failed: $!\n";
+        return;
+    }
+
+    if ($pid == 0) {
+        # Child process - run dry-run and exit
+        for my $target (@targets) {
+            print "Commands that would be executed for: $target\n";
+            print "-" x 60 . "\n";
+            eval {
+                dry_run_target($target);
+            };
+            if ($@) {
+                print STDERR "Error: $@\n";
+            }
+            print "-" x 60 . "\n";
+        }
+        STDOUT->flush();
+        exit(0);  # Exit child - state changes are discarded
+    } else {
+        # Parent process - wait for child to complete
+        waitpid($pid, 0);
     }
 }
 
@@ -7076,102 +7273,163 @@ sub cmd_deps {
 sub cmd_btree {
     my ($words, $socket) = @_;
 
+    # Parse options: btree [-html[=file]] [-launch[=browser]] [target]
+    my $html_file;
+    my $launch_browser;
     my $target;
-    if (@$words == 0) {
+
+    for my $arg (@$words) {
+        if ($arg =~ /^-html(?:=(.+))?$/) {
+            $html_file = $1 // 'btree.html';
+        } elsif ($arg =~ /^-launch(?:=(.+))?$/) {
+            $launch_browser = $1 // 'xdg-open';
+            $html_file //= 'btree.html';  # -launch implies -html
+        } elsif (!defined $target) {
+            $target = $arg;
+        }
+    }
+
+    if (!defined $target) {
         $target = get_default_target();
         if (!defined $target) {
             print "No default target defined.\n";
-            print "Usage: btree <target>\n";
+            print "Usage: btree [-html[=file]] [-launch[=browser]] [target]\n";
             return;
         }
         print "Using default target: $target\n";
-    } else {
-        $target = $words->[0];
     }
 
-    # Collect all targets and their dependencies (including order-only)
+    # Build dependency tree using cached rule tables
+    # Rules are cached and only reparsed when makefiles change
     my %all_targets;   # target => [deps]
-    my %tgt_layer;     # target => layer
+    my %target_info;   # target => { rule, exec_dir, siblings, compound_parent }
     my %visited;
 
-    # Helper to get all dependencies for a target
-    my $get_all_deps = sub {
-        my ($tgt) = @_;
+    # Helper to get all dependencies for a target (uses cached rule tables)
+    my $get_target_data;
+    $get_target_data = sub {
+        my ($tgt, $depth) = @_;
+        $depth //= 0;
+        return if $visited{$tgt}++ || $depth > 100;
+
         my $key = "$makefile\t$tgt";
         my @deps;
+        my $rule = '';
+        my $stem = '';
+        my @siblings;
 
-        # Regular dependencies
+        # Check fixed rules first
         if (exists $fixed_deps{$key}) {
-            push @deps, @{$fixed_deps{$key} || []};
-        } elsif (exists $pattern_deps{$key}) {
-            my $deps_ref = $pattern_deps{$key} || [];
-            if (ref($deps_ref) eq 'ARRAY' && @$deps_ref && ref($deps_ref->[0]) eq 'ARRAY') {
-                push @deps, @{$deps_ref->[0]};
-            } elsif (ref($deps_ref) eq 'ARRAY') {
-                push @deps, @$deps_ref;
-            }
-        } elsif (exists $pseudo_deps{$key}) {
-            push @deps, @{$pseudo_deps{$key} || []};
+            @deps = @{$fixed_deps{$key} || []};
+            $rule = $fixed_rule{$key} || '';
         }
 
-        # Order-only dependencies (these also affect build order)
+        # Try pattern rules if no fixed rule
+        if (!$rule || $rule !~ /\S/) {
+            for my $pkey (keys %pattern_rule) {
+                if ($pkey =~ /^[^\t]+\t(.+)$/) {
+                    my $pattern = $1;
+                    my $pattern_re = $pattern;
+                    $pattern_re =~ s/%/(.+)/g;
+                    if ($tgt =~ /^$pattern_re$/) {
+                        $stem = $1;
+                        my $deps_ref = $pattern_deps{$pkey} || [];
+                        my $rule_ref = $pattern_rule{$pkey} || '';
+
+                        # Get deps (expand stem)
+                        my @pdeps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
+                                    @{$deps_ref->[0]} : (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
+                        @pdeps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @pdeps;
+                        push @deps, @pdeps;
+
+                        $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
+                        $rule =~ s/\$\*/$stem/g if $stem;
+
+                        # Check for multi-output siblings
+                        my ($mf_part, $pattern_part) = split(/\t/, $pkey, 2);
+                        my $target_key = "$makefile\t$pattern_part";
+                        if (exists $multi_output_siblings{$target_key}) {
+                            @siblings = map { my $s = $_; $s =~ s/%/$stem/g; $s } @{$multi_output_siblings{$target_key}};
+                        }
+                        last;
+                    }
+                }
+            }
+        }
+
+        # Check pseudo rules
+        if (!$rule && exists $pseudo_deps{$key}) {
+            @deps = @{$pseudo_deps{$key} || []};
+            $rule = $pseudo_rule{$key} || '';
+        }
+
+        # Add order-only deps
         if (exists $fixed_order_only{$key}) {
             push @deps, @{$fixed_order_only{$key} || []};
         }
-        if (exists $pattern_order_only{$key}) {
-            my $oo_ref = $pattern_order_only{$key} || [];
-            if (ref($oo_ref) eq 'ARRAY' && @$oo_ref && ref($oo_ref->[0]) eq 'ARRAY') {
-                push @deps, @{$oo_ref->[0]};
-            } elsif (ref($oo_ref) eq 'ARRAY') {
-                push @deps, @$oo_ref;
-            }
-        }
-        if (exists $pseudo_order_only{$key}) {
-            push @deps, @{$pseudo_order_only{$key} || []};
-        }
 
-        # Expand variables
-        my @expanded;
-        for my $dep (@deps) {
-            my $exp = $dep;
-            while ($exp =~ /\$MV\{([^}]+)\}/) {
+        # Expand variables in deps
+        @deps = map {
+            my $d = $_;
+            while ($d =~ /\$MV\{([^}]+)\}/) {
                 my $var = $1;
                 my $val = $MV{$var} // '';
-                $exp =~ s/\$MV\{\Q$var\E\}/$val/;
+                $d =~ s/\$MV\{\Q$var\E\}/$val/;
             }
-            push @expanded, split(/\s+/, $exp) if $exp =~ /\S/;
+            split(/\s+/, $d);
+        } @deps;
+        @deps = grep { defined $_ && /\S/ && !/dirstamp$/ && !/\.deps\// && !m{^/usr/} } @deps;
+
+        # Determine exec_dir from target path
+        my $exec_dir = '.';
+        if ($tgt =~ m{^(.+)/[^/]+$}) {
+            $exec_dir = $1;
         }
 
-        # Filter
-        return grep {
-            defined $_ && /\S/ &&
-            !/dirstamp$/ && !/\.deps\// && !m{^/usr/}
-        } @expanded;
-    };
-
-    # Check if target is buildable (has a rule)
-    my $is_buildable = sub {
-        my ($tgt) = @_;
-        my $key = "$makefile\t$tgt";
-        return exists $fixed_rule{$key} || exists $pattern_rule{$key} ||
-               exists $fixed_deps{$key} || exists $pattern_deps{$key} ||
-               exists $pseudo_deps{$key};
-    };
-
-    # Recursively collect targets
-    my $collect;
-    $collect = sub {
-        my ($tgt, $depth) = @_;
-        return if $visited{$tgt}++ || $depth > 100;
-
-        my @deps = $get_all_deps->($tgt);
-        # Only include buildable deps
-        @deps = grep { $is_buildable->($_) } @deps;
+        # Store target info
         $all_targets{$tgt} = \@deps;
+        $target_info{$tgt} = {
+            rule => $rule,
+            exec_dir => $exec_dir,
+            siblings => \@siblings,
+            compound_parent => '',
+        };
 
-        $collect->($_, $depth + 1) for @deps;
+        # Handle compound targets
+        if (@siblings > 1) {
+            my $compound = join('&', sort @siblings);
+            $all_targets{$compound} = \@deps;
+            (my $siblings_str = $compound) =~ s/&/ /g;
+            $target_info{$compound} = {
+                rule => $rule,
+                exec_dir => $exec_dir,
+                siblings => \@siblings,
+                compound_parent => '',
+                post_build => "check-siblings $siblings_str",
+            };
+            # Mark ALL siblings (including current target) as built by compound
+            for my $sib (@siblings) {
+                $target_info{$sib} = {
+                    rule => "(built by $compound)",
+                    exec_dir => $exec_dir,
+                    siblings => [],
+                    compound_parent => $compound,
+                };
+                $all_targets{$sib} = [$compound];  # Sibling depends on compound
+            }
+        }
+
+        # Recurse into dependencies
+        for my $dep (@deps) {
+            $get_target_data->($dep, $depth + 1);
+        }
     };
-    $collect->($target, 0);
+
+    # Collect from root target
+    $get_target_data->($target, 0);
+
+    print "Collected " . scalar(keys %all_targets) . " targets from cached rules\n";
+    my %tgt_layer;  # target => layer
 
     # Compute layers: layer = max(layer of deps) + 1
     my $compute;
@@ -7209,8 +7467,328 @@ sub cmd_btree {
         return;
     }
 
+    # Helper to get target status: 'ok' (green), 'stale' (red), 'dirty' (blue)
+    my $get_status = sub {
+        my ($tgt) = @_;
+        # Check if marked dirty
+        if (exists $stale_targets_cache{$tgt}) {
+            return 'dirty';
+        }
+        # Check if file exists and is up-to-date
+        if (-e $tgt) {
+            my $tgt_mtime = (stat($tgt))[9];
+            my $deps = $all_targets{$tgt} || [];
+            for my $dep (@$deps) {
+                if (-e $dep) {
+                    my $dep_mtime = (stat($dep))[9];
+                    if ($dep_mtime > $tgt_mtime) {
+                        return 'stale';
+                    }
+                }
+            }
+            return 'ok';
+        }
+        return 'stale';  # Doesn't exist, needs building
+    };
+
+    # ANSI color codes
+    my %colors = (
+        ok    => "\033[32m",  # green
+        stale => "\033[31m",  # red
+        dirty => "\033[34m",  # blue
+        reset => "\033[0m",
+    );
+
+    # Get target info for HTML - use captured data from dry-run, fall back to static tables
+    my $get_target_info = sub {
+        my ($tgt) = @_;
+        my $key = "$makefile\t$tgt";
+        my %info = (target => $tgt);
+
+        # Use captured data from dry-run if available (has properly expanded rules)
+        if (exists $target_info{$tgt}) {
+            $info{rule} = $target_info{$tgt}{rule};
+            $info{exec_dir} = $target_info{$tgt}{exec_dir} || '.';
+            $info{siblings} = $target_info{$tgt}{siblings} || [];
+            $info{compound_parent} = $target_info{$tgt}{compound_parent} || '';
+            $info{post_build} = $target_info{$tgt}{post_build} || '';
+        } else {
+            # Fall back to static rule tables
+            if (exists $fixed_rule{$key}) {
+                $info{rule} = $fixed_rule{$key};
+            } elsif (exists $pattern_rule{$key}) {
+                my $rule_ref = $pattern_rule{$key};
+                $info{rule} = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
+            }
+
+            # Derive exec_dir from target path
+            if ($tgt =~ m{^(.+)/[^/]+$}) {
+                $info{exec_dir} = $1;
+            } else {
+                $info{exec_dir} = '.';
+            }
+        }
+
+        # Get deps from dry-run capture
+        $info{deps} = $all_targets{$tgt} || [];
+
+        # File info
+        if (-e $tgt) {
+            my @stat = stat($tgt);
+            $info{exists} = 1;
+            $info{mtime} = $stat[9];
+            $info{size} = $stat[7];
+        } else {
+            $info{exists} = 0;
+        }
+
+        # Post-build hook (use local target_info first, fall back to global)
+        $info{post_build} //= $post_build{$tgt} // '';
+
+        return \%info;
+    };
+
+    # Generate HTML output
+    if ($html_file) {
+        open(my $fh, '>', $html_file) or do {
+            print "Cannot write to $html_file: $!\n";
+            return;
+        };
+
+        print $fh <<'HTML_HEAD';
+<!DOCTYPE html>
+<html>
+<head>
+<title>Build Tree</title>
+<style>
+body { font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d4; }
+h1, h2 { color: #569cd6; }
+.layer { margin: 20px 0; padding: 10px; border: 1px solid #3c3c3c; border-radius: 5px; }
+.layer-title { font-weight: bold; color: #dcdcaa; margin-bottom: 10px; }
+.target { padding: 5px 10px; margin: 2px 0; cursor: pointer; border-radius: 3px; }
+.target:hover { background: #2d2d2d; }
+.ok { color: #4ec9b0; }
+.stale { color: #f14c4c; }
+.dirty { color: #569cd6; }
+.indicator { color: #808080; margin-right: 5px; }
+.info-panel { display: none; position: fixed; top: 50px; right: 20px; width: 400px;
+              background: #252526; border: 1px solid #3c3c3c; border-radius: 5px;
+              padding: 15px; max-height: 80vh; overflow-y: auto; }
+.info-panel.visible { display: block; }
+.info-panel h3 { color: #dcdcaa; margin-top: 0; }
+.info-panel pre { background: #1e1e1e; padding: 10px; border-radius: 3px;
+                  overflow-x: auto; white-space: pre-wrap; }
+.info-panel .label { color: #569cd6; }
+.close-btn { float: right; cursor: pointer; color: #808080; }
+.close-btn:hover { color: #d4d4d4; }
+.legend { margin-bottom: 20px; }
+.legend span { margin-right: 20px; }
+</style>
+</head>
+<body>
+<h1>Build Tree: TARGET_PLACEHOLDER</h1>
+<div class="legend">
+  <span class="ok">&#9679; OK (up-to-date)</span>
+  <span class="stale">&#9679; Stale (needs rebuild)</span>
+  <span class="dirty">&#9679; Dirty (marked for rebuild)</span>
+</div>
+<div id="info-panel" class="info-panel">
+  <span class="close-btn" onclick="hideInfo()">&times;</span>
+  <h3 id="info-target"></h3>
+  <div id="info-content"></div>
+</div>
+HTML_HEAD
+
+        # Replace placeholder
+        seek($fh, 0, 0);
+        my $head = do { local $/; <$fh> };
+        # Actually, let's just print properly
+        close($fh);
+        open($fh, '>', $html_file) or die;
+
+        my $html_head = <<'HTML_HEAD';
+<!DOCTYPE html>
+<html>
+<head>
+<title>Build Tree</title>
+<style>
+body { font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d4; }
+h1, h2 { color: #569cd6; }
+.layer { margin: 20px 0; padding: 10px; border: 1px solid #3c3c3c; border-radius: 5px; }
+.layer-title { font-weight: bold; color: #dcdcaa; margin-bottom: 10px; }
+.target { padding: 5px 10px; margin: 2px 0; cursor: pointer; border-radius: 3px; }
+.target:hover { background: #2d2d2d; }
+.ok { color: #4ec9b0; }
+.stale { color: #f14c4c; }
+.dirty { color: #569cd6; }
+.indicator { color: #808080; margin-right: 5px; }
+.info-panel { display: none; position: fixed; top: 50px; right: 20px; width: 400px;
+              background: #252526; border: 1px solid #3c3c3c; border-radius: 5px;
+              padding: 15px; max-height: 80vh; overflow-y: auto; }
+.info-panel.visible { display: block; }
+.info-panel h3 { color: #dcdcaa; margin-top: 0; }
+.info-panel pre { background: #1e1e1e; padding: 10px; border-radius: 3px;
+                  overflow-x: auto; white-space: pre-wrap; }
+.info-panel .label { color: #569cd6; }
+.close-btn { float: right; cursor: pointer; color: #808080; }
+.close-btn:hover { color: #d4d4d4; }
+.legend { margin-bottom: 20px; }
+.legend span { margin-right: 20px; }
+</style>
+</head>
+<body>
+HTML_HEAD
+        print $fh $html_head;
+        print $fh "<h1>Build Tree: " . _html_escape($target) . "</h1>\n";
+        print $fh qq{<div class="legend">\n};
+        print $fh qq{  <span class="ok">&#9679; OK (up-to-date)</span>\n};
+        print $fh qq{  <span class="stale">&#9679; Stale (needs rebuild)</span>\n};
+        print $fh qq{  <span class="dirty">&#9679; Dirty (marked for rebuild)</span>\n};
+        print $fh qq{</div>\n};
+        print $fh qq{<div id="info-panel" class="info-panel">\n};
+        print $fh qq{  <span class="close-btn" onclick="hideInfo()">&times;</span>\n};
+        print $fh qq{  <h3 id="info-target"></h3>\n};
+        print $fh qq{  <div id="info-content"></div>\n};
+        print $fh qq{</div>\n};
+
+        # Build target info database for JavaScript
+        print $fh "<script>\nvar targetInfo = {\n";
+        for my $tgt (keys %all_targets) {
+            my $info = $get_target_info->($tgt);
+            my $status = $get_status->($tgt);
+            my $escaped_tgt = $tgt;
+            $escaped_tgt =~ s/'/\\'/g;
+            print $fh "  '$escaped_tgt': {\n";
+            print $fh "    status: '$status',\n";
+            print $fh "    exists: " . ($info->{exists} ? 'true' : 'false') . ",\n";
+            print $fh "    size: " . ($info->{size} // 0) . ",\n";
+            print $fh "    mtime: " . ($info->{mtime} // 0) . ",\n";
+            print $fh "    deps: [" . join(", ", map { "'" . _html_escape($_) . "'" } @{$info->{deps}}) . "],\n";
+            my $exec_dir = $info->{exec_dir} // '.';
+            $exec_dir =~ s/'/\\'/g;
+            print $fh "    execDir: '$exec_dir',\n";
+            # Add siblings (for compound targets)
+            my @siblings = @{$info->{siblings} || []};
+            print $fh "    siblings: [" . join(", ", map { "'" . _html_escape($_) . "'" } @siblings) . "],\n";
+            # Add compound parent (for sibling targets)
+            my $compound = $info->{compound_parent} // '';
+            $compound =~ s/'/\\'/g;
+            print $fh "    compoundParent: '$compound',\n";
+            my $rule = $info->{rule} // '';
+            $rule =~ s/\\/\\\\/g;
+            $rule =~ s/'/\\'/g;
+            $rule =~ s/\n/\\n/g;
+            print $fh "    rule: '$rule',\n";
+            my $post_build = $info->{post_build} // '';
+            $post_build =~ s/\\/\\\\/g;
+            $post_build =~ s/'/\\'/g;
+            print $fh "    postBuild: '$post_build'\n";
+            print $fh "  },\n";
+        }
+        print $fh "};\n";
+
+        print $fh <<'HTML_SCRIPT';
+function showInfo(target) {
+  var info = targetInfo[target];
+  if (!info) return;
+  document.getElementById('info-target').textContent = target;
+  var html = '<p><span class="label">Status:</span> <span class="' + info.status + '">' + info.status + '</span></p>';
+  if (info.exists) {
+    html += '<p><span class="label">Size:</span> ' + info.size + ' bytes</p>';
+    html += '<p><span class="label">Modified:</span> ' + new Date(info.mtime * 1000).toLocaleString() + '</p>';
+  } else {
+    html += '<p><span class="label">File:</span> does not exist</p>';
+  }
+  if (info.execDir && info.execDir !== '.') {
+    html += '<p><span class="label">Execution directory:</span> ' + info.execDir + '</p>';
+  }
+  if (info.compoundParent) {
+    html += '<p><span class="label">Built by compound target:</span> <span onclick="showInfo(\'' + info.compoundParent + '\')" style="cursor:pointer;text-decoration:underline">' + info.compoundParent + '</span></p>';
+  }
+  if (info.siblings && info.siblings.length > 1) {
+    html += '<p><span class="label">Multi-output siblings:</span></p><ul>';
+    info.siblings.forEach(function(s) {
+      var sinfo = targetInfo[s];
+      var cls = sinfo ? sinfo.status : 'stale';
+      html += '<li class="' + cls + '" onclick="showInfo(\'' + s + '\')" style="cursor:pointer">' + s + '</li>';
+    });
+    html += '</ul>';
+  }
+  if (info.deps.length > 0) {
+    html += '<p><span class="label">Dependencies:</span></p><ul>';
+    info.deps.forEach(function(d) {
+      var dinfo = targetInfo[d];
+      var cls = dinfo ? dinfo.status : 'stale';
+      html += '<li class="' + cls + '" onclick="showInfo(\'' + d + '\')" style="cursor:pointer">' + d + '</li>';
+    });
+    html += '</ul>';
+  }
+  if (info.rule) {
+    html += '<p><span class="label">Build command:</span></p><pre>' + info.rule.replace(/</g, '&lt;') + '</pre>';
+  }
+  if (info.postBuild) {
+    html += '<p><span class="label">Post-build:</span></p><pre>' + info.postBuild.replace(/</g, '&lt;') + '</pre>';
+  }
+  document.getElementById('info-content').innerHTML = html;
+  document.getElementById('info-panel').classList.add('visible');
+}
+function hideInfo() {
+  document.getElementById('info-panel').classList.remove('visible');
+}
+</script>
+HTML_SCRIPT
+
+        print $fh "<p>Build order: Layer 0 builds first, layer $max_layer builds last.</p>\n";
+
+        my $total = 0;
+        for my $layer (0 .. $max_layer) {
+            next unless $layers[$layer] && @{$layers[$layer]};
+            my @targets = sort @{$layers[$layer]};
+            my $count = scalar @targets;
+            $total += $count;
+
+            print $fh qq{<div class="layer">\n};
+            print $fh qq{<div class="layer-title">Layer $layer};
+            print $fh " (builds first)" if $layer == 0;
+            print $fh " [$count target" . ($count == 1 ? "" : "s") . "]</div>\n";
+
+            for my $t (@targets) {
+                my $status = $get_status->($t);
+                my $indicator = "";
+                if ($t =~ /&/) { $indicator = "[compound]"; }  # Multi-output target
+                elsif ($t =~ /\.a$/) { $indicator = "[lib]"; }
+                elsif ($t =~ /\.o$/) { $indicator = "[obj]"; }
+                elsif ($t =~ /\.(c|cpp|cc|cxx)$/) { $indicator = "[src]"; }
+                elsif ($t =~ /\.(h|hpp)$/) { $indicator = "[hdr]"; }
+                elsif (-x $t || $t =~ /^bin\//) { $indicator = "[exe]"; }
+
+                my $escaped = _html_escape($t);
+                my $js_escaped = $t;
+                $js_escaped =~ s/'/\\'/g;
+                print $fh qq{<div class="target $status" onclick="showInfo('$js_escaped')">};
+                print $fh qq{<span class="indicator">$indicator</span>} if $indicator;
+                print $fh "$escaped</div>\n";
+            }
+            print $fh "</div>\n";
+        }
+
+        print $fh "<p>Total: $total targets in " . ($max_layer + 1) . " layers</p>\n";
+        print $fh "</body>\n</html>\n";
+        close($fh);
+
+        print "HTML output written to: $html_file\n";
+
+        if ($launch_browser) {
+            system("$launch_browser $html_file &");
+            print "Launched browser: $launch_browser\n";
+        }
+        return;
+    }
+
+    # Terminal output with colors
     print "Build tree for: $target\n";
     print "=" x 60 . "\n";
+    print "Legend: $colors{ok}green=ok$colors{reset}, $colors{stale}red=stale$colors{reset}, $colors{dirty}blue=dirty$colors{reset}\n";
     print "Build order: Layer 0 builds first, layer $max_layer builds last.\n";
 
     my $total = 0;
@@ -7226,8 +7804,14 @@ sub cmd_btree {
         print " [$count target" . ($count == 1 ? "" : "s") . "]:\n";
 
         for my $t (@targets) {
+            my $status = $get_status->($t);
+            my $color = $colors{$status} // '';
+            my $reset = $colors{reset};
+
             my $indicator = "";
-            if ($t =~ /\.a$/) {
+            if ($t =~ /&/) {
+                $indicator = "[compound] ";  # Multi-output target
+            } elsif ($t =~ /\.a$/) {
                 $indicator = "[lib] ";
             } elsif ($t =~ /\.o$/) {
                 $indicator = "[obj] ";
@@ -7238,12 +7822,22 @@ sub cmd_btree {
             } elsif (-x $t || $t =~ /^bin\//) {
                 $indicator = "[exe] ";
             }
-            print "  $indicator$t\n";
+            print "  $color$indicator$t$reset\n";
         }
     }
 
     print "\n" . "=" x 60 . "\n";
     print "Total: $total targets in " . ($max_layer + 1) . " layers\n";
+}
+
+# Helper for HTML escaping
+sub _html_escape {
+    my ($str) = @_;
+    $str =~ s/&/&amp;/g;
+    $str =~ s/</&lt;/g;
+    $str =~ s/>/&gt;/g;
+    $str =~ s/"/&quot;/g;
+    return $str;
 }
 
 sub cmd_vpath {
@@ -9072,6 +9666,34 @@ sub run_job_master {
         return join(" && ", @processed);
     }
 
+    # Extract directories referenced in a command that might have build rules
+    # Returns list of directory names that have rules and should be implicit dependencies
+    sub extract_directory_deps {
+        my ($command, $makefile) = @_;
+        return () unless defined $command && $command =~ /\S/;
+
+        my %dirs;
+
+        # Look for patterns like "mv foo.d dep/foo.d" or references to "somedir/somefile"
+        # Extract directory components from destination paths
+        while ($command =~ m{\b(?:mv|cp)\s+\S+\s+(\S+/)[^\s/]*}g) {
+            my $dir = $1;
+            $dir =~ s{/$}{};  # Remove trailing slash
+            $dirs{$dir} = 1 if $dir =~ /^\w+$/;  # Only simple directory names
+        }
+
+        # Filter to directories that have build rules
+        my @result;
+        for my $dir (keys %dirs) {
+            my $key = "$makefile\t$dir";
+            if (exists $fixed_deps{$key} || exists $pattern_deps{$key} || exists $pseudo_deps{$key}) {
+                push @result, $dir;
+            }
+        }
+
+        return @result;
+    }
+
     # Split a command string into external commands and trailing builtins
     # Returns (external_parts_arrayref, trailing_builtins_arrayref)
     sub split_command_parts {
@@ -9547,7 +10169,19 @@ sub run_job_master {
                             my $found_variant = 0;
                             for my $vi (0 .. $#$deps_ref) {
                                 my @variant_deps = @{$deps_ref->[$vi]};
-                                @variant_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+                                # Expand stem and makefile variables in deps
+                                @variant_deps = map {
+                                    my $d = $_;
+                                    $d =~ s/%/$stem/g;
+                                    $d = expand_vars($d);  # Expand $(srcdir) etc.
+                                    # Also expand $MV{VAR} format
+                                    while ($d =~ /\$MV\{([^}]+)\}/) {
+                                        my $var = $1;
+                                        my $val = $MV{$var} // '';
+                                        $d =~ s/\$MV\{\Q$var\E\}/$val/;
+                                    }
+                                    $d;
+                                } @variant_deps;
                                 my @resolved_deps = map { resolve_vpath($_, $dir) } @variant_deps;
                                 # Check if the first dep (source file) exists
                                 if (@resolved_deps && -f $resolved_deps[0]) {
@@ -9558,27 +10192,48 @@ sub run_job_master {
                                     last PATTERN_LOOP;
                                 }
                             }
-                            # If no variant's source exists, use the first variant
+                            # If no variant's source exists, skip this pattern rule
+                            # (don't apply pattern rules when source files are missing)
                             if (!$found_variant) {
-                                @deps = @{$deps_ref->[0]};
-                                @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
-                                @deps = map { resolve_vpath($_, $dir) } @deps;
-                                $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
-                                print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem', using default variant)\n" if $ENV{SMAK_DEBUG};
-                                last PATTERN_LOOP;
+                                print STDERR "Skipping pattern rule '$pattern' for target '$target' (stem='$stem', no source file exists)\n" if $ENV{SMAK_DEBUG};
+                                $matched_pattern_key = undef;
+                                $stem = '';
+                                # Don't break - continue looking for other pattern rules
                             }
                         } else {
                             # Single variant or flat deps array
-                            @deps = ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ();
-                            @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
-                            my @orig_deps = @deps;
-                            @deps = map { resolve_vpath($_, $dir) } @deps;
-                            $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
-                            if ($ENV{SMAK_DEBUG} && "@orig_deps" ne "@deps") {
-                                print STDERR "  Deps after vpath: " . join(", ", @deps) . "\n";
+                            my @candidate_deps = ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ();
+                            # Expand stem and makefile variables in deps
+                            @candidate_deps = map {
+                                my $d = $_;
+                                $d =~ s/%/$stem/g;
+                                $d = expand_vars($d);  # Expand $(srcdir) etc.
+                                # Also expand $MV{VAR} format (internal variable storage)
+                                while ($d =~ /\$MV\{([^}]+)\}/) {
+                                    my $var = $1;
+                                    my $val = $MV{$var} // '';
+                                    $d =~ s/\$MV\{\Q$var\E\}/$val/;
+                                }
+                                $d;
+                            } @candidate_deps;
+                            my @resolved_deps = map { resolve_vpath($_, $dir) } @candidate_deps;
+
+                            # Check if the first dep (source file) exists
+                            if (@resolved_deps && !-f $resolved_deps[0] && !-f "$dir/$candidate_deps[0]") {
+                                # Source file doesn't exist, skip this pattern rule
+                                print STDERR "Skipping pattern rule '$pattern' for target '$target' (stem='$stem', source '$resolved_deps[0]' not found)\n" if $ENV{SMAK_DEBUG};
+                                $matched_pattern_key = undef;
+                                $stem = '';
+                                # Don't break - continue looking for other pattern rules
+                            } else {
+                                @deps = @resolved_deps;
+                                $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
+                                if ($ENV{SMAK_DEBUG} && "@candidate_deps" ne "@deps") {
+                                    print STDERR "  Deps after vpath: " . join(", ", @deps) . "\n";
+                                }
+                                print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
+                                last PATTERN_LOOP;
                             }
-                            print STDERR "Matched pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
-                            last PATTERN_LOOP;
                         }
                     }
                 }
@@ -9767,6 +10422,19 @@ sub run_job_master {
                     # Otherwise fall through to recurse and check needs_rebuild
                 }
 
+                # Check if this dependency is part of a compound target (multi-output rule)
+                # If so, the compound target must be built first
+                my $full_dep = target_with_prefix($single_dep, $prefix);
+                if (exists $target_to_compound{$full_dep}) {
+                    my $compound = $target_to_compound{$full_dep};
+                    print STDERR "DEBUG: Dependency '$full_dep' is part of compound '$compound'\n" if $ENV{SMAK_DEBUG};
+                    # Mark as waiting for compound (compound should already be queued)
+                    if (!exists $in_progress{$full_dep}) {
+                        $in_progress{$full_dep} = "compound:$compound";
+                    }
+                    next;  # Compound handles this target
+                }
+
                 # Recursively queue this dependency
 		if ($depth > $recurse_limit) {
 		    warn "Recursion queuing ${dir}:$single_dep\nTraceback - \n";
@@ -9834,6 +10502,17 @@ sub run_job_master {
                         print STDERR "Order-only dep '$full_dep' exists at '$dep_path', no rules, marking complete\n" if $ENV{SMAK_DEBUG};
                         next;
                     }
+                }
+
+                # Check if this order-only dep is part of a compound target
+                my $full_dep = target_with_prefix($single_dep, $prefix);
+                if (exists $target_to_compound{$full_dep}) {
+                    my $compound = $target_to_compound{$full_dep};
+                    print STDERR "DEBUG: Order-only dep '$full_dep' is part of compound '$compound'\n" if $ENV{SMAK_DEBUG};
+                    if (!exists $in_progress{$full_dep}) {
+                        $in_progress{$full_dep} = "compound:$compound";
+                    }
+                    next;
                 }
 
                 if ($depth > $recurse_limit) {
@@ -9980,6 +10659,13 @@ sub run_job_master {
                     my @full_siblings = map { target_with_prefix($_, $prefix) } sort @sibling_targets;
                     $compound_target = join('&', @full_siblings);
 
+                    # Register each sibling in target_to_compound map
+                    # This allows dependencies on any sibling to find the compound target
+                    for my $sibling (@full_siblings) {
+                        $target_to_compound{$sibling} = $compound_target;
+                        print STDERR "DEBUG: Registered '$sibling' -> compound '$compound_target'\n" if $ENV{SMAK_DEBUG};
+                    }
+
                     # Check if compound target is already queued or in progress
                     if (exists $in_progress{$compound_target}) {
                         my $status = $in_progress{$compound_target};
@@ -10024,9 +10710,28 @@ sub run_job_master {
             # Split command into external parts and trailing builtins for efficient execution
             my ($external_parts, $trailing_builtins) = split_command_parts($processed_rule);
 
+            # Extract implicit directory dependencies from the command
+            # e.g., "mv foo.d dep/foo.d" implies a dependency on "dep" if it has a build rule
+            my @implicit_dir_deps = extract_directory_deps($processed_rule, $makefile);
+            if (@implicit_dir_deps) {
+                print STDERR "DEBUG: Found implicit directory deps for '$target': @implicit_dir_deps\n" if $ENV{SMAK_DEBUG};
+                for my $dir_dep (@implicit_dir_deps) {
+                    # Queue the directory target if not already handled
+                    my $full_dir_dep = target_with_prefix($dir_dep, $prefix);
+                    unless (is_target_pending($full_dir_dep) || exists $completed_targets{$full_dir_dep}) {
+                        queue_target_recursive($dir_dep, $dir, $msocket, $depth + 1, $prefix);
+                    }
+                    # Add as order-only dependency (for layer computation)
+                    push @order_only_deps, $dir_dep unless grep { $_ eq $dir_dep } @order_only_deps;
+                }
+                # Recompute layer since we added dependencies
+                $layer = compute_target_layer([@deps, @order_only_deps]);
+            }
+
             my $job = {
                 target => $full_target,  # Use full path from project root
-                dir => $dir,
+                dir => '.',  # Verification base (target has full path from project root)
+                exec_dir => $dir,  # Where worker should cd to execute command
                 command => $processed_rule,  # Keep original for display
                 external_commands => $external_parts,  # Commands needing external execution
                 trailing_builtins => $trailing_builtins,  # Builtins to run after externals
@@ -10043,12 +10748,17 @@ sub run_job_master {
             # These placeholders depend on the compound target and should be marked done when compound completes.
             # If a placeholder ever executes, it's a bug - compound completion should have marked it done first.
             if ($compound_target && @sibling_targets > 1) {
+                # Set default post-build hook for compound target: verify all siblings were created
+                (my $siblings = $compound_target) =~ s/&/ /g;
+                $post_build{$compound_target} = "check-siblings $siblings";
+                warn "DEBUG: Set post_build for '$compound_target': $post_build{$compound_target}\n" if $ENV{SMAK_DEBUG};
                 my $placeholder_layer = $layer + 1;
                 for my $sibling (@sibling_targets) {
                     my $full_sibling = target_with_prefix($sibling, $prefix);
                     my $placeholder_job = {
                         target => $full_sibling,
-                        dir => $dir,
+                        dir => '.',  # Verification base
+                        exec_dir => $dir,  # Worker chdir
                         command => "echo 'ASSERTION FAILED: Placeholder for $full_sibling should have been marked done by compound $compound_target' >&2 && exit 1",
                         external_commands => ["echo 'ASSERTION FAILED: Placeholder for $full_sibling should have been marked done by compound $compound_target' >&2 && exit 1"],
                         trailing_builtins => [],
@@ -10206,8 +10916,8 @@ sub run_job_master {
             }
         } else {
             # No change - show spinning wheel for activity indicator
-            # Skip spinner in dry-run mode to avoid interfering with output
-            if (($queued || $running) && !$dry_run_mode) {
+            # Skip spinner in dry-run mode or debug mode to avoid interfering with output
+            if (($queued || $running) && !$dry_run_mode && !$ENV{SMAK_DEBUG}) {
                 print STDERR "\r" . $wheel_chars[$wheel_pos] . " ";
                 STDERR->flush();  # Ensure spinner updates immediately
                 $wheel_pos = ($wheel_pos + 1) % scalar(@wheel_chars);
@@ -10242,6 +10952,20 @@ sub run_job_master {
 	            vprint "Deadlock recovery: failed $failed_count jobs with failed dependencies\n";
 	        }
 
+	        # Check if we need to advance the dispatch layer
+	        # This handles the case where all jobs in current layer are done but
+	        # jobs exist in higher layers (e.g., from recursive subdirectory processing)
+	        if (@job_queue > 0) {
+	            # Find next layer with jobs using @job_layers
+	            for my $next_layer ($current_dispatch_layer + 1 .. $#job_layers) {
+	                if ($job_layers[$next_layer] && @{$job_layers[$next_layer]} > 0) {
+	                    vprint "Advancing dispatch layer from $current_dispatch_layer to $next_layer (deadlock recovery)\n";
+	                    $current_dispatch_layer = $next_layer;
+	                    last;
+	                }
+	            }
+	        }
+
 	        # Always try to dispatch before concluding deadlock
 	        # This handles the race condition where workers just became ready
 	        if (@job_queue > 0) {
@@ -10256,6 +10980,16 @@ sub run_job_master {
 
 	        # If still stuck with jobs, that's a real deadlock
 	        if (@job_queue > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0) {
+	            # Before failing, dump diagnostic info
+	            warn "Deadlock diagnostic:\n";
+	            warn "  current_dispatch_layer=$current_dispatch_layer, max_dispatch_layer=$max_dispatch_layer\n";
+	            warn "  Job queue (" . scalar(@job_queue) . " jobs):\n";
+	            for my $i (0 .. ($#job_queue < 5 ? $#job_queue : 4)) {
+	                my $job = $job_queue[$i];
+	                warn "    [$i] $job->{target} (layer " . ($job->{layer} // 0) . ")\n";
+	            }
+	            warn "    ...\n" if @job_queue > 5;
+
 	            assert_or_die(0,
 	                "Deadlock detected in $label: " . scalar(@job_queue) . " jobs queued, " .
 	                "$ready_workers workers ready, but nothing running. " .
@@ -10471,16 +11205,18 @@ sub run_job_master {
         $running_jobs{$task_id} = {
             target => $target,
             worker => $worker,
-            dir => $job->{dir},
+            dir => $job->{dir},  # For verify (should be '.')
+            exec_dir => $job->{exec_dir} || $job->{dir},  # For worker chdir
             command => $job->{command},
             siblings => $job->{siblings} || [],
-            layer => $job->{layer},
             layer => $job->{layer} // 0,
         };
 
         # Send task to worker with split commands for efficient execution
         print $worker "TASK $task_id\n";
-        print $worker "DIR $job->{dir}\n";
+        # Use exec_dir for worker chdir (falls back to dir for backwards compatibility)
+        my $worker_dir = $job->{exec_dir} || $job->{dir};
+        print $worker "DIR $worker_dir\n";
 
         # Send external commands (each executed directly without shell)
         my @ext_cmds = $job->{external_commands} ? @{$job->{external_commands}} : ();
@@ -11043,11 +11779,15 @@ sub run_job_master {
                     }
                 }
 
-                if ($current_layer_queued == 0 && $current_layer_running == 0 && $current_dispatch_layer < $max_dispatch_layer) {
-                    # Current layer fully complete - advance to next layer
-                    $current_dispatch_layer++;
-                    print STDERR "DEBUG: Layer complete, advancing to dispatch layer $current_dispatch_layer\n" if $ENV{SMAK_DEBUG};
-                    next;  # Retry with new layer
+                if ($current_layer_queued == 0 && $current_layer_running == 0) {
+                    # Current layer fully complete - find next layer with jobs
+                    for my $next_layer ($current_dispatch_layer + 1 .. $#job_layers) {
+                        if ($job_layers[$next_layer] && @{$job_layers[$next_layer]} > 0) {
+                            $current_dispatch_layer = $next_layer;
+                            print STDERR "DEBUG: Layer complete, advancing to dispatch layer $current_dispatch_layer\n" if $ENV{SMAK_DEBUG};
+                            next;  # Retry with new layer
+                        }
+                    }
                 }
 
                 if ($current_layer_running > 0) {
@@ -11292,7 +12032,8 @@ sub run_job_master {
             $running_jobs{$task_id} = {
                 target => $job->{target},
                 worker => $ready_worker,
-                dir => $job->{dir},
+                dir => $job->{dir},  # For verify
+                exec_dir => $job->{exec_dir} || $job->{dir},  # For worker chdir
                 command => $job->{command},
                 siblings => $job->{siblings} || [],  # Multi-output siblings
                 layer => $job->{layer},  # Track layer for completion checking
@@ -11301,10 +12042,11 @@ sub run_job_master {
             };
 
 	    $j++;
-	    
-            # Send task to worker
+
+            # Send task to worker (use exec_dir for chdir)
+            my $worker_dir = $job->{exec_dir} || $job->{dir};
             print $ready_worker "TASK $task_id\n";
-            print $ready_worker "DIR $job->{dir}\n";
+            print $ready_worker "DIR $worker_dir\n";
             print $ready_worker "CMD $job->{command}\n";
             $ready_worker->flush();  # Ensure immediate send to worker
 
@@ -11512,19 +12254,40 @@ sub run_job_master {
                                         $scanner_socket->flush();
                                     }
 
+                                    # Execute post-build hook if defined for this target
+                                    if (exists $post_build{$job->{target}}) {
+                                        my $post_cmd = $post_build{$job->{target}};
+                                        warn "DEBUG: Running post-build for '$job->{target}': $post_cmd\n" if $ENV{SMAK_DEBUG};
+                                        my $post_exit = execute_builtin($post_cmd);
+                                        if (!defined $post_exit) {
+                                            # Not a builtin, run as shell command
+                                            $post_exit = system($post_cmd);
+                                        }
+                                        if ($post_exit != 0) {
+                                            warn "Post-build hook failed for $job->{target}: $post_cmd\n";
+                                        }
+                                    }
+
                                     # If this job has siblings (multi-output pattern rule), mark them as complete too
+                                    # Siblings can come from $job->{siblings} OR from compound target name (a&b format)
+                                    my @siblings_to_mark;
                                     if ($job->{siblings} && @{$job->{siblings}} > 1) {
-                                        for my $sibling (@{$job->{siblings}}) {
-                                            if ($sibling ne $job->{target}) {
-                                                $completed_targets{$sibling} = 1;
-                                                $in_progress{$sibling} = "done";
-                                                # Also tell scanner to watch siblings
-                                                if ($scanner_socket) {
-                                                    print $scanner_socket "WATCH:$sibling\n";
-                                                    $scanner_socket->flush();
-                                                }
-                                                warn "DEBUG: Marking sibling '$sibling' as complete (created with '$job->{target}')\n" if $ENV{SMAK_DEBUG};
+                                        @siblings_to_mark = @{$job->{siblings}};
+                                    } elsif ($job->{target} =~ /&/) {
+                                        # Compound target name encodes siblings: parse.cc&parse.h
+                                        @siblings_to_mark = split(/&/, $job->{target});
+                                    }
+                                    if (@siblings_to_mark > 1) {
+                                        for my $sibling (@siblings_to_mark) {
+                                            next if $sibling eq $job->{target};  # Don't double-mark self
+                                            $completed_targets{$sibling} = 1;
+                                            $in_progress{$sibling} = "done";
+                                            # Also tell scanner to watch siblings
+                                            if ($scanner_socket) {
+                                                print $scanner_socket "WATCH:$sibling\n";
+                                                $scanner_socket->flush();
                                             }
+                                            warn "DEBUG: Marking sibling '$sibling' as complete (created with '$job->{target}')\n" if $ENV{SMAK_DEBUG};
                                         }
                                     }
                                 } else {
@@ -11816,6 +12579,7 @@ sub run_job_master {
                                     my $retry_job = {
                                         target => $job->{target},
                                         dir => $job->{dir},
+                                        exec_dir => $job->{exec_dir} || $job->{dir},
                                         command => $job->{command},
                                         silent => $job->{silent} || 0,
                                         layer => $retry_layer,
@@ -13260,6 +14024,7 @@ sub run_job_master {
                                 my $sub_job = {
                                     target => $subtarget,
                                     dir => $job->{dir},
+                                    exec_dir => $job->{exec_dir} || $job->{dir},
                                     command => $sub_cmd,
                                     silent => $sub_silent,
                                     layer => $sub_layer,
@@ -13360,14 +14125,35 @@ sub run_job_master {
                             $in_progress{$job->{target}} = "done";
                             print STDERR "Task $task_id completed successfully: $job->{target}\n" if $ENV{SMAK_DEBUG};
 
+                            # Execute post-build hook if defined for this target
+                            if (exists $post_build{$job->{target}}) {
+                                my $post_cmd = $post_build{$job->{target}};
+                                warn "DEBUG: Running post-build for '$job->{target}': $post_cmd\n" if $ENV{SMAK_DEBUG};
+                                my $post_exit = execute_builtin($post_cmd);
+                                if (!defined $post_exit) {
+                                    # Not a builtin, run as shell command
+                                    $post_exit = system($post_cmd);
+                                }
+                                if ($post_exit != 0) {
+                                    warn "Post-build hook failed for $job->{target}: $post_cmd\n";
+                                }
+                            }
+
                             # If this job has siblings (multi-output pattern rule), mark them as complete too
+                            # Siblings can come from $job->{siblings} OR from compound target name (a&b format)
+                            my @siblings_to_mark;
                             if ($job->{siblings} && @{$job->{siblings}} > 1) {
-                                for my $sibling (@{$job->{siblings}}) {
-                                    if ($sibling ne $job->{target}) {
-                                        $completed_targets{$sibling} = 1;
-                                        $in_progress{$sibling} = "done";
-                                        print STDERR "DEBUG: Marking sibling '$sibling' as complete (created with '$job->{target}')\n" if $ENV{SMAK_DEBUG};
-                                    }
+                                @siblings_to_mark = @{$job->{siblings}};
+                            } elsif ($job->{target} =~ /&/) {
+                                # Compound target name encodes siblings: parse.cc&parse.h
+                                @siblings_to_mark = split(/&/, $job->{target});
+                            }
+                            if (@siblings_to_mark > 1) {
+                                for my $sibling (@siblings_to_mark) {
+                                    next if $sibling eq $job->{target};  # Don't double-mark self
+                                    $completed_targets{$sibling} = 1;
+                                    $in_progress{$sibling} = "done";
+                                    print STDERR "DEBUG: Marking sibling '$sibling' as complete (created with '$job->{target}')\n" if $ENV{SMAK_DEBUG};
                                 }
                             }
                         } else {
@@ -13648,6 +14434,7 @@ sub run_job_master {
                                 my $retry_job = {
                                     target => $job->{target},
                                     dir => $job->{dir},
+                                    exec_dir => $job->{exec_dir} || $job->{dir},
                                     command => $job->{command},
                                     silent => $job->{silent} || 0,
                                     layer => $retry_layer,

@@ -359,6 +359,14 @@ sub run_worker {
                 for my $ext_cmd (@external_commands) {
                     last if $exit_code != 0;
 
+                    # Try built-in execution first (handles mkdir, rm, mv, etc. more efficiently)
+                    my $builtin_result = execute_builtin($ext_cmd, $socket);
+                    if (defined $builtin_result) {
+                        $exit_code = $builtin_result;
+                        next;
+                    }
+
+                    # Not a built-in, execute externally
                     my ($pid, $cmd_fh, $is_direct) = execute_command_direct($ext_cmd);
                     if ($pid) {
                         while (my $out_line = <$cmd_fh>) {

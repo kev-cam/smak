@@ -15,6 +15,7 @@ sub new {
     my $self = {
         prompt => $opts{prompt} || '> ',
         get_prompt => $opts{get_prompt},  # Optional callback for dynamic prompt
+        is_busy => $opts{is_busy},  # Optional callback to check if jobs are running
         history_file => $opts{history_file} || '.smak_history',
         socket => $opts{socket},  # For async notifications
         check_notifications => $opts{check_notifications},
@@ -199,7 +200,8 @@ sub readline {
             if ($self->{check_notifications}) {
                 my $had_notification = $self->{check_notifications}->($buffer, $pos);
                 if ($had_notification) {
-                    redraw_line();
+                    my $busy = $self->{is_busy} && $self->{is_busy}->();
+                    redraw_line() unless $busy;
 		    if (-2 == $had_notification ) {
 			$result = undef;
 			last;
@@ -210,11 +212,12 @@ sub readline {
             # Check for reprompt request
             if ($reprompt_requested) {
                 $reprompt_requested = 0;
-                redraw_line();
+                my $busy = $self->{is_busy} && $self->{is_busy}->();
+                redraw_line() unless $busy;
             }
 
             # Wait for input with timeout (for periodic notification checks)
-            my @ready = $select->can_read(0.2);
+            my @ready = $select->can_read(0.1);
 
             # Check if stdin has data
             my $stdin_ready = 0;
@@ -225,7 +228,13 @@ sub readline {
                 }
             }
 
-            next unless $stdin_ready;
+            # If no stdin ready, redraw the line to keep prompt visible
+            # But suppress redraw while jobs are running (busy)
+            unless ($stdin_ready) {
+                my $busy = $self->{is_busy} && $self->{is_busy}->();
+                redraw_line() unless $busy;
+                next;
+            }
 
             my $char = $self->read_char();
             next unless defined $char;

@@ -269,6 +269,11 @@ if (defined $jobs && $jobs eq "auto") {
     $jobs = $cpu_count;
 }
 
+# Default to -j1 for dry-run mode (unless -j was explicitly specified)
+if ($dry_run && !$jobs_specified) {
+    $jobs = 1;
+}
+
 # Set default retry count if not specified
 # Default: 1 for parallel builds (-j > 0), 0 for sequential
 if (!defined $retries) {

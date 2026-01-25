@@ -24,10 +24,11 @@ sub new {
         max_history => 1000,
         termios => undef,
         orig_termios => undef,
+        is_tty => (-t STDIN) ? 1 : 0,  # Detect if STDIN is a terminal
     };
 
     bless $self, $class;
-    $self->load_history();
+    $self->load_history() if $self->{is_tty};  # Only load history for tty
     return $self;
 }
 
@@ -43,6 +44,9 @@ sub get_current_prompt {
 # Set terminal to raw mode
 sub set_raw_mode {
     my ($self) = @_;
+
+    # Skip if not a tty - raw mode only works on terminals
+    return unless $self->{is_tty};
 
     # Save original terminal settings
     $self->{orig_termios} = POSIX::Termios->new();
@@ -68,7 +72,7 @@ sub set_raw_mode {
 # Restore terminal to original mode
 sub restore_mode {
     my ($self) = @_;
-    return unless $self->{orig_termios};
+    return unless $self->{is_tty} && $self->{orig_termios};
     $self->{orig_termios}->setattr(0, TCSANOW);
 }
 
@@ -100,6 +104,9 @@ sub load_history {
 
 sub save_history {
     my ($self) = @_;
+
+    # Skip saving history for non-tty sessions
+    return unless $self->{is_tty};
 
     open(my $fh, '>', $self->{history_file}) or do {
         warn "Cannot save history: $!\n";
@@ -162,9 +169,23 @@ sub winch_handler {
 sub readline {
     ($self) = @_;
 
+    # Non-tty mode: use simple line-buffered reading (for pipes, scripts, tests)
+    unless ($self->{is_tty}) {
+        # Print prompt
+        print $self->get_current_prompt();
+        STDOUT->flush();
+
+        # Simple line reading - works with pipes and redirected input
+        my $line = <STDIN>;
+        return undef unless defined $line;  # EOF
+        chomp $line;
+        return $line;
+    }
+
+    # TTY mode: full readline with editing support
     $buffer = '';
     $pos = 0;  # Cursor position in buffer
-    
+
     # Reset history position
     $self->{history_pos} = @{$self->{history}};
     my $temp_line = '';  # Temporary storage when browsing history

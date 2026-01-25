@@ -360,10 +360,16 @@ sub run_worker {
                     last if $exit_code != 0;
 
                     # Try built-in execution first (handles mkdir, rm, mv, etc. more efficiently)
-                    my $builtin_result = execute_builtin($ext_cmd, $socket);
-                    if (defined $builtin_result) {
-                        $exit_code = $builtin_result;
-                        next;
+                    # Skip builtin if command has shell features that builtins can't handle:
+                    # - redirections/pipes: |><
+                    # - shell variables: $
+                    # - backticks or $(): `
+                    if ($ext_cmd !~ /[|><\$`]/) {
+                        my $builtin_result = execute_builtin($ext_cmd, $socket);
+                        if (defined $builtin_result) {
+                            $exit_code = $builtin_result;
+                            next;
+                        }
                     }
 
                     # Not a built-in, execute externally

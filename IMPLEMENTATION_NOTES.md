@@ -226,10 +226,167 @@ if ($dir && $target =~ m{^([^/]+)/(.+)$}) {
 }
 ```
 
+## Recursive Make Fork-and-Expand (Experimental)
+
+### Problem Statement
+
+When building projects like iverilog with `smak -j4`, half the workers were idle because
+subdirectory builds (triggered by `$(MAKE) -C subdir`) were being handled sequentially
+or not feeding work back to the job server properly.
+
+### Design Goals
+
+1. `smak -n` should match `make -n` output
+2. Built-in handling of `$(MAKE) -C subdir` should:
+   - Fork with fresh rule context (discard parent's rules)
+   - Parse the subdirectory Makefile fresh
+   - Capture and expand all targets/rules
+   - Feed expanded rules back to the parent job-server with root-relative paths
+3. The sub-make should NOT execute commands - it feeds work to the job-server
+4. The job-server dispatches work to workers for parallel execution
+
+### Implementation (Smak.pm)
+
+When a command matches the recursive make pattern (`$(MAKE) -C dir` or `smak -C dir`):
+
+1. **Fork a child process**:
+   ```perl
+   my $pid = fork();
+   if ($pid == 0) {
+       # Child: discard parent rules
+       %fixed_rule = ();
+       %fixed_deps = ();
+       %pattern_rule = ();
+       %pattern_deps = ();
+       # ... other rule hashes cleared
+   ```
+
+2. **Parse subdirectory Makefile fresh**:
+   ```perl
+   chdir($sub_directory) or exit(1);
+   eval { parse_makefile($sub_mf_name); };
+   ```
+
+3. **Capture targets via dry_run_target**:
+   ```perl
+   my %captured;
+   for my $sub_target (@targets_to_build) {
+       eval {
+           dry_run_target($sub_target, {}, 0, {
+               capture => \%captured,
+               no_commands => 1
+           });
+       };
+   }
+   ```
+
+4. **Expand all variables in child before serializing**:
+   - `$MV{...}` variables via `format_output()` and `expand_vars()`
+   - Automatic variables: `$@` (target), `$<` (first prereq), `$^` (all prereqs), `$*` (stem)
+   ```perl
+   my $expanded = format_output($info->{rule});
+   $expanded = expand_vars($expanded);
+   $expanded =~ s/\$\@/$tgt/g;
+   $expanded =~ s/\$</$first_prereq/g;
+   $expanded =~ s/\$\^/$all_prereqs/ge;
+   $expanded =~ s/\$\*/$stem/g if $stem;
+   ```
+
+5. **Serialize captured targets via Storable**:
+   ```perl
+   Storable::nstore(\%captured, $jobs_file);
+   exit(0);
+   ```
+
+6. **Parent loads and queues jobs with root-relative paths**:
+   ```perl
+   waitpid($pid, 0);
+   my $captured = Storable::retrieve($jobs_file);
+   for my $tgt (keys %$captured) {
+       my $full_target = $normalize_path->($sub_directory, $tgt);
+       # Queue job with root-relative path and expanded commands
+   }
+   ```
+
+### Path Normalization
+
+A helper function handles `.` and `..` in paths:
+```perl
+my $normalize_path = sub {
+    my ($base_dir, $path) = @_;
+    $path =~ s{^\./}{};  # Remove leading ./
+    while ($path =~ s{^\.\./}{}) {
+        if ($base_dir =~ m{/}) {
+            $base_dir =~ s{/[^/]+$}{};
+        } else {
+            $base_dir = '';
+        }
+    }
+    return $base_dir ? "$base_dir/$path" : $path;
+};
+```
+
+### Fixes Applied
+
+1. **ARRAY references in captured targets**: Pattern_deps structure is array of arrays
+   `[['%.c'], ['%.cc']]`. Fixed by properly accessing variants in pattern rule matching.
+
+2. **Pattern rules matching existing source files**: `parse%cc` incorrectly matched
+   `parse_misc.cc`. Fixed by checking if any variant has existing prereqs before
+   applying pattern rule to existing target.
+
+3. **Dependency path doubling**: `ivlpp/lexor.lex` became `ivlpp/ivlpp/lexor.lex`.
+   Fixed by checking if dep already starts with job dir prefix.
+
+4. **can_build_target not finding queued targets**: Added checks for `$in_progress{$target}`,
+   `$target_layer{$target}`, and compound targets.
+
+### Current Status
+
+**Working**:
+- Variable expansion in forked children (commands show proper `gcc`/`g++` instead of `$MV{CC}`)
+- Automatic variable expansion (`$@`, `$<`, `$^`, `$*`)
+- Path normalization for `./` and `../` prefixes
+- Pattern rules no longer incorrectly match existing source files
+
+**Not Yet Working**:
+- Test case with subdirectories (`/tmp/smak-test/`) shows subdirectory targets being
+  marked "up-to-date" and skipped instead of triggering fork expansion
+- The issue: `sub1` and `sub2` exist as directories, and even though they're declared
+  `.PHONY` and have rules (`$(MAKE) -C $@ all`), they're being treated as up-to-date
+- The phony detection may not be finding the `.PHONY` declaration, or the rule lookup
+  for `$(SUBDIRS):` targets isn't working correctly
+
+### Test Case
+
+Created at `/tmp/smak-test/`:
+```
+/tmp/smak-test/
+├── Makefile          # SUBDIRS = sub1 sub2; $(SUBDIRS): $(MAKE) -C $@ all
+├── sub1/
+│   ├── Makefile      # prog1: main.o util.o
+│   ├── main.c
+│   └── util.c
+└── sub2/
+    ├── Makefile      # prog2: app.o helper.o
+    ├── app.c
+    └── helper.c
+```
+
+`make -j4` works correctly. `smak -j4` skips subdirectories as "up-to-date".
+
+### Next Steps
+
+1. Debug why `.PHONY` targets that are directories aren't triggering their rules
+2. Check if the `$(SUBDIRS):` rule is being parsed correctly (the target list expands
+   to `sub1 sub2`, need to verify rule lookup works for these)
+3. May need to force phony behavior for targets that have recursive make commands
+
 ## Open Issues
 
 1. Some regression tests still failing
 2. Need to implement proper layer-based compound target handling
+3. Fork-and-expand not triggering for phony directory targets (see above)
 
 ## To Do
 

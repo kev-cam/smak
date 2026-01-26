@@ -1113,6 +1113,10 @@ sub expand_vars {
     $depth ||= 0;
     return $text if $depth > 10;  # Prevent infinite recursion
 
+    # Convert shell-style ${VAR} to make-style $(VAR) for uniform handling
+    # This handles autoconf-generated Makefiles that use ${prefix}, ${exec_prefix}, etc.
+    $text =~ s/\$\{(\w+)\}/\$($1)/g;
+
     # Prevent infinite loops from unsupported functions
     # Note: Large Makefiles (like automake-generated ones) can have hundreds of
     # variable references in a single command line, so we need a high limit
@@ -1473,6 +1477,9 @@ sub format_output {
     my ($text) = @_;
     # Convert $MV{VAR} back to $(VAR) for display/expansion
     $text =~ s/\$MV\{([^}]+)\}/\$($1)/g;
+    # Also convert shell-style ${VAR} to $(VAR) for uniform handling
+    # This handles autoconf-generated Makefiles that use ${prefix}, ${exec_prefix}, etc.
+    $text =~ s/\$\{(\w+)\}/\$($1)/g;
     return $text;
 }
 
@@ -5611,6 +5618,9 @@ sub dry_run_target {
     # Flatten and filter empty strings
     @deps = grep { $_ ne '' } @deps;
 
+    # Strip redundant ./ prefixes from dependencies ($(srcdir) = . produces ./file)
+    @deps = map { s{^\.\/}{}; $_ } @deps;
+
     # Apply vpath resolution to all dependencies
     use Cwd 'getcwd';
     my $cwd = getcwd();
@@ -5705,6 +5715,10 @@ sub dry_run_target {
         $expanded =~ s/\$</$first_prereq/g;               # $< = first prerequisite
         $expanded =~ s/\$\^/join(' ', @deps)/ge;          # $^ = all prerequisites
         $expanded =~ s/\$\*/$stem/g if $stem;             # $* = stem from pattern rule
+
+        # Strip redundant ./ prefixes from paths ($(srcdir) = . produces ./file instead of file)
+        $expanded =~ s{(\s)\.\/}{$1}g;   # " ./" -> " "
+        $expanded =~ s{^\.\/}{};          # Leading "./" -> ""
 
         # Strip command prefixes from each line for display
         # (@ means silent, - means ignore errors - both should be removed for dry-run output)
@@ -5930,6 +5944,10 @@ sub normalize_check_output {
         $line =~ s/^\s+//;
         $line =~ s/\s+$//;
         $line =~ s/\s+/ /g;
+
+        # Normalize ./ prefixes (make is inconsistent about these)
+        $line =~ s{(\s)\.\/}{$1}g;   # " ./" -> " "
+        $line =~ s{^\.\/}{};          # Leading "./" -> ""
 
         push @commands, $line if $line =~ /\S/;
     }

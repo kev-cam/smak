@@ -107,6 +107,7 @@ our @EXPORT_OK = qw(
     cmd_rm
     cmd_ignore
     cmd_dirty
+    run_check_mode
 );
 
 our %EXPORT_TAGS = (
@@ -5808,6 +5809,132 @@ sub dry_run_target {
             }
         }
     }
+}
+
+# Run check mode: compare smak -n output with make -n
+# Returns: (match_status, report_text)
+#   match_status: 1 = match, 0 = differ, -1 = error
+#
+# Note: This is a simple comparison tool. Both smak and make dry-run outputs
+# should already be fully expanded/normalized by their respective engines.
+# Differences found here indicate bugs in smak's dry-run expansion logic.
+sub run_check_mode {
+    my ($target, $makefile_path) = @_;
+
+    my @report;
+    push @report, "=== smak -check: Comparing dry-run output ===";
+    push @report, "Target: $target";
+    push @report, "Makefile: $makefile_path";
+    push @report, "";
+
+    # Step 1: Capture smak dry-run output
+    my $smak_output = '';
+    {
+        # Redirect STDOUT to capture dry-run output
+        local *STDOUT;
+        open(STDOUT, '>', \$smak_output) or die "Cannot redirect STDOUT: $!";
+        eval {
+            local $dry_run_mode = 1;
+            dry_run_target($target, {}, 0);
+        };
+        if ($@) {
+            return (-1, "Error in smak dry-run: $@");
+        }
+    }
+    my @smak_commands = normalize_check_output($smak_output, 'smak');
+
+    # Step 2: Run make -n and capture output
+    my $make_cmd = "make -n -f " . quotemeta($makefile_path) . " " . quotemeta($target) . " 2>&1";
+    my $make_output = `$make_cmd`;
+    my $make_exit = $? >> 8;
+
+    if ($make_exit != 0 && $make_output =~ /No rule to make target/) {
+        return (-1, "Error: make -n failed:\n$make_output");
+    }
+    my @make_commands = normalize_check_output($make_output, 'make');
+
+    # Step 3: Compare command sets
+    my %smak_set = map { $_ => 1 } @smak_commands;
+    my %make_set = map { $_ => 1 } @make_commands;
+
+    my @smak_only = grep { !exists $make_set{$_} } @smak_commands;
+    my @make_only = grep { !exists $smak_set{$_} } @make_commands;
+
+    # Step 4: Generate report
+    if (@smak_only) {
+        push @report, "Commands only in smak (not in make -n):";
+        push @report, "  + $_" for @smak_only;
+        push @report, "";
+    }
+
+    if (@make_only) {
+        push @report, "Commands only in make -n (not in smak):";
+        push @report, "  - $_" for @make_only;
+        push @report, "";
+    }
+
+    my $total_diff = @smak_only + @make_only;
+    if ($total_diff == 0) {
+        push @report, "Result: MATCH - smak and make agree on " . scalar(@smak_commands) . " command(s)";
+    } else {
+        push @report, "Result: MISMATCH - $total_diff difference(s) found";
+        push @report, "  smak unique: " . scalar(@smak_only);
+        push @report, "  make unique: " . scalar(@make_only);
+    }
+
+    my $match = ($total_diff == 0) ? 1 : 0;
+    return ($match, join("\n", @report) . "\n");
+}
+
+# Normalize dry-run output for comparison
+# Only does minimal formatting normalization - the actual command content
+# should match between smak and make if smak's expansion is correct.
+sub normalize_check_output {
+    my ($output, $source) = @_;
+
+    my @raw_lines = split(/\n/, $output);
+    my @lines;
+
+    # First pass: join continuation lines (ending with \)
+    my $continued = '';
+    for my $line (@raw_lines) {
+        if ($line =~ s/\s*\\$//) {
+            $continued .= $line . ' ';
+        } else {
+            if ($continued) {
+                push @lines, $continued . $line;
+                $continued = '';
+            } else {
+                push @lines, $line;
+            }
+        }
+    }
+    push @lines, $continued if $continued;
+
+    my @commands;
+    for my $line (@lines) {
+        # Skip empty lines
+        next if $line =~ /^\s*$/;
+
+        # Skip smak-specific headers (not actual commands)
+        next if $source eq 'smak' && $line =~ /^\s*Building:/;
+        next if $source eq 'smak' && $line =~ /^\s*Dependencies:/;
+        next if $source eq 'smak' && $line =~ /^\s*\(up-to-date\)/;
+
+        # Skip make status messages (not actual commands)
+        next if $line =~ /^make\[\d+\]: (Entering|Leaving) directory/;
+        next if $line =~ /^make\[\d+\]: Nothing to be done/;
+        next if $line =~ /^make: Nothing to be done/;
+
+        # Normalize whitespace
+        $line =~ s/^\s+//;
+        $line =~ s/\s+$//;
+        $line =~ s/\s+/ /g;
+
+        push @commands, $line if $line =~ /\S/;
+    }
+
+    return @commands;
 }
 
 sub add_rule {

@@ -39,6 +39,7 @@ my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
 my $remote_cd = '';  # Remote directory for SSH workers
 my $norc = 0;  # Skip reading .smak.rc files
 my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j)
+my $check = 0;  # Check mode - validate smak -n matches make -n
 
 # Check for -norc early (before reading .smak.rc)
 for my $arg (@ARGV) {
@@ -231,6 +232,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'cd=s' => \$remote_cd,
         'norc' => \$norc,
         'retries=i' => \$retries,
+        'check' => \$check,
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -256,6 +258,7 @@ GetOptions(
     'norc' => \$norc,
     'scanner=s' => \$scanner_paths,
     'retries=i' => \$retries,
+    'check' => \$check,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -267,6 +270,11 @@ if (defined $jobs && $jobs eq "auto") {
         chomp $cpu_count;
     }
     $jobs = $cpu_count;
+}
+
+# -check implies -n (dry-run mode)
+if ($check) {
+    $dry_run = 1;
 }
 
 # Default to -j1 for dry-run mode (unless -j was explicitly specified)
@@ -462,6 +470,7 @@ Options:
   -C, --directory DIR         Change to DIR before doing anything
   -n, --just-print            Print commands without executing (dry-run)
   --dry-run, --recon          Same as -n
+  -check                      Validate smak -n output matches make -n
   -s, --silent, --quiet       Don't print commands being executed
   -j, --jobs [N]              Run N jobs in parallel (default: 1, -j = CPU count)
   -cli                        Enter CLI mode (interactive shell for building)
@@ -793,6 +802,17 @@ my $auto_script = "$makefile.smak";
 if (-f $auto_script) {
     print "Auto-loading script: $auto_script\n" if $ENV{SMAK_DEBUG};
     execute_script_file($auto_script);
+}
+
+# Handle -check mode: validate smak -n matches make -n
+if ($check) {
+    my $check_target = @targets ? $targets[0] : get_default_target();
+    unless (defined $check_target) {
+        die "smak: *** No target specified for -check. Stop.\n";
+    }
+    my ($match, $report) = run_check_mode($check_target, $makefile);
+    print $report;
+    exit($match == 1 ? 0 : ($match == 0 ? 1 : 2));
 }
 
 # When SMAK_JOB_SERVER is set, we're a child of another smak with a job server

@@ -5841,19 +5841,15 @@ sub run_check_mode {
     push @report, "Makefile: $makefile_path";
     push @report, "";
 
-    # Step 1: Capture smak dry-run output
-    my $smak_output = '';
-    {
-        # Redirect STDOUT to capture dry-run output
-        local *STDOUT;
-        open(STDOUT, '>', \$smak_output) or die "Cannot redirect STDOUT: $!";
-        eval {
-            local $dry_run_mode = 1;
-            dry_run_target($target, {}, 0);
-        };
-        if ($@) {
-            return (-1, "Error in smak dry-run: $@");
-        }
+    # Step 1: Run smak -n externally (uses same code path as normal builds)
+    # This ensures we test the actual smak behavior, not a special code path
+    use FindBin qw($RealBin);
+    my $smak_cmd = "$RealBin/smak -n -f " . quotemeta($makefile_path) . " " . quotemeta($target) . " 2>&1";
+    my $smak_output = `$smak_cmd`;
+    my $smak_exit = $? >> 8;
+
+    if ($smak_exit != 0 && $smak_output =~ /No rule to make target/) {
+        return (-1, "Error: smak -n failed:\n$smak_output");
     }
     my @smak_commands = normalize_check_output($smak_output, 'smak');
 

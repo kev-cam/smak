@@ -804,14 +804,16 @@ if (-f $auto_script) {
     execute_script_file($auto_script);
 }
 
-# Handle -check mode: validate smak -n matches make -n
+# -check mode: validate smak -n output matches make -n
+# Run comparison and exit before starting job server
 if ($check) {
-    my $check_target = @targets ? $targets[0] : get_default_target();
+    my $check_target = @targets ? $targets[0] : Smak::get_default_target();
     unless (defined $check_target) {
-        die "smak: *** No target specified for -check. Stop.\n";
+        die "smak: *** No target specified for -check and no default target found. Stop.\n";
     }
-    my ($match, $report) = run_check_mode($check_target, $makefile);
+    my ($match, $report) = Smak::run_check_mode($check_target, $makefile);
     print $report;
+    # Exit codes: 0 = match, 1 = mismatch, 2 = error
     exit($match == 1 ? 0 : ($match == 0 ? 1 : 2));
 }
 

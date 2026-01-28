@@ -10599,13 +10599,34 @@ sub run_job_master {
                                     last PATTERN_LOOP;
                                 }
                             }
-                            # If no variant's source exists, skip this pattern rule
-                            # (don't apply pattern rules when source files are missing)
+                            # If no variant's source exists:
+                            # - In dry-run mode: fall back to first variant (like GNU make) to show what would run
+                            # - In real build: skip this pattern rule (can't build without source)
                             if (!$found_variant) {
-                                print STDERR "Skipping pattern rule '$pattern' for target '$target' (stem='$stem', no source file exists)\n" if $ENV{SMAK_DEBUG};
-                                $matched_pattern_key = undef;
-                                $stem = '';
-                                # Don't break - continue looking for other pattern rules
+                                if ($dry_run_mode) {
+                                    # Dry-run: use first variant to show what command would run
+                                    my @variant_deps = @{$deps_ref->[0] || []};
+                                    @variant_deps = map {
+                                        my $d = $_;
+                                        $d =~ s/%/$stem/g;
+                                        $d = expand_vars($d);
+                                        while ($d =~ /\$MV\{([^}]+)\}/) {
+                                            my $var = $1;
+                                            my $val = $MV{$var} // '';
+                                            $d =~ s/\$MV\{\Q$var\E\}/$val/;
+                                        }
+                                        $d;
+                                    } @variant_deps;
+                                    @deps = map { resolve_vpath($_, $dir) } @variant_deps;
+                                    $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
+                                    print STDERR "Dry-run: Using first variant of pattern rule '$pattern' for target '$target' (stem='$stem', no source exists)\n" if $ENV{SMAK_DEBUG};
+                                    last PATTERN_LOOP;
+                                } else {
+                                    print STDERR "Skipping pattern rule '$pattern' for target '$target' (stem='$stem', no source file exists)\n" if $ENV{SMAK_DEBUG};
+                                    $matched_pattern_key = undef;
+                                    $stem = '';
+                                    # Don't break - continue looking for other pattern rules
+                                }
                             }
                         } else {
                             # Single variant or flat deps array
@@ -10630,8 +10651,9 @@ sub run_job_master {
                             my $first_dep_key = "$makefile\t$first_dep";
                             my $source_exists = @resolved_deps && (-f $resolved_deps[0] || -f "$dir/$candidate_deps[0]");
                             my $source_can_be_built = exists $fixed_rule{$first_dep_key} || exists $pattern_rule{$first_dep_key};
-                            if (@resolved_deps && !$source_exists && !$source_can_be_built) {
+                            if (@resolved_deps && !$source_exists && !$source_can_be_built && !$dry_run_mode) {
                                 # Source file doesn't exist and can't be built, skip this pattern rule
+                                # (But in dry-run mode, show what would run)
                                 print STDERR "Skipping pattern rule '$pattern' for target '$target' (stem='$stem', source '$resolved_deps[0]' not found and no rule to build it)\n" if $ENV{SMAK_DEBUG};
                                 $matched_pattern_key = undef;
                                 $stem = '';
@@ -13212,10 +13234,13 @@ sub run_job_master {
                     } elsif ($line =~ /^OUTPUT (.*)$/) {
                         warn "CONSISTENCY-CHECK: Got OUTPUT: $1\n" if $ENV{SMAK_DEBUG};
                         print $master_socket "OUTPUT $1\n" if $master_socket;
+                        $master_socket->flush() if $master_socket;
                     } elsif ($line =~ /^ERROR (.*)$/) {
                         print $master_socket "ERROR $1\n" if $master_socket;
+                        $master_socket->flush() if $master_socket;
                     } elsif ($line =~ /^WARN (.*)$/) {
                         print $master_socket "WARN $1\n" if $master_socket;
+                        $master_socket->flush() if $master_socket;
                     }
                 }
                 $worker->blocking(1);
@@ -14481,6 +14506,7 @@ sub run_job_master {
 
                 } elsif ($line =~ /^OUTPUT (.*)$/) {
                     my $output = $1;
+                    print STDERR "DEBUG OUTPUT: master_socket=" . (defined $master_socket ? "SET" : "UNDEF") . "\n" if $ENV{SMAK_DEBUG};
                     # Capture output for the task running on this worker
                     if (exists $worker_status{$socket}{task_id}) {
                         my $task_id = $worker_status{$socket}{task_id};
@@ -14491,15 +14517,19 @@ sub run_job_master {
                     # Forward to attached master client, or print locally if standalone
                     if ($master_socket) {
                         # Master client connected - forward output and let it handle display
+                        print STDERR "DEBUG OUTPUT: forwarding to master_socket\n" if $ENV{SMAK_DEBUG};
                         print $master_socket "OUTPUT $output\n";
+                        $master_socket->flush();
                     } else {
                         # Standalone job master - print to stdout directly
                         # Skip stomp_prompt in dry-run mode (no spinner to clear)
+                        print STDERR "DEBUG OUTPUT: printing to stdout (dry_run=$dry_run_mode)\n" if $ENV{SMAK_DEBUG};
                         if ($dry_run_mode) {
                             print "$output\n";
                         } else {
                             print $stomp_prompt . "$output\n";
                         }
+                        STDOUT->flush();
                     }
 
                 } elsif ($line =~ /^ERROR (.*)$/) {

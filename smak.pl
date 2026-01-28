@@ -960,20 +960,38 @@ if (!$debug) {
     # Only wait if there are jobs pending - if all commands were handled as built-ins,
     # no jobs were submitted and we can skip straight to shutdown
     my $job_server_exit_code = 0;
+    warn "DEBUG: Checking wait loop: job_server_socket=" . (defined $Smak::job_server_socket ? "SET" : "UNDEF") .
+         ", in_progress keys=" . scalar(keys %Smak::in_progress) . "\n" if $ENV{SMAK_DEBUG};
     if ($Smak::job_server_socket && keys %Smak::in_progress) {
         # Record when we start waiting - ignore IDLE messages from before this time
-        my $wait_start_time = time();
+        # Use Time::HiRes for sub-second precision (job-master uses Time::HiRes::time for IDLE timestamps)
+        my $wait_start_time = Time::HiRes::time();
+        warn "DEBUG: wait_start_time=$wait_start_time\n" if $ENV{SMAK_DEBUG};
 
         # Keep reading until we get IDLE (all work complete) or connection closes
+        warn "DEBUG: Entering wait loop\n" if $ENV{SMAK_DEBUG};
         while (1) {
             # Read job completion notifications from job server
             my $response = <$Smak::job_server_socket>;
+            warn "DEBUG: wait loop response: " . (defined $response ? "'$response'" : "UNDEF") . "\n" if $ENV{SMAK_DEBUG};
             last unless defined $response;
 
             chomp $response;
             if ($response =~ /^JOB_COMPLETE (.+?) (\d+)$/) {
                 my ($target, $exit_code) = ($1, $2);
-                delete $Smak::in_progress{$target};
+                # Delete from in_progress - key might be "dir\ttarget" or just "target"
+                # Try exact match first, then look for dir-qualified key
+                if (exists $Smak::in_progress{$target}) {
+                    delete $Smak::in_progress{$target};
+                } else {
+                    # Look for key ending with the target (handles dir\ttarget format)
+                    for my $key (keys %Smak::in_progress) {
+                        if ($key =~ /\t\Q$target\E$/ || $key eq $target) {
+                            delete $Smak::in_progress{$key};
+                            last;
+                        }
+                    }
+                }
                 if ($exit_code != 0) {
                     warn "Job failed: $target (exit $exit_code)\n" unless $Smak::silent_mode;
                     $job_server_exit_code = $exit_code if $exit_code > $job_server_exit_code;
@@ -982,13 +1000,17 @@ if (!$debug) {
             # IDLE means all work is complete - includes final exit code and timestamp
             elsif ($response =~ /^IDLE\s+(\d+)\s+([\d.]+)$/) {
                 my ($idle_exit, $idle_time) = ($1, $2);
-                # Ignore IDLE messages from before we started waiting
-                next if $idle_time < $wait_start_time;
+                my $jobs_remaining = scalar(keys %Smak::in_progress);
+                warn "DEBUG: IDLE received: exit=$idle_exit, time=$idle_time, wait_start=$wait_start_time, jobs_remaining=$jobs_remaining\n" if $ENV{SMAK_DEBUG};
+                # Only exit on IDLE if all our submitted jobs have completed
+                # This prevents race where IDLE arrives before JOB_COMPLETE
+                next if $jobs_remaining > 0;
                 $job_server_exit_code = $idle_exit if $idle_exit > $job_server_exit_code;
                 last;
             }
             # Also handle other messages to prevent blocking
             elsif ($response =~ /^OUTPUT (.*)$/) {
+                warn "DEBUG: smak.pl OUTPUT branch: '$1', silent_mode=$Smak::silent_mode\n" if $ENV{SMAK_DEBUG};
                 print "$1\n" unless $Smak::silent_mode;
                 STDOUT->flush();
             }

@@ -5660,6 +5660,19 @@ sub dry_run_target {
         }
     }
 
+    # Add order-only dependencies (for layer computation in btree)
+    # These affect build order but not timestamp checking
+    if (exists $fixed_order_only{$key}) {
+        for my $oo_dep (@{$fixed_order_only{$key} || []}) {
+            # Expand $MV{...} variables in order-only deps
+            my $expanded_dep = $oo_dep;
+            $expanded_dep = format_output($expanded_dep);
+            $expanded_dep = expand_vars($expanded_dep);
+            $expanded_dep =~ s/^\s+|\s+$//g;
+            push @deps, $expanded_dep if $expanded_dep =~ /\S/;
+        }
+    }
+
     # Capture target info if requested (for btree)
     if ($opts->{capture}) {
         # exec_dir is the prefix (subdirectory) or '.' for root
@@ -5815,6 +5828,28 @@ sub dry_run_target {
                             print $leading_space, $part, "\n" unless $opts->{no_commands};
                         }
                     }
+                } elsif ($opts->{capture} && $clean_line =~ m{\b(?:\$\(MAKE\)|smak|make)\s+(.+)$}) {
+                    # Same-directory recursive make call (e.g., $(MAKE) all-am)
+                    # Extract targets from the make command
+                    my $args = $1;
+                    # Remove common flags and variables
+                    $args =~ s/\$\([^)]+\)\s*//g;  # Remove $(VAR) patterns like $(AM_MAKEFLAGS)
+                    $args =~ s/-[nwkjsC]\s*//g;    # Remove single-char flags
+                    $args =~ s/--\S+\s*//g;        # Remove long flags
+                    $args =~ s/^\s+|\s+$//g;
+
+                    if ($args =~ /\S/) {
+                        # We have targets to recurse into
+                        my @sub_targets = split(/\s+/, $args);
+                        for my $sub_target (@sub_targets) {
+                            next unless $sub_target =~ /^[\w.-]+$/;  # Only valid target names
+                            next if $sub_target =~ /^-/;              # Skip anything that looks like a flag
+                            # Recurse into this target in the same directory
+                            dry_run_target($sub_target, $visited, $depth + 1, $opts);
+                        }
+                    }
+                    # Also print the command unless suppressed
+                    print $leading_space, $clean_line, "\n" unless $opts->{no_commands};
                 } else {
                     # Regular command, just print it
                     print $leading_space, $clean_line, "\n" unless $opts->{no_commands};

@@ -295,6 +295,7 @@ our $job_server_socket;  # Socket to job-master
 our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
 our $project_root;  # Root directory of project (set by job-master at startup)
+our $job_server_idle_timeout = 600;  # Idle timeout in seconds (0 = no timeout, default 10 min)
 
 # Output control
 our $stomp_prompt = "\r        \r";  # Clear spinner area (8 chars) before printing
@@ -12457,20 +12458,16 @@ sub run_job_master {
 
                                     # Parse fresh
                                     my $sub_mf_name = $sub_makefile || 'Makefile';
-                                    print STDERR "DEBUG CHILD: Parsing $sub_mf_name in $sub_directory\n";
                                     eval { parse_makefile($sub_mf_name); };
                                     if ($@) {
                                         warn "Warning: Could not parse '$sub_mf_name': $@\n";
                                         exit(1);
                                     }
-                                    print STDERR "DEBUG CHILD: makefile='$makefile' fixed_deps keys: " . join(', ', sort keys %fixed_deps) . "\n";
 
                                     # Expand targets into job specs using dry_run_target with capture
                                     my %captured;
                                     my @targets_to_build = @sub_targets ? @sub_targets : (get_first_target($sub_mf_name) || 'all');
-                                    print STDERR "DEBUG CHILD: targets_to_build = @targets_to_build\n";
                                     for my $sub_target (@targets_to_build) {
-                                        print STDERR "DEBUG CHILD: Calling dry_run_target('$sub_target')\n";
                                         eval { dry_run_target($sub_target, {}, 0, { capture => \%captured, no_commands => 1 }); };
                                         if ($@) {
                                             warn "Warning: Failed to expand '$sub_target': $@\n";
@@ -12507,10 +12504,8 @@ sub run_job_master {
                                     }
 
                                     # Save job specs to temp file
-                                    print STDERR "DEBUG CHILD: Captured targets: " . join(', ', sort keys %captured) . "\n";
                                     use Storable;
                                     Storable::nstore(\%captured, $jobs_file);
-                                    print STDERR "DEBUG CHILD: Saved to $jobs_file\n";
                                     exit(0);
                                 }
 
@@ -12674,12 +12669,32 @@ sub run_job_master {
     my $idle_timeouts = 0;  # Count consecutive select timeouts with no activity
     my $max_exit_code = 0;  # Track highest exit code from all jobs
     my $idle_sent = 0;      # Track if we've sent IDLE (avoid flooding)
+    my $idle_since = undef; # Time when we became idle (for idle timeout)
     # Auto-rescan is now handled by the smak-scan background process
 
     while (1) {
         # Check if idle (nothing queued, nothing running)
         # Note: pending_composite doesn't matter - if nothing queued/running, no progress possible
         my $is_idle = (@job_queue == 0 && keys(%running_jobs) == 0);
+
+        # Track idle time for timeout
+        if ($is_idle) {
+            $idle_since //= Time::HiRes::time();
+        } else {
+            $idle_since = undef;
+        }
+
+        # Check idle timeout (only when no master connected - standalone mode)
+        if ($is_idle && !defined($master_socket) && $job_server_idle_timeout > 0 && defined($idle_since)) {
+            my $idle_duration = Time::HiRes::time() - $idle_since;
+            if ($idle_duration >= $job_server_idle_timeout) {
+                vprint "Idle timeout ($job_server_idle_timeout seconds). Job-master exiting.\n";
+                my $local_link = ".smak.connect";
+                unlink($local_link) if -l $local_link;
+                unlink($port_file) if -f $port_file;
+                last;
+            }
+        }
 
         # If idle and master connected, send IDLE notification (only once per idle period)
         if ($is_idle && defined($master_socket) && !$idle_sent) {
@@ -13644,6 +13659,25 @@ sub run_job_master {
                     %running_jobs = ();
                     %in_progress = ();
                     print $master_socket "Cancelled $cancelled_count job(s), cleared $queue_cleared queued\n";
+
+                } elsif ($line =~ /^SHUTDOWN$/) {
+                    # Shutdown the job server completely
+                    print STDERR "Job server shutting down\n";
+                    # Send SHUTDOWN to all workers
+                    for my $worker (@workers) {
+                        print $worker "SHUTDOWN\n";
+                    }
+                    # Close all connections
+                    for my $worker (@workers) {
+                        close($worker);
+                    }
+                    print $master_socket "OK\n";
+                    close($master_socket);
+                    # Clean up port file
+                    my $port_dir = get_port_file_dir();
+                    my $port_file = "$port_dir/smak-jobserver-$$.port";
+                    unlink($port_file) if -f $port_file;
+                    exit(0);
 
                 } elsif ($line =~ /^BENCHMARK$/) {
                     # Benchmark worker communication latency
@@ -15144,7 +15178,17 @@ sub cancel_handler {
     warn "DEBUG: cancel_handler called, interactive=$interactive\n" if $ENV{SMAK_DEBUG};
     $SmakCli::cancel_requested = 2; # 1 if read Ctrl-C
     if (! $interactive) {
-	cmd_kill();
+	# Shutdown the job server completely when not interactive
+	if ($job_server_socket) {
+	    print $job_server_socket "SHUTDOWN\n";
+	    $job_server_socket->flush();
+	    # Brief wait for acknowledgment
+	    my $sel = IO::Select->new($job_server_socket);
+	    if ($sel->can_read(1)) {
+		my $response = <$job_server_socket>;
+	    }
+	    close($job_server_socket);
+	}
 	exit;
     }
 };

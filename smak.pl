@@ -40,6 +40,7 @@ my $remote_cd = '';  # Remote directory for SSH workers
 my $norc = 0;  # Skip reading .smak.rc files
 my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j)
 my $check = 0;  # Check mode - validate smak -n matches make -n
+my $idle_timeout = 600;  # Job server idle timeout in seconds (0 = no timeout, default 10 min)
 
 # Check for -norc early (before reading .smak.rc)
 for my $arg (@ARGV) {
@@ -259,6 +260,7 @@ GetOptions(
     'scanner=s' => \$scanner_paths,
     'retries=i' => \$retries,
     'check' => \$check,
+    'idle-timeout=i' => \$idle_timeout,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -473,6 +475,7 @@ Options:
   -check                      Validate smak -n output matches make -n
   -s, --silent, --quiet       Don't print commands being executed
   -j, --jobs [N]              Run N jobs in parallel (default: 1, -j = CPU count)
+  --idle-timeout SEC          Job server idle timeout in seconds (default: 600, 0 = no timeout)
   -cli                        Enter CLI mode (interactive shell for building)
   -h, --help                  Display this help message
   --yes                       Auto-answer yes to prompts (for -Kreport)
@@ -773,6 +776,7 @@ if ($verbose || $ENV{SMAK_DEBUG}) {
 # Set SSH options for remote workers (before forking job-master)
 $Smak::ssh_host = $ssh_host if $ssh_host;
 $Smak::remote_cd = $remote_cd if $remote_cd;
+$Smak::job_server_idle_timeout = $idle_timeout;
 
 # Detect FUSE filesystem early (before makefile parsing and Makefile.smak execution)
 # This allows Makefile.smak to make decisions based on FUSE status (e.g., auto-rescan)

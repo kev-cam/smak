@@ -1,0 +1,34 @@
+# Makefile for testing stop-on-failure behavior
+# Some targets will fail, some will succeed
+# With -k (keep-going), the successful targets should still be built
+# Without -k, build should stop at first failure
+
+.PHONY: all clean
+
+# Target order matters - we want failures mixed with successes
+all: success1.txt fail1 success2.txt fail2 success3.txt
+
+# Targets that will succeed
+success1.txt:
+	@echo "Building success1.txt"
+	@touch $@
+
+success2.txt:
+	@echo "Building success2.txt"
+	@touch $@
+
+success3.txt:
+	@echo "Building success3.txt"
+	@touch $@
+
+# Targets that will fail (trying to touch file in non-existent directory)
+fail1:
+	@echo "Building fail1 (will fail)"
+	@touch /nonexistent_dir_12345/fail1.txt
+
+fail2:
+	@echo "Building fail2 (will fail)"
+	@touch /nonexistent_dir_12345/fail2.txt
+
+clean:
+	@rm -f success1.txt success2.txt success3.txt

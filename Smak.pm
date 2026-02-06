@@ -83,6 +83,7 @@ our @EXPORT_OK = qw(
     set_silent_mode
     set_jobs
     set_max_retries
+    set_keep_going
     start_job_server
     stop_job_server
     tee_print
@@ -296,6 +297,7 @@ our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
 our $project_root;  # Root directory of project (set by job-master at startup)
 our $job_server_idle_timeout = 600;  # Idle timeout in seconds (0 = no timeout, default 10 min)
+our $keep_going = 0;  # If true, continue building other targets after a failure (like make -k)
 
 # Output control
 our $stomp_prompt = "\r        \r";  # Clear spinner area (8 chars) before printing
@@ -324,6 +326,11 @@ sub set_jobs {
 sub set_max_retries {
     my ($num_retries) = @_;
     $max_retries = $num_retries;
+}
+
+sub set_keep_going {
+    my ($enabled) = @_;
+    $keep_going = $enabled;
 }
 
 sub start_job_server {
@@ -10058,6 +10065,7 @@ sub run_job_master {
                             # target => {deps => [list], master_socket => socket}
     our %currently_dispatched;  # target => task_id (防 duplicate dispatch tracking)
     our $next_task_id = 1;
+    our $stop_requested = 0;  # Set to 1 when a job fails and keep_going is false
     # Auto-rescan: Enable by default when FUSE is NOT detected
     # When FUSE is present, it provides file change notifications
     # When FUSE is absent, we need periodic polling to detect changes
@@ -11417,18 +11425,39 @@ sub run_job_master {
         $context //= "unknown";
 
         # Check pending_composite deps - some may have appeared as files (side effects of other builds)
+        # Also fail composites whose dependencies have failed
         my $pc_count = scalar(keys %pending_composite);
         print STDERR "CHECK-IDLE[$context]: pending_composite has $pc_count entries\n" if $ENV{SMAK_IDLE_DEBUG};
         for my $comp_target (keys %pending_composite) {
             my $comp = $pending_composite{$comp_target};
             my @remaining_deps;
+            my $has_failed_dep = 0;
+            my $failed_exit_code = 1;
             for my $dep (@{$comp->{deps}}) {
+                # Check if dep has failed
+                if (exists $failed_targets{$dep}) {
+                    $has_failed_dep = 1;
+                    $failed_exit_code = $failed_targets{$dep} if $failed_targets{$dep} > $failed_exit_code;
+                    print STDERR "IDLE-DEP-FAILED: '$dep' failed\n" if $ENV{SMAK_IDLE_DEBUG};
+                }
                 # Check if dep file now exists (job-master runs in project root)
-                if (-e $dep || exists $completed_targets{$dep}) {
+                elsif (-e $dep || exists $completed_targets{$dep}) {
                     print STDERR "IDLE-DEP-CLEAR: '$dep' satisfied\n" if $ENV{SMAK_IDLE_DEBUG};
                 } else {
                     push @remaining_deps, $dep;
                 }
+            }
+
+            # If any dependency failed, fail this composite target
+            if ($has_failed_dep) {
+                print STDERR "IDLE-COMPOSITE-FAILED: '$comp_target' has failed dependencies\n" if $ENV{SMAK_IDLE_DEBUG};
+                $in_progress{$comp_target} = "failed";
+                $failed_targets{$comp_target} = $failed_exit_code;
+                if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
+                    print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $failed_exit_code\n";
+                }
+                delete $pending_composite{$comp_target};
+                next;
             }
 
             if (@remaining_deps < @{$comp->{deps}}) {
@@ -11949,6 +11978,9 @@ sub run_job_master {
     sub dispatch_jobs {
 	my ($do,$block) = @_;
 	my $j = 0;
+
+        # Don't dispatch if stop was requested due to failure
+        return 0 if $stop_requested;
 
         check_queue_state("dispatch_jobs start");
 
@@ -13533,17 +13565,33 @@ sub run_job_master {
                                 }
                                 print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 
-                                # Check if this failed task is a dependency of any composite target
-                                for my $comp_target (keys %pending_composite) {
-                                    my $comp = $pending_composite{$comp_target};
-                                    # Check if this failed target is in the composite's dependencies
-                                    if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
-                                        print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                                # Stop on failure unless keep_going is set
+                                if (!$keep_going && !$stop_requested) {
+                                    $stop_requested = 1;
+                                    @job_queue = ();  # Clear job queue
+                                    # Silently fail all pending composite targets (don't notify client)
+                                    for my $comp_target (keys %pending_composite) {
                                         $in_progress{$comp_target} = "failed";
-                                        if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
-                                            print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                                        $failed_targets{$comp_target} = $exit_code;
+                                    }
+                                    %pending_composite = ();
+                                    print STDERR "smak: *** [$job->{target}] Error $exit_code\n";
+                                }
+
+                                # Check if this failed task is a dependency of any composite target
+                                # (skip if we're stopping - no need to cascade failures)
+                                if (!$stop_requested) {
+                                    for my $comp_target (keys %pending_composite) {
+                                        my $comp = $pending_composite{$comp_target};
+                                        # Check if this failed target is in the composite's dependencies
+                                        if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
+                                            print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                                            $in_progress{$comp_target} = "failed";
+                                            if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
+                                                print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
+                                            }
+                                            delete $pending_composite{$comp_target};
                                         }
-                                        delete $pending_composite{$comp_target};
                                     }
                                 }
                             }
@@ -15448,21 +15496,21 @@ sub run_job_master {
                             if ($job->{target}) {
                                 $in_progress{$job->{target}} = "failed";
                                 $failed_targets{$job->{target}} = $exit_code;
+                                $max_exit_code = $exit_code if $exit_code > $max_exit_code;
                             }
                             print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 
-                            # Check if this failed task is a dependency of any composite target
-                            for my $comp_target (keys %pending_composite) {
-                                my $comp = $pending_composite{$comp_target};
-                                # Check if this failed target is in the composite's dependencies
-                                if (grep { $_ eq $job->{target} } @{$comp->{deps}}) {
-                                    print STDERR "Composite target '$comp_target' FAILED because dependency '$job->{target}' failed (exit code $exit_code)\n";
+                            # Stop on failure unless keep_going is set
+                            if (!$keep_going && !$stop_requested) {
+                                $stop_requested = 1;
+                                @job_queue = ();  # Clear job queue
+                                # Silently fail all pending composite targets (don't notify client)
+                                for my $comp_target (keys %pending_composite) {
                                     $in_progress{$comp_target} = "failed";
-                                    if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
-                                        print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
-                                    }
-                                    delete $pending_composite{$comp_target};
+                                    $failed_targets{$comp_target} = $exit_code;
                                 }
+                                %pending_composite = ();
+                                print STDERR "smak: *** [$job->{target}] Error $exit_code\n";
                             }
                         }
                     }

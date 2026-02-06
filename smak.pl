@@ -1004,11 +1004,10 @@ if (!$debug) {
             # IDLE means all work is complete - includes final exit code and timestamp
             elsif ($response =~ /^IDLE\s+(\d+)\s+([\d.]+)$/) {
                 my ($idle_exit, $idle_time) = ($1, $2);
-                my $jobs_remaining = scalar(keys %Smak::in_progress);
-                warn "DEBUG: IDLE received: exit=$idle_exit, time=$idle_time, wait_start=$wait_start_time, jobs_remaining=$jobs_remaining\n" if $ENV{SMAK_DEBUG};
-                # Only exit on IDLE if all our submitted jobs have completed
-                # This prevents race where IDLE arrives before JOB_COMPLETE
-                next if $jobs_remaining > 0;
+                warn "DEBUG: IDLE received: exit=$idle_exit, time=$idle_time, wait_start=$wait_start_time\n" if $ENV{SMAK_DEBUG};
+                # Ignore IDLE messages from before we started waiting
+                # (handles case where IDLE was already sent before our build request)
+                next if $idle_time < $wait_start_time;
                 $job_server_exit_code = $idle_exit if $idle_exit > $job_server_exit_code;
                 last;
             }

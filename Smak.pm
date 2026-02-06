@@ -11408,7 +11408,7 @@ sub run_job_master {
     }
 
     our ($last_queued, $last_running, $last_ready) = (0, 0, 0);
-    our ($max_exit_code, $idle_sent) = (0, 0);  # Forward declare for check_and_send_idle
+    our ($max_exit_code, $idle_sent) = (0, 1);  # Start with idle_sent=1 to prevent IDLE before any work is submitted
     our ($jobs_submitted, $jobs_completed) = (0, 0);  # Simple job counting for completion detection
 
     # Helper function to check if all work is done and send IDLE if so
@@ -12977,9 +12977,9 @@ sub run_job_master {
     # Auto-rescan is now handled by the smak-scan background process
 
     while (1) {
-        # Check if idle (nothing queued, nothing running)
-        # Note: pending_composite doesn't matter - if nothing queued/running, no progress possible
-        my $is_idle = (@job_queue == 0 && keys(%running_jobs) == 0);
+        # Check if idle (nothing queued, nothing running, no pending composites)
+        # pending_composite DOES matter - composite targets wait for dependencies to be submitted
+        my $is_idle = (@job_queue == 0 && keys(%running_jobs) == 0 && keys(%pending_composite) == 0);
 
         # Track idle time for timeout
         if ($is_idle) {
@@ -13087,7 +13087,11 @@ sub run_job_master {
                 for my $w (@workers) {
                     $ready_workers++ if $worker_status{$w}{ready};
                 }
-                if (keys(%running_jobs) == 0 && $ready_workers > 0 && !$idle_sent && $master_socket) {
+                # Only send IDLE if BOTH running_jobs AND job_queue are empty
+                # Jobs in queue might be waiting for dependencies that haven't completed yet
+                my $pending_composites = scalar(keys %pending_composite);
+                if (keys(%running_jobs) == 0 && @job_queue == 0 && $pending_composites == 0 &&
+                    $ready_workers > 0 && !$idle_sent && $master_socket) {
                     my $final_exit = $max_exit_code;
                     if (!$final_exit && keys(%failed_targets)) {
                         for my $t (keys %failed_targets) {
@@ -13099,7 +13103,7 @@ sub run_job_master {
                     print $master_socket "IDLE $final_exit $idle_time\n";
                     $master_socket->flush();
                     $idle_sent = 1;
-                    print STDERR "DEBUG: Sent IDLE - jobs queued but none dispatchable, nothing running\n" if $ENV{SMAK_DEBUG};
+                    print STDERR "DEBUG: Sent IDLE - no jobs queued, nothing running, no pending composites\n" if $ENV{SMAK_DEBUG};
                 }
             }
 

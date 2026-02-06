@@ -187,10 +187,18 @@ sub execute_builtin {
         return 0;
     }
 
-    if ($clean_cmd =~ /^mv\s+(\S+)\s+(\S+)\s*$/) {
-        my ($src, $dst) = ($1, $2);
-        move($src, $dst) or return 1;
-        return 0;
+    if ($clean_cmd =~ /^mv\s+(.+)$/) {
+        my $args = $1;
+        # Strip common flags (-f, -n, -i, -v)
+        $args =~ s/\s*-[fniv]+\s*/ /g;
+        $args =~ s/^\s+|\s+$//g;
+        my @parts = split(/\s+/, $args);
+        if (@parts == 2) {
+            my ($src, $dst) = @parts;
+            move($src, $dst) or return 1;
+            return 0;
+        }
+        return undef;  # Complex mv, let shell handle it
     }
 
     if ($clean_cmd =~ /^cp\s+(\S+)\s+(\S+)\s*$/) {
@@ -268,8 +276,27 @@ sub run_worker {
 
     die "Connection closed before environment received\n" unless $env_done;
 
-    # Main worker loop
-    while (my $line = <$socket>) {
+    # Main worker loop - use select with timeout for periodic IDLE heartbeat
+    my $select = IO::Select->new($socket);
+    my $idle_interval = 1.0;  # Send IDLE every 1 second when waiting
+    my $last_idle_time = Time::HiRes::time();
+
+    while (1) {
+        # Wait for data with timeout
+        my @ready = $select->can_read($idle_interval);
+
+        if (@ready == 0) {
+            # Timeout - send periodic IDLE with timestamp to indicate we're waiting for work
+            my $idle_time = Time::HiRes::time();
+            print $socket "IDLE $idle_time\n";
+            $socket->flush();
+            $last_idle_time = $idle_time;
+            next;
+        }
+
+        # Data available - read it
+        my $line = <$socket>;
+        last unless defined $line;  # Connection closed
         chomp $line;
 
         # Check for shutdown signal

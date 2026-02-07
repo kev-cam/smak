@@ -1,0 +1,9 @@
+# Test nested make with -C (change directory)
+# The sub-make should be handled as built-in, not spawned to a worker
+
+.PHONY: all
+
+all:
+	@echo "Parent make starting"
+	$(MAKE) -C subdir all
+	@echo "Parent make finished"

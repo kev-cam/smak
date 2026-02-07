@@ -828,11 +828,66 @@ if ($check) {
 }
 
 # When SMAK_JOB_SERVER is set, we're a child of another smak with a job server
-# Just run sequentially - the parallelism is handled by the parent job-master
-# dispatching multiple jobs to workers. Don't try to spawn a new job server.
+# Connect back to the parent's job server and relay our build request
 if ($ENV{SMAK_JOB_SERVER}) {
-    warn "Running as child of job server (sequential mode)\n" if $ENV{SMAK_DEBUG};
-    # Continue with sequential build - $jobs stays at 0
+    warn "Child smak detected SMAK_JOB_SERVER=$ENV{SMAK_JOB_SERVER}\n" if $ENV{SMAK_DEBUG};
+
+    # Connect to parent's job server
+    my ($host, $port) = split(/:/, $ENV{SMAK_JOB_SERVER});
+    my $parent_socket = IO::Socket::INET->new(
+        PeerHost => $host,
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 10,
+    );
+
+    if ($parent_socket) {
+        $parent_socket->autoflush(1);
+        warn "Connected to parent job server at $host:$port\n" if $ENV{SMAK_DEBUG};
+
+        # Get current directory for BUILD message
+        use Cwd 'getcwd';
+        my $cwd = getcwd();
+
+        # Determine targets to build
+        my @build_targets = @targets;
+        if (!@build_targets) {
+            my $default = get_default_target();
+            @build_targets = ($default) if defined $default;
+        }
+        @build_targets = ('all') unless @build_targets;
+
+        # Send BUILD message: BUILD <makefile> <directory> <targets...>
+        # The job server will parse the makefile and queue the work
+        my $build_msg = "BUILD $makefile $cwd " . join(' ', @build_targets);
+        warn "Sending to parent: $build_msg\n" if $ENV{SMAK_DEBUG};
+        print $parent_socket "$build_msg\n";
+
+        # Wait for COMPLETE response
+        while (my $response = <$parent_socket>) {
+            chomp $response;
+            warn "Response from parent: $response\n" if $ENV{SMAK_DEBUG};
+            if ($response =~ /^COMPLETE (\d+)$/) {
+                my $exit_code = $1;
+                close($parent_socket);
+                exit($exit_code);
+            }
+            # Handle other messages (OUTPUT, ERROR, etc.) if needed
+            if ($response =~ /^OUTPUT (.*)$/) {
+                print "$1\n";
+            } elsif ($response =~ /^ERROR (.*)$/) {
+                print STDERR "$1\n";
+            }
+        }
+
+        # Connection closed without COMPLETE - assume failure
+        close($parent_socket);
+        exit(1);
+    } else {
+        warn "Could not connect to parent job server at $host:$port: $!\n" if $ENV{SMAK_DEBUG};
+        warn "Falling back to sequential build\n" if $ENV{SMAK_DEBUG};
+        # Fall through to sequential build
+    }
 }
 
 # Start job server if parallel builds are requested

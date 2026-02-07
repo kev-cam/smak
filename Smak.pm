@@ -733,6 +733,20 @@ sub try_execute_compound_builtin {
     return undef if $cmd =~ /[<>]/;                # Redirections
     return undef if $cmd =~ /;/;                   # Semicolon command separator
 
+    # Handle multi-line commands by splitting on newlines first
+    # Each line is a separate command that should be executed sequentially
+    my @lines = split(/\n/, $cmd);
+    if (@lines > 1) {
+        for my $line (@lines) {
+            $line =~ s/^\s+|\s+$//g;
+            next unless $line =~ /\S/;
+            my $exit = try_execute_compound_builtin($line, $silent_mode_flag);
+            return undef unless defined $exit;  # Line wasn't a builtin
+            return $exit if $exit != 0;         # Line failed
+        }
+        return 0;  # All lines succeeded
+    }
+
     # Split by && (respecting parentheses)
     my @parts;
     my $depth = 0;
@@ -5069,7 +5083,8 @@ sub build_target {
             }
 
             # Check if this is a recursive make/smak invocation (both dry-run and normal mode)
-            if ($normalized_cmd =~ /\b(make|smak)\s/ || $normalized_cmd =~ m{/smak(?:\s|$)}) {
+            # Match: make/smak at start, or path ending in /make or /smak, followed by space or end
+            if ($normalized_cmd =~ /^(?:[\w\/.-]*\/)?(?:make|smak)(?:\.pl)?(?:\s|$)/) {
                 warn "DEBUG[" . __LINE__ . "]: Detected recursive make/smak: $normalized_cmd\n" if $ENV{SMAK_DEBUG};
 
                 # Parse the make/smak command line to extract -f, -C directory, variables, and targets
@@ -12671,15 +12686,16 @@ sub run_job_master {
                 # Also handles ; sequences (unconditional) vs && sequences (conditional)
                 if (is_builtin_command($peek_cmd)) {
                     print STDERR "DEBUG: is_builtin_command=1 for cmd: $peek_cmd\n" if $ENV{SMAK_DEBUG};
-                    # Parse the command into parts, preserving separators (&& or ;)
-                    # Split on && or ; while capturing the separator
-                    my @tokens = split(/(\s*&&\s*|\s*;\s*)/, $peek_cmd);
+                    # Parse the command into parts, preserving separators (&& or ; or newline)
+                    # Split on &&, ;, or newlines while capturing the separator
+                    my @tokens = split(/(\s*&&\s*|\s*;\s*|\n)/, $peek_cmd);
                     my @cmd_parts;
                     my @separators;  # '&&' or ';' before each part (empty for first)
                     for my $i (0 .. $#tokens) {
                         if ($i % 2 == 0) {
                             push @cmd_parts, $tokens[$i] if $tokens[$i] =~ /\S/;
                         } else {
+                            # Determine separator type: && (conditional), ; or newline (unconditional)
                             my $sep = $tokens[$i] =~ /&&/ ? '&&' : ';';
                             push @separators, $sep;
                         }
@@ -12699,18 +12715,18 @@ sub run_job_master {
                         $cmd_part =~ s/^[@-]+//;
                         next if $cmd_part eq 'true' || $cmd_part eq ':' || $cmd_part eq '';
 
-                        # Check if it's a recursive smak/make call
-                        if ($cmd_part =~ m{(?:smak|make)\s.*-C\s+(\S+)}) {
+                        # Check if it's a recursive smak/make call (with -C or -f)
+                        if ($cmd_part =~ m{(?:smak|make)\s.*(?:-C|-f)\s+(\S+)}) {
                             my ($sub_makefile, $sub_directory, $sub_vars_ref, @sub_targets) = parse_make_command($cmd_part);
 
-                            if ($sub_directory) {
-                                print STDERR "DEBUG: Recursive smak -C $sub_directory - forking to expand targets\n" if $ENV{SMAK_DEBUG};
+                            if ($sub_directory || $sub_makefile) {
+                                print STDERR "DEBUG: Recursive smak" . ($sub_directory ? " -C $sub_directory" : "") . ($sub_makefile ? " -f $sub_makefile" : "") . " - forking to expand targets\n" if $ENV{SMAK_DEBUG};
 
                                 # Fork to expand targets with fresh rule context
                                 # Child feeds back job specs with root-relative paths
-                                my $safe_dir = $sub_directory;
-                                $safe_dir =~ s{[/\s]}{_}g;
-                                my $jobs_file = "/tmp/smak_jobs_${$}_${safe_dir}.dat";
+                                my $safe_name = $sub_directory || $sub_makefile;
+                                $safe_name =~ s{[/\s]}{_}g;
+                                my $jobs_file = "/tmp/smak_jobs_${$}_${safe_name}.dat";
                                 print STDERR "DEBUG: jobs_file = $jobs_file\n" if $ENV{SMAK_DEBUG};
 
                                 my $pid = fork();
@@ -12731,10 +12747,12 @@ sub run_job_master {
                                     %suffix_rule = ();
                                     %suffix_deps = ();
 
-                                    chdir($sub_directory) or do {
-                                        warn "Warning: Could not chdir to '$sub_directory': $!\n";
-                                        exit(1);
-                                    };
+                                    if ($sub_directory) {
+                                        chdir($sub_directory) or do {
+                                            warn "Warning: Could not chdir to '$sub_directory': $!\n";
+                                            exit(1);
+                                        };
+                                    }
 
                                     # Parse fresh
                                     my $sub_mf_name = $sub_makefile || 'Makefile';
@@ -12793,7 +12811,7 @@ sub run_job_master {
                                 waitpid($pid, 0);
                                 my $child_exit = $? >> 8;
                                 if ($child_exit != 0 || !-f $jobs_file) {
-                                    warn "Warning: Failed to expand targets in '$sub_directory'\n";
+                                    warn "Warning: Failed to expand targets" . ($sub_directory ? " in '$sub_directory'" : " from '$sub_makefile'") . "\n";
                                     unlink($jobs_file) if -f $jobs_file;
                                     $all_expanded = 0;
                                     last;
@@ -12830,7 +12848,11 @@ sub run_job_master {
                                         my $cmd = $info->{rule} || '';
 
                                         # Register the job
-                                        print STDERR "DEBUG: Queueing $full_target (cmd: $cmd)\n" if $ENV{SMAK_DEBUG} && $cmd;
+                                        if ($ENV{SMAK_DEBUG} && $cmd) {
+                                            my $debug_cmd = $cmd;
+                                            $debug_cmd =~ s/\n/\\n/g;
+                                            print STDERR "DEBUG: Queueing $full_target (cmd: $debug_cmd)\n";
+                                        }
 
                                         # Compute layer based on dependencies
                                         my $layer = compute_target_layer(\@full_deps);
@@ -12839,7 +12861,7 @@ sub run_job_master {
                                         if ($cmd && $cmd =~ /\S/) {
                                             my %job = (
                                                 target => $full_target,
-                                                dir => $sub_directory,
+                                                dir => $sub_directory || '.',
                                                 command => $cmd,
                                                 deps => \@full_deps,
                                                 layer => $layer,
@@ -12852,7 +12874,7 @@ sub run_job_master {
                                             $in_progress{$full_target} = "queued";
                                         }
                                     }
-                                    print STDERR "DEBUG: Queued " . scalar(keys %$captured) . " targets from $sub_directory\n" if $ENV{SMAK_DEBUG};
+                                    print STDERR "DEBUG: Queued " . scalar(keys %$captured) . " targets" . ($sub_directory ? " from $sub_directory" : " from $sub_makefile") . "\n" if $ENV{SMAK_DEBUG};
                                 }
                             }
                         } else {
@@ -13797,8 +13819,8 @@ sub run_job_master {
                     my $build_args = $1;
                     warn "Received BUILD request: $build_args\n" if $ENV{SMAK_DEBUG};
 
-                    # Parse: directory target1 target2 ...
-                    my ($dir, @targets) = split(/\s+/, $build_args);
+                    # Parse: makefile directory target1 target2 ...
+                    my ($sub_makefile, $dir, @targets) = split(/\s+/, $build_args);
 
                     # Save current directory
                     use Cwd 'getcwd';
@@ -13813,11 +13835,11 @@ sub run_job_master {
 
                     # Parse makefile in new directory if needed
                     my $saved_makefile = $makefile;
-                    my $new_makefile = 'Makefile';
+                    my $new_makefile = $sub_makefile || 'Makefile';
                     if (!exists $fixed_deps{"$new_makefile\t" . ($targets[0] || 'all')}) {
                         eval { parse_makefile($new_makefile); };
                         if ($@) {
-                            warn "Failed to parse makefile: $@\n";
+                            warn "Failed to parse makefile in $dir: $@\n";
                             chdir($saved_cwd);
                             $makefile = $saved_makefile;
                             print $socket "COMPLETE 1\n";

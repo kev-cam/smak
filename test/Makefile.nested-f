@@ -1,0 +1,9 @@
+# Test nested make with -f (alternate makefile)
+# The sub-make should be handled as built-in, not spawned to a worker
+
+.PHONY: all
+
+all:
+	@echo "Parent make starting"
+	$(MAKE) -f Makefile.nested-f-sub all
+	@echo "Parent make finished"

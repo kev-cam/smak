@@ -34,6 +34,12 @@ clean:
 # Note: smak should have built-in rules for these, but we can also define our own
 EOM
 
+# Pre-check: Validate smak dry-run matches make (exits on mismatch)
+${USR_SMAK_SCRIPT:-smak} --check=quiet all || {
+    echo "FAIL: smak --check=quiet validation failed (dry-run mismatch with make)"
+    exit 1
+}
+
 # Test 1: Dry-run should show correct commands for each source type
 echo "Test 1: Dry-run with multiple source types"
 OUTPUT=$(${USR_SMAK_SCRIPT:-smak} -n all 2>&1)

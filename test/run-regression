@@ -7,6 +7,11 @@ set +e  # Don't exit on error - we want to run all tests
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Default to testing the local smak (../smak) if USR_SMAK_SCRIPT not set
+if [ -z "$USR_SMAK_SCRIPT" ] && [ -x "$SCRIPT_DIR/../smak" ]; then
+    export USR_SMAK_SCRIPT="$SCRIPT_DIR/../smak"
+fi
+
 # Parse arguments
 FULL_MODE=0
 VERBOSE=0
@@ -429,6 +434,10 @@ else
     echo "SMAK REGRESSION TEST SUITE"
 fi
 echo "======================================"
+echo ""
+# Show which smak is being tested
+SMAK_PATH=$(realpath "${USR_SMAK_SCRIPT:-smak}" 2>/dev/null || which ${USR_SMAK_SCRIPT:-smak} 2>/dev/null || echo "${USR_SMAK_SCRIPT:-smak}")
+echo "Testing: $SMAK_PATH"
 echo ""
 if [ $NO_PARALLEL -eq 1 ]; then
     echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail]"

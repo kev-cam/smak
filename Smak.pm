@@ -107,6 +107,7 @@ our @EXPORT_OK = qw(
     cmd_rm
     cmd_ignore
     cmd_dirty
+    run_check_mode
 );
 
 our %EXPORT_TAGS = (
@@ -14538,6 +14539,170 @@ sub wait_for_jobs
     close(TREE);
 
     return $sts;
+}
+
+# -check mode: Compare smak -n output with make -n output
+sub run_check_mode {
+    my ($target, $makefile_path) = @_;
+
+    my @report;
+    push @report, "=== smak -check: Comparing dry-run output ===";
+    push @report, "Target: $target";
+    push @report, "Makefile: $makefile_path";
+    push @report, "";
+
+    # Step 1: Run smak -n externally (uses same code path as normal builds)
+    # This ensures we test the actual smak behavior, not a special code path
+    use FindBin qw($RealBin);
+    my $smak_cmd = "$RealBin/smak -n -f " . quotemeta($makefile_path) . " " . quotemeta($target) . " 2>&1";
+    my $smak_output = `$smak_cmd`;
+    my $smak_exit = $? >> 8;
+
+    if ($smak_exit != 0 && $smak_output =~ /No rule to make target/) {
+        return (-1, "Error: smak -n failed:\n$smak_output");
+    }
+    my @smak_commands = normalize_check_output($smak_output, 'smak');
+
+    # Step 2: Run make -n and capture output
+    # Fork and exec make with a cleaned environment:
+    # - Remove smak directory from PATH (smak script puts it first)
+    # - Clear MAKE-related variables so make uses its own defaults
+    my $make_output;
+    my $make_exit;
+    my $pid = open(my $make_fh, '-|');
+    if (!defined $pid) {
+        return (-1, "Error: Could not fork for make -n: $!");
+    }
+    if ($pid == 0) {
+        # Child: clean up environment and exec make
+        # Remove smak directory from PATH
+        my @path_dirs = split(/:/, $ENV{PATH} || '');
+        @path_dirs = grep { $_ !~ m{/smak(?:/|$)} } @path_dirs;
+        $ENV{PATH} = join(':', @path_dirs);
+        # Clear make-related variables
+        delete $ENV{MAKE};
+        delete $ENV{MAKEFLAGS};
+        delete $ENV{MAKELEVEL};
+        # Redirect stderr to stdout
+        open(STDERR, '>&', STDOUT);
+        exec('make', '-n', '-f', $makefile_path, $target);
+        die "exec make failed: $!";
+    }
+    # Parent: read output
+    {
+        local $/;
+        $make_output = <$make_fh>;
+    }
+    close($make_fh);
+    $make_exit = $? >> 8;
+
+    if ($make_exit != 0 && $make_output =~ /No rule to make target/) {
+        return (-1, "Error: make -n failed:\n$make_output");
+    }
+    my @make_commands = normalize_check_output($make_output, 'make');
+
+    # Debug: show what we're comparing
+    if ($ENV{SMAK_CHECK_DEBUG}) {
+        warn "DEBUG: make -n -f $makefile_path $target\n";
+        warn "DEBUG: raw make output (first 3 lines):\n";
+        my @raw_make = split(/\n/, $make_output);
+        warn "  $_\n" for @raw_make[0..2];
+        warn "DEBUG: smak commands (" . scalar(@smak_commands) . "):\n";
+        warn "  $_\n" for @smak_commands[0..9];
+        warn "DEBUG: make commands (" . scalar(@make_commands) . "):\n";
+        warn "  $_\n" for @make_commands[0..9];
+    }
+
+    # Step 3: Compare command sets
+    my %smak_set = map { $_ => 1 } @smak_commands;
+    my %make_set = map { $_ => 1 } @make_commands;
+
+    my @smak_only = grep { !exists $make_set{$_} } @smak_commands;
+    my @make_only = grep { !exists $smak_set{$_} } @make_commands;
+
+    # Step 4: Generate report
+    if (@smak_only) {
+        push @report, "Commands only in smak (not in make -n):";
+        push @report, "  + $_" for @smak_only;
+        push @report, "";
+    }
+
+    if (@make_only) {
+        push @report, "Commands only in make -n (not in smak):";
+        push @report, "  - $_" for @make_only;
+        push @report, "";
+    }
+
+    my $total_diff = @smak_only + @make_only;
+    if ($total_diff == 0) {
+        push @report, "Result: MATCH - smak and make agree on " . scalar(@smak_commands) . " command(s)";
+    } else {
+        push @report, "Result: MISMATCH - $total_diff difference(s) found";
+        push @report, "  smak unique: " . scalar(@smak_only);
+        push @report, "  make unique: " . scalar(@make_only);
+    }
+
+    my $match = ($total_diff == 0) ? 1 : 0;
+    return ($match, join("\n", @report) . "\n");
+}
+
+# Normalize dry-run output for comparison
+# Only does minimal formatting normalization - the actual command content
+# should match between smak and make if smak's expansion is correct.
+sub normalize_check_output {
+    my ($output, $source) = @_;
+
+    my @raw_lines = split(/\n/, $output);
+    my @lines;
+
+    # First pass: join continuation lines (ending with \)
+    my $continued = '';
+    for my $line (@raw_lines) {
+        if ($line =~ s/\s*\\$//) {
+            $continued .= $line . ' ';
+        } else {
+            if ($continued) {
+                push @lines, $continued . $line;
+                $continued = '';
+            } else {
+                push @lines, $line;
+            }
+        }
+    }
+    push @lines, $continued if $continued;
+
+    my @commands;
+    for my $line (@lines) {
+        # Skip empty lines
+        next if $line =~ /^\s*$/;
+
+        # Skip smak-specific headers (not actual commands)
+        next if $source eq 'smak' && $line =~ /^\s*Building:/;
+        next if $source eq 'smak' && $line =~ /^\s*Dependencies:/;
+        next if $source eq 'smak' && $line =~ /^\s*\(up-to-date\)/;
+
+        # Skip make status messages (not actual commands)
+        next if $line =~ /^make\[\d+\]: (Entering|Leaving) directory/;
+        next if $line =~ /^make\[\d+\]: Nothing to be done/;
+        next if $line =~ /^make: Nothing to be done/;
+
+        # Normalize whitespace
+        $line =~ s/^\s+//;
+        $line =~ s/\s+$//;
+        $line =~ s/\s+/ /g;
+
+        # Normalize ./ prefixes (make is inconsistent about these)
+        $line =~ s{(\s)\.\/}{$1}g;   # " ./" -> " "
+        $line =~ s{^\.\/}{};          # Leading "./" -> ""
+
+        # Normalize smak paths to "make" for comparison
+        # Handles: /path/to/smak, /path/to/smak.pl, ./smak, smak.pl -> make
+        $line =~ s{(?:^|(?<=\s)|(?<=&&\s)|(?<=;\s))(?:[\w/.+-]*[/])?smak(?:\.pl)?(?=\s|$)}{make}g;
+
+        push @commands, $line if $line =~ /\S/;
+    }
+
+    return @commands;
 }
 
 # Signal handlers - Ctrl-C just sets a flag

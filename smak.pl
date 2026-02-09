@@ -39,6 +39,7 @@ my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
 my $remote_cd = '';  # Remote directory for SSH workers
 my $norc = 0;  # Skip reading .smak.rc files
 my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j)
+my $check = '';  # Check mode - validate smak -n matches make -n ('' = off, '1' = on, 'quiet' = quiet)
 
 # Check for -norc early (before reading .smak.rc)
 for my $arg (@ARGV) {
@@ -231,6 +232,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'cd=s' => \$remote_cd,
         'norc' => \$norc,
         'retries=i' => \$retries,
+        'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -256,6 +258,7 @@ GetOptions(
     'norc' => \$norc,
     'scanner=s' => \$scanner_paths,
     'retries=i' => \$retries,
+    'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -801,6 +804,27 @@ if (-f $auto_script) {
 if ($ENV{SMAK_JOB_SERVER}) {
     warn "Running as child of job server (sequential mode)\n" if $ENV{SMAK_DEBUG};
     # Continue with sequential build - $jobs stays at 0
+}
+
+# -check mode: validate smak -n output matches make -n
+# --check: print report, then continue with build
+# --check=quiet: silent check, exit with result (no build)
+if ($check) {
+    my $check_target = @targets ? $targets[0] : Smak::get_default_target();
+    unless (defined $check_target) {
+        die "smak: *** No target specified for -check and no default target found. Stop.\n";
+    }
+    my ($match, $report) = Smak::run_check_mode($check_target, $makefile);
+    # Exit codes: 0 = match, 1 = mismatch, 2 = error
+    my $check_exit_code = ($match == 1 ? 0 : ($match == 0 ? 1 : 2));
+
+    if ($check eq 'quiet') {
+        # Quiet mode: no output, just exit with result code
+        exit($check_exit_code);
+    } else {
+        # Normal check: print report, then continue with build
+        print $report;
+    }
 }
 
 # Start job server if parallel builds are requested

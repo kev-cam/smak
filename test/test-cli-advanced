@@ -444,6 +444,70 @@ EOF
     }
 }
 
+# Test 9: SIGINT properly kills job-server and workers
+sub test_sigint_cleanup {
+    test_header("SIGINT cleanup (job-server shutdown)");
+
+    # Create test environment
+    vprint "Setting up SIGINT cleanup test environment\n";
+    remove_tree($TEST_DIR) if -d $TEST_DIR;
+    make_path($TEST_DIR);
+    chdir($TEST_DIR) or die "Cannot chdir to $TEST_DIR: $!";
+
+    # Create a Makefile with a long-running job
+    open(my $mf, '>', 'Makefile') or die "Cannot create Makefile: $!";
+    print $mf <<"EOF";
+all: slow.txt
+
+slow.txt:
+\tsleep 60 && echo "done" > slow.txt
+EOF
+    close($mf);
+
+    # Start smak in background with parallel mode (to use job-server)
+    my $pid = fork();
+    die "Fork failed: $!" unless defined $pid;
+
+    if ($pid == 0) {
+        # Child: run smak
+        exec("$SMAK -j4 all >/dev/null 2>&1");
+        exit 1;
+    }
+
+    # Parent: wait for job-server to start, then send SIGINT
+    sleep 2;
+
+    # Count smak-related processes before SIGINT
+    my $before = `ps aux | grep -E 'smak-server|smak-worker|job-master' | grep -v grep | wc -l`;
+    chomp $before;
+    vprint "Processes before SIGINT: $before\n";
+
+    # Send SIGINT to smak
+    kill 'INT', $pid;
+
+    # Wait for cleanup
+    sleep 3;
+
+    # Reap the child
+    waitpid($pid, WNOHANG);
+
+    # Count smak-related processes after SIGINT
+    my $after = `ps aux | grep -E 'smak-server|smak-worker|job-master' | grep -v grep | wc -l`;
+    chomp $after;
+    vprint "Processes after SIGINT: $after\n";
+
+    # Clean up any orphaned processes (for test isolation)
+    system("pkill -9 -f 'smak-server' 2>/dev/null");
+    system("pkill -9 -f 'smak-worker' 2>/dev/null");
+    system("pkill -9 -f 'job-master' 2>/dev/null");
+
+    if ($after == 0 || $after < $before) {
+        pass("SIGINT cleanup (job-server shutdown)");
+    } else {
+        fail("SIGINT cleanup (job-server shutdown)", "Job-server still running after SIGINT (before=$before, after=$after)");
+    }
+}
+
 # Main
 print "=" x 60 . "\n";
 print "SMAK ADVANCED CLI TEST SUITE\n";
@@ -461,6 +525,7 @@ test_file_dirty();
 test_caching();
 test_cache_invalidation();
 test_ctrl_c_restart();
+test_sigint_cleanup();
 
 # Cleanup
 cleanup();

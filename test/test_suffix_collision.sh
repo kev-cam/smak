@@ -23,6 +23,12 @@ FAILED=0
 # Clean any previous build artifacts
 rm -f only_c.o only_cxx.o
 
+# Pre-check: Validate smak dry-run matches make (exits on mismatch)
+${USR_SMAK_SCRIPT:-smak} --check=quiet -f "$MAKEFILE" all || {
+    echo "FAIL: smak --check=quiet validation failed (dry-run mismatch with make)"
+    exit 1
+}
+
 # Test: Dry-run should select correct rule based on which source file exists
 echo "Test: Rule selection based on source file existence"
 DRY_MAKE=$(timeout 5 make -n -f "$MAKEFILE" all 2>&1)

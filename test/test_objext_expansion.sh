@@ -9,6 +9,12 @@ cd "$(dirname "$0")"
 MAKEFILE="test_objext_expansion.mk"
 FAILED=0
 
+# Pre-check: Validate smak dry-run matches make (exits on mismatch)
+${USR_SMAK_SCRIPT:-smak} --check=quiet -f "$MAKEFILE" all || {
+    echo "FAIL: smak --check=quiet validation failed (dry-run mismatch with make)"
+    exit 1
+}
+
 # Test: Dry-run should expand $(OBJEXT) without hitting iteration limit
 echo "Test: Dry-run with automake-style variables"
 DRY_OUTPUT=$(${USR_SMAK_SCRIPT:-smak} -n -f "$MAKEFILE" all 2>&1)

@@ -10,6 +10,12 @@ cd "$(dirname "$0")"
 # Clean up any previous test artifacts
 rm -f test_auto.o test_auto.o-old
 
+# Pre-check: Validate smak dry-run matches make (exits on mismatch)
+${USR_SMAK_SCRIPT:-smak} --check=quiet -f Makefile.autorescan all || {
+    echo "FAIL: smak --check=quiet validation failed (dry-run mismatch with make)"
+    exit 1
+}
+
 # Run the script-based test using -Ks (CLI mode with script)
 # The script:
 #   1. Builds test_auto.o

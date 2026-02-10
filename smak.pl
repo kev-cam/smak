@@ -807,24 +807,20 @@ if ($ENV{SMAK_JOB_SERVER}) {
 }
 
 # -check mode: validate smak -n output matches make -n
-# --check: print report, then continue with build
-# --check=quiet: silent check, exit with result (no build)
+# Only does dry-runs (smak -n vs make -n), never builds
+# --check: print report, exit with result code
+# --check=quiet: silent, exit with result code
 if ($check) {
     my $check_target = @targets ? $targets[0] : Smak::get_default_target();
     unless (defined $check_target) {
         die "smak: *** No target specified for -check and no default target found. Stop.\n";
     }
     my ($match, $report) = Smak::run_check_mode($check_target, $makefile);
+    # Only print output if not quiet mode
+    print $report unless $check eq 'quiet';
     # Exit codes: 0 = match, 1 = mismatch, 2 = error
     my $check_exit_code = ($match == 1 ? 0 : ($match == 0 ? 1 : 2));
-
-    if ($check eq 'quiet') {
-        # Quiet mode: no output, just exit with result code
-        exit($check_exit_code);
-    } else {
-        # Normal check: print report, then continue with build
-        print $report;
-    }
+    exit($check_exit_code);
 }
 
 # Start job server if parallel builds are requested

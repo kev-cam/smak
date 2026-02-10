@@ -321,13 +321,8 @@ sub run_worker {
                     }
                 }
                 $command = join(' && ', @external_commands, @trailing_builtins);
-            } elsif ($ext_line =~ /^CMD (.*)$/) {
-                # Legacy protocol fallback
-                $command = $1;
-                $command =~ s/\x00/\n/g;
-                @external_commands = split(/\s*&&\s*/, $command);
             } else {
-                die "Expected EXTERNAL_CMDS or CMD line, got: $ext_line\n";
+                die "Expected EXTERNAL_CMDS line, got: $ext_line\n";
             }
 
             # Change to directory

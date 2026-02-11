@@ -723,6 +723,130 @@ sub execute_builtin {
         return 0;
     }
 
+    # make/smak -C dir [-f makefile] [VAR=val...] [targets...] - recursive make
+    elsif ($command eq 'make' || $command eq 'smak' || $command =~ m{/(?:make|smak)(?:\.pl)?$}) {
+        # In parallel mode, let the job server dispatch loop handle recursive make
+        return undef if $job_server_socket && !$dry_run_mode;
+
+        my $full_cmd = "$command " . join(' ', @parts);
+        $full_cmd = normalize_cd_make($full_cmd);
+        my ($sub_makefile, $sub_directory, $sub_vars_ref, @sub_targets) = parse_make_command($full_cmd);
+
+        return undef unless $sub_directory;  # Only handle -C here; -f stays in build_target
+
+        # Handle backticks in variable values
+        if ($sub_vars_ref && %$sub_vars_ref) {
+            for my $var (keys %$sub_vars_ref) {
+                if ($sub_vars_ref->{$var} =~ /`/) {
+                    if ($dry_run_mode) {
+                        my $val = $sub_vars_ref->{$var};
+                        my $expanded = `echo "$val"`;
+                        chomp $expanded if defined $expanded;
+                        $sub_vars_ref->{$var} = $expanded // $val;
+                    } else {
+                        return undef;  # Can't handle backticks in sequential mode
+                    }
+                }
+            }
+        }
+
+        # Temp file for capture data from child (only used when capturing)
+        my $capture_file;
+        if ($capture_targets) {
+            my $safe_dir = $sub_directory;
+            $safe_dir =~ s{[/\s]}{_}g;
+            $capture_file = "/tmp/smak_capture_${$}_${safe_dir}.dat";
+        }
+
+        my $pid = fork();
+        if (!defined $pid) {
+            warn "Warning: Could not fork for recursive make: $!\n";
+            return undef;
+        }
+
+        if ($pid == 0) {
+            # Child: discard parent rules, force sequential
+            %fixed_rule = ();
+            %fixed_deps = ();
+            %pattern_rule = ();
+            %pattern_deps = ();
+            %pseudo_rule = ();
+            %pseudo_deps = ();
+            %suffix_rule = ();
+            %suffix_deps = ();
+            $job_server_socket = undef;
+            $jobs = 0;
+
+            if ($capture_targets) {
+                $capture_targets = {};
+            }
+
+            if ($sub_vars_ref && %$sub_vars_ref) {
+                for my $var (keys %$sub_vars_ref) {
+                    set_cmd_var($var, $sub_vars_ref->{$var});
+                }
+            }
+
+            chdir($sub_directory) or do {
+                warn "Warning: Could not chdir to '$sub_directory': $!\n";
+                exit(1);
+            };
+
+            $sub_makefile = 'Makefile' unless $sub_makefile;
+            eval { parse_makefile($sub_makefile); };
+            if ($@) {
+                warn "Warning: Could not parse '$sub_makefile' in '$sub_directory': $@\n";
+                exit(1);
+            }
+
+            my $exit_code = 0;
+            eval {
+                if (@sub_targets) {
+                    for my $sub_target (@sub_targets) {
+                        build_target($sub_target, {}, 0);
+                    }
+                } else {
+                    my $first_target = get_first_target($sub_makefile);
+                    build_target($first_target, {}, 0) if $first_target;
+                }
+            };
+            if ($@) {
+                warn "Build failed in '$sub_directory': $@\n";
+                $exit_code = 1;
+            }
+
+            if ($capture_targets && $capture_file) {
+                use Storable;
+                Storable::nstore($capture_targets, $capture_file);
+            }
+            exit($exit_code);
+        }
+
+        # Parent: wait for child
+        waitpid($pid, 0);
+        my $child_exit = $? >> 8;
+
+        # Merge captured data (prefix targets with sub_directory)
+        if ($capture_targets && $capture_file && -f $capture_file) {
+            use Storable;
+            my $child_data = Storable::retrieve($capture_file);
+            unlink($capture_file);
+            if ($child_data) {
+                for my $tgt (keys %$child_data) {
+                    my $full_tgt = "$sub_directory/$tgt";
+                    my $info = $child_data->{$tgt};
+                    $capture_targets->{$full_tgt} = {
+                        deps => [map { "$sub_directory/$_" } @{$info->{deps} || []}],
+                        rule => $info->{rule} || '',
+                        exec_dir => $info->{exec_dir} || $sub_directory,
+                    };
+                }
+            }
+        }
+
+        return $child_exit;
+    }
+
     # check-siblings <file1> <file2> ... - verify sibling files from compound target exist
     elsif ($command eq 'check-siblings') {
         my @missing;
@@ -4989,11 +5113,11 @@ sub build_target {
                         print "$display_cmd\n";
                     }
 
-                    # Execute rm commands in-process, but let make/smak fall through
-                    # to the recursive make handler which uses fork for proper context isolation
-                    my $has_make_smak = 0;
-                    for my $part (@parts) {
-                        my $exec_part = $part;
+                    # Execute each part as a builtin; if any part can't be handled,
+                    # hand it and the remainder to the external command path
+                    my $all_handled = 1;
+                    for my $i (0 .. $#parts) {
+                        my $exec_part = $parts[$i];
                         # Unwrap (cmd || true) pattern
                         if ($exec_part =~ /^\s*\((.+?)\s*\|\|\s*true\s*\)\s*$/) {
                             $exec_part = $1;
@@ -5002,35 +5126,20 @@ sub build_target {
                         elsif ($exec_part =~ /^\s*\((.+)\)\s*$/) {
                             $exec_part = $1;
                         }
-                        # Skip 'true' or 'false'
-                        next if $exec_part =~ /^\s*(true|false)\s*$/;
 
-                        # Skip 'cd' commands - they're handled by the -C option
-                        next if $exec_part =~ /^\s*cd\s/;
-
-                        # Check if it's an rm command - execute in-process
-                        if ($exec_part =~ /^\s*rm\b/) {
-                            my @args = split(/\s+/, $exec_part);
-                            shift @args;  # Remove 'rm'
-                            builtin_rm(@args);
-                            next;
+                        my $exit = execute_builtin($exec_part);
+                        if (!defined $exit) {
+                            # Not a builtin - hand remainder to external execution
+                            warn "DEBUG[" . __LINE__ . "]: Part not builtin: $exec_part\n" if $ENV{SMAK_DEBUG};
+                            $all_handled = 0;
+                            last;
                         }
-
-                        # It's a make/smak command - mark for fork-based handling
-                        if ($exec_part =~ /\b(?:make|smak)\s/ || $exec_part =~ m{/smak(?:\s|$)}) {
-                            $has_make_smak = 1;
+                        if ($exit != 0) {
+                            die "smak: *** [$target] Error $exit\n" unless $ignore_errors;
+                            last;  # && semantics: stop on failure
                         }
                     }
-
-                    # If there's a make/smak command, let it fall through to the
-                    # recursive make handler (don't skip with 'next')
-                    # The recursive make handler uses fork for proper context isolation
-                    if ($has_make_smak) {
-                        # Don't 'next' - let the normalized command be processed
-                        # by the recursive make handler below
-                    } else {
-                        next;  # Only rm commands - we're done
-                    }
+                    next if $all_handled;
                 }
             }
 
@@ -5076,159 +5185,17 @@ sub build_target {
                     goto EXECUTE_EXTERNAL_COMMAND;
                 }
 
-                # Handle -C directory option: fork to get fresh rule context
-                my $saved_cwd;
+                # Handle -C directory option via execute_builtin (fork-and-expand)
                 if ($sub_directory) {
-                    use Cwd 'getcwd';
-                    $saved_cwd = getcwd();
-
-                    # Parallel mode: submit to job server which will normalize
-                    # "cd dir && smak" and expand the sub-makefile's targets
-                    if ($job_server_socket && !$dry_run_mode) {
-                        warn "DEBUG[" . __LINE__ . "]: Parallel mode - submitting recursive make to job server\n" if $ENV{SMAK_DEBUG};
+                    my $exit = execute_builtin($normalized_cmd);
+                    if (!defined $exit) {
+                        # Not handled (parallel mode or other) - fall through to external execution
                         goto EXECUTE_EXTERNAL_COMMAND;
                     }
-
-                    # Check for backticks in variable values
-                    # In dry-run mode: expand backticks via shell, then continue internal expansion
-                    # In sequential mode without job server: fall back to external execution
-                    if ($sub_vars_ref && %$sub_vars_ref) {
-                        my $has_backticks = 0;
-                        for my $var (keys %$sub_vars_ref) {
-                            if ($sub_vars_ref->{$var} =~ /`/) {
-                                $has_backticks = 1;
-                                last;
-                            }
-                        }
-                        if ($has_backticks) {
-                            if ($dry_run_mode) {
-                                # Dry-run mode: expand backticks via shell so we can show expanded commands
-                                warn "DEBUG[" . __LINE__ . "]: Dry-run mode - expanding backticks via shell\n" if $ENV{SMAK_DEBUG};
-                                for my $var (keys %$sub_vars_ref) {
-                                    if ($sub_vars_ref->{$var} =~ /`/) {
-                                        my $val = $sub_vars_ref->{$var};
-                                        # Use shell to expand backticks
-                                        my $expanded = `echo "$val"`;
-                                        chomp $expanded if defined $expanded;
-                                        $sub_vars_ref->{$var} = $expanded // $val;
-                                        warn "DEBUG[" . __LINE__ . "]: Expanded $var: '$val' -> '$expanded'\n" if $ENV{SMAK_DEBUG};
-                                    }
-                                }
-                            } else {
-                                # Sequential mode: fall back to external execution
-                                warn "DEBUG[" . __LINE__ . "]: Variable contains backticks, falling back to external execution\n" if $ENV{SMAK_DEBUG};
-                                goto EXECUTE_EXTERNAL_COMMAND;
-                            }
-                        }
+                    if ($exit != 0) {
+                        die "Recursive make in '$sub_directory' failed (exit $exit)\n";
                     }
-
-                    warn "DEBUG[" . __LINE__ . "]: Recursive make -C $sub_directory - forking for fresh context\n" if $ENV{SMAK_DEBUG};
-
-                    # Temp file for capture data from child (only used when capturing)
-                    my $capture_file;
-                    if ($capture_targets) {
-                        my $safe_dir = $sub_directory;
-                        $safe_dir =~ s{[/\s]}{_}g;
-                        $capture_file = "/tmp/smak_capture_${$}_${safe_dir}.dat";
-                    }
-
-                    my $pid = fork();
-                    if (!defined $pid) {
-                        warn "Warning: Could not fork for recursive make: $!\n";
-                        goto EXECUTE_EXTERNAL_COMMAND;
-                    }
-
-                    if ($pid == 0) {
-                        # Child process: discard parent's rules and job server
-                        %fixed_rule = ();
-                        %fixed_deps = ();
-                        %pattern_rule = ();
-                        %pattern_deps = ();
-                        %pseudo_rule = ();
-                        %pseudo_deps = ();
-                        %suffix_rule = ();
-                        %suffix_deps = ();
-                        $job_server_socket = undef;  # Force sequential build
-                        $jobs = 0;
-
-                        # Fresh capture hash for child
-                        if ($capture_targets) {
-                            $capture_targets = {};
-                        }
-
-                        # Set command-line variable assignments before parsing makefile
-                        # Use set_cmd_var to ensure these override makefile definitions
-                        if ($sub_vars_ref && %$sub_vars_ref) {
-                            for my $var (keys %$sub_vars_ref) {
-                                set_cmd_var($var, $sub_vars_ref->{$var});
-                                warn "DEBUG[" . __LINE__ . "]: Set cmd var $var='$sub_vars_ref->{$var}'\n" if $ENV{SMAK_DEBUG};
-                            }
-                        }
-
-                        chdir($sub_directory) or do {
-                            warn "Warning: Could not chdir to '$sub_directory': $!\n";
-                            exit(1);
-                        };
-
-                        # Parse the subdirectory Makefile fresh
-                        $sub_makefile = 'Makefile' unless $sub_makefile;
-                        eval { parse_makefile($sub_makefile); };
-                        if ($@) {
-                            warn "Warning: Could not parse '$sub_makefile' in '$sub_directory': $@\n";
-                            exit(1);
-                        }
-
-                        # Build the targets
-                        my $exit_code = 0;
-                        eval {
-                            if (@sub_targets) {
-                                for my $sub_target (@sub_targets) {
-                                    build_target($sub_target, {}, 0);
-                                }
-                            } else {
-                                my $first_target = get_first_target($sub_makefile);
-                                build_target($first_target, {}, 0) if $first_target;
-                            }
-                        };
-                        if ($@) {
-                            warn "Build failed: $@\n";
-                            $exit_code = 1;
-                        }
-
-                        # Write captured data for parent to merge
-                        if ($capture_targets && $capture_file) {
-                            use Storable;
-                            Storable::nstore($capture_targets, $capture_file);
-                        }
-                        exit($exit_code);
-                    }
-
-                    # Parent: wait for child
-                    waitpid($pid, 0);
-                    my $child_exit = $? >> 8;
-
-                    # Merge child's captured data (prefix targets with sub_directory)
-                    if ($capture_targets && $capture_file && -f $capture_file) {
-                        use Storable;
-                        my $child_data = Storable::retrieve($capture_file);
-                        unlink($capture_file);
-                        if ($child_data) {
-                            for my $tgt (keys %$child_data) {
-                                my $full_tgt = "$sub_directory/$tgt";
-                                my $info = $child_data->{$tgt};
-                                $capture_targets->{$full_tgt} = {
-                                    deps => [map { "$sub_directory/$_" } @{$info->{deps} || []}],
-                                    rule => $info->{rule} || '',
-                                    exec_dir => $info->{exec_dir} || $sub_directory,
-                                };
-                            }
-                        }
-                    }
-
-                    if ($child_exit != 0) {
-                        die "Recursive make in '$sub_directory' failed (exit $child_exit)\n";
-                    }
-                    next;  # Continue with next command
+                    next;
                 }
 
                 if ($sub_makefile) {
@@ -5238,9 +5205,6 @@ sub build_target {
                         for my $var (keys %$sub_vars_ref) {
                             if ($sub_vars_ref->{$var} =~ /`/) {
                                 warn "DEBUG[" . __LINE__ . "]: Variable $var contains backticks, falling back to external execution\n" if $ENV{SMAK_DEBUG};
-                                if ($saved_cwd) {
-                                    chdir($saved_cwd) or warn "Warning: Could not restore directory to '$saved_cwd': $!\n";
-                                }
                                 goto EXECUTE_EXTERNAL_COMMAND;
                             }
                         }
@@ -5302,11 +5266,6 @@ sub build_target {
                         build_target($first_target, $visited, $depth + 1) if $first_target;
                     }
 
-                    # Restore directory if changed
-                    if ($saved_cwd) {
-                        chdir($saved_cwd) or warn "Warning: Could not restore directory to '$saved_cwd': $!\n";
-                    }
-
                     # Restore variable assignments
                     for my $var (keys %saved_vars) {
                         if (defined $saved_vars{$var}) {
@@ -5347,10 +5306,6 @@ sub build_target {
                         build_target($first_target, $visited, $depth + 1) if $first_target;
                     }
 
-                    # Restore directory if changed
-                    if ($saved_cwd) {
-                        chdir($saved_cwd) or warn "Warning: Could not restore directory to '$saved_cwd': $!\n";
-                    }
                     next;
                 }
             }
@@ -9753,12 +9708,16 @@ sub run_job_master {
                 }
             } else {
                 # Multiple commands joined by && - split them
+                # Collect in forward order, then unshift as a batch to preserve
+                # left-to-right ordering within the line
                 $in_trailing_builtins = 0;
+                my @parts_in_order;
                 for my $part (@line_parts) {
                     $part =~ s/^\s+|\s+$//g;
                     next unless $part =~ /\S/;
-                    unshift @external_parts, $part;
+                    push @parts_in_order, $part;
                 }
+                unshift @external_parts, @parts_in_order;
             }
         }
 

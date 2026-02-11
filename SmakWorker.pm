@@ -220,6 +220,8 @@ sub execute_builtin {
 
     if ($clean_cmd =~ /^echo\s+(.*)$/) {
         my $text = $1;
+        # Don't handle as builtin if shell metacharacters are present
+        return undef if $text =~ /[>|<;&`\$]/;
         print $socket "OUTPUT $text\n" if $socket;
         return 0;
     }
@@ -228,9 +230,9 @@ sub execute_builtin {
 }
 
 # Worker entry point - to be called after fork()
-# Parameters: ($host, $port, $is_dry_run)
+# Parameters: ($host, $port)
 sub run_worker {
-    my ($host, $port, $is_dry_run) = @_;
+    my ($host, $port) = @_;
     
     # Set up connection to job master
     print STDERR "Worker connecting to $host:$port...\n" if $ENV{SMAK_VERBOSE} && $ENV{SMAK_VERBOSE} ne 'w';
@@ -268,8 +270,27 @@ sub run_worker {
 
     die "Connection closed before environment received\n" unless $env_done;
 
-    # Main worker loop
-    while (my $line = <$socket>) {
+    # Main worker loop - use select for periodic IDLE heartbeats
+    my $sel = IO::Select->new($socket);
+    my $last_idle_sent = 0;
+
+    while (1) {
+        # Wait up to 1 second for data from master
+        my @ready = $sel->can_read(1.0);
+
+        if (!@ready) {
+            # Timeout - send periodic IDLE heartbeat so job server knows we're alive
+            my $now = Time::HiRes::time();
+            if ($now - $last_idle_sent >= 1.0) {
+                print $socket "IDLE $now\n";
+                $socket->flush();
+                $last_idle_sent = $now;
+            }
+            next;
+        }
+
+        my $line = <$socket>;
+        last unless defined $line;  # Connection closed
         chomp $line;
 
         # Check for shutdown signal
@@ -294,15 +315,17 @@ sub run_worker {
             die "Expected DIR line, got: $dir_line\n" unless $dir_line =~ /^DIR (.*)$/;
             my $dir = $1;
 
-            # Get external commands (new protocol)
+            # Get external commands (EXTERNAL_CMDS or EXTERNAL_CMDS_DRY protocol)
             my @external_commands;
             my @trailing_builtins;
-            my $command = '';  # For display/legacy
+            my $command = '';  # For display
+            my $is_dry_run = 0;
 
             my $ext_line = <$socket>;
             chomp $ext_line;
-            if ($ext_line =~ /^EXTERNAL_CMDS (\d+)$/) {
-                my $count = $1;
+            if ($ext_line =~ /^EXTERNAL_CMDS(_DRY)? (\d+)$/) {
+                $is_dry_run = 1 if $1;
+                my $count = $2;
                 for (1..$count) {
                     my $cmd = <$socket>;
                     chomp $cmd if defined $cmd;

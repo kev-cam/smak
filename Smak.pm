@@ -1641,7 +1641,9 @@ sub parse_makefile {
         return;  # Cache loaded successfully, skip parsing
     }
 
-    # Reset state
+    # Reset state (must re-undef $default_target because a failed cache load
+    # via 'do' may have set it as a side effect)
+    undef $default_target;
     %fixed_rule = ();
     %fixed_deps = ();
     %pattern_rule = ();
@@ -1666,7 +1668,7 @@ sub parse_makefile {
     $MV{RM} = 'rm -f';
     $MV{AR} = 'ar';
     $MV{CC} = 'cc';
-    $MV{CXX} = 'c++';
+    $MV{CXX} = 'g++';
     $MV{CPP} = '\$(CC) -E';
     $MV{AS} = 'as';
     $MV{FC} = 'f77';
@@ -2290,26 +2292,17 @@ sub parse_makefile {
                 }
 
                 # Set default target to first non-pseudo, non-pattern target (like gmake)
-                # Also exclude targets with unexpanded variables and special targets
+                # .PHONY targets ARE valid default targets (matching GNU make behavior)
                 if (!defined $default_target && $type ne 'pseudo' && $type ne 'pattern') {
                     # Skip targets with unexpanded variables like $(VERBOSE).SILENT
                     if ($target =~ /\$/) {
                         warn "DEBUG: Skipping target with variable: '$target'\n" if $ENV{SMAK_DEBUG};
                         next;
                     }
-                    # Skip special targets like .SILENT, .PHONY, etc.
+                    # Skip special targets like .SILENT, .SUFFIXES, etc.
                     if ($target =~ /^\./) {
                         warn "DEBUG: Skipping special target: '$target'\n" if $ENV{SMAK_DEBUG};
                         next;
-                    }
-                    # Skip targets declared in .PHONY
-                    my $phony_key = "$makefile\t.PHONY";
-                    if (exists $pseudo_deps{$phony_key}) {
-                        my @phony_targets = @{$pseudo_deps{$phony_key} || []};
-                        if (grep { $_ eq $target } @phony_targets) {
-                            warn "DEBUG: Skipping .PHONY target: '$target'\n" if $ENV{SMAK_DEBUG};
-                            next;
-                        }
                     }
 
                     $default_target = $target;
@@ -3543,13 +3536,9 @@ sub _save_ninja_build {
         if ($output =~ /\$/) {
             warn "DEBUG: add_rule skipping target with variable: '$output'\n" if $ENV{SMAK_DEBUG};
         }
-        # Skip special targets
+        # Skip special targets (but NOT .PHONY targets - those are valid defaults)
         elsif ($output =~ /^\./) {
             warn "DEBUG: add_rule skipping special target: '$output'\n" if $ENV{SMAK_DEBUG};
-        }
-        # Skip phony targets
-        elsif (exists $phony_targets{$output}) {
-            warn "DEBUG: add_rule skipping phony target: '$output'\n" if $ENV{SMAK_DEBUG};
         }
         else {
             $default_target = $output;
@@ -9303,8 +9292,9 @@ sub run_job_master {
     our @workers;
     our %worker_status;  # socket => {ready => 0/1, task_id => N}
 
-    # Use dummy worker for dry-run mode, normal worker otherwise
-    my $worker_script = $dry_run_mode ? "$bin_dir/smak-worker-dry" : "$bin_dir/smak-worker";
+    # Single worker script for both normal and dry-run modes
+    # Dry-run is signaled per-job via EXTERNAL_CMDS_DRY protocol message
+    my $worker_script = "$bin_dir/smak-worker";
     warn "DEBUG: dry_run_mode=$dry_run_mode, worker_script=$worker_script\n" if $ENV{SMAK_DEBUG};
     die "Worker script not found: $worker_script\n" unless -x $worker_script;
 
@@ -9509,7 +9499,7 @@ sub run_job_master {
                 my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
                 # Construct remote worker command
                 # Use PATH that includes smak directory, or absolute path if SMAK_REMOTE_PATH is set
-                my $remote_worker = $dry_run_mode ? 'smak-worker-dry' : 'smak-worker';
+                my $remote_worker = 'smak-worker';
                 my $remote_cmd;
                 if ($ENV{SMAK_REMOTE_PATH}) {
                     # Use explicit path from environment
@@ -9529,7 +9519,7 @@ sub run_job_master {
                 # Local mode - call worker routine directly
                 # This avoids fork+exec overhead by calling the routine in the same process
                 use SmakWorker;
-                SmakWorker::run_worker('127.0.0.1', $worker_port, $dry_run_mode);
+                SmakWorker::run_worker('127.0.0.1', $worker_port);
                 # Should not reach here - run_worker() exits
                 exit 99;
             }
@@ -11477,7 +11467,8 @@ sub run_job_master {
             @builtins = @$builtin_ref;
         }
 
-        print $worker "EXTERNAL_CMDS " . scalar(@ext_cmds) . "\n";
+        my $cmds_tag = $dry_run_mode ? "EXTERNAL_CMDS_DRY" : "EXTERNAL_CMDS";
+        print $worker "$cmds_tag " . scalar(@ext_cmds) . "\n";
         for my $cmd (@ext_cmds) {
             if ($ENV{SMAK_DEBUG}) {
                 my $debug_cmd = $cmd;
@@ -12597,7 +12588,8 @@ sub run_job_master {
                 @builtins = @$builtin_ref;
             }
 
-            print $ready_worker "EXTERNAL_CMDS " . scalar(@ext_cmds) . "\n";
+            my $cmds_tag = $dry_run_mode ? "EXTERNAL_CMDS_DRY" : "EXTERNAL_CMDS";
+            print $ready_worker "$cmds_tag " . scalar(@ext_cmds) . "\n";
             for my $cmd (@ext_cmds) {
                 print $ready_worker "$cmd\n";
             }
@@ -13787,10 +13779,12 @@ sub run_job_master {
                         for my $i (1..$num_tests) {
                             my $start = time();
 
-                            # Send dummy task
+                            # Send dummy task using EXTERNAL_CMDS protocol
                             print $test_worker "TASK $i\n";
                             print $test_worker "DIR /tmp\n";
-                            print $test_worker "CMD true\n";
+                            print $test_worker "EXTERNAL_CMDS 1\n";
+                            print $test_worker "true\n";
+                            print $test_worker "TRAILING_BUILTINS 0\n";
 
                             # Read responses until READY
                             while (1) {

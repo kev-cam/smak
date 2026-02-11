@@ -109,9 +109,9 @@ fi
 cd ..
 rm -rf "$TEST_DIR"
 
-# Test 4: No valid default target
+# Test 4: .PHONY target is valid default (matching GNU make behavior)
 echo ""
-echo "Test 4: No valid default target (all special/pattern)"
+echo "Test 4: .PHONY target is valid default target"
 mkdir -p "$TEST_DIR"
 cd "$TEST_DIR"
 
@@ -127,10 +127,10 @@ EOF
 
 DEFAULT=$(perl -I../.. -MSmak -e 'Smak::parse_makefile("Makefile"); print Smak::get_default_target() || "NONE"')
 
-if [ "$DEFAULT" = "NONE" ]; then
-    echo "✓ PASS: No default target found (all targets are special/pattern)"
+if [ "$DEFAULT" = "clean" ]; then
+    echo "✓ PASS: Default target is 'clean' (.PHONY targets are valid defaults)"
 else
-    echo "✗ FAIL: Default target is '$DEFAULT', expected 'NONE'"
+    echo "✗ FAIL: Default target is '$DEFAULT', expected 'clean'"
     exit 1
 fi
 

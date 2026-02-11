@@ -40,6 +40,7 @@ my $remote_cd = '';  # Remote directory for SSH workers
 my $norc = 0;  # Skip reading .smak.rc files
 my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j)
 my $check = '';  # Check mode - validate smak -n matches make -n ('' = off, '1' = on, 'quiet' = quiet)
+my $keep_going = 0;  # Keep going after failures (like make -k)
 
 # Check for -norc early (before reading .smak.rc)
 for my $arg (@ARGV) {
@@ -226,6 +227,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         's|silent|quiet' => \$silent,
         'yes' => \$yes,
         'j|jobs:i' => sub { $jobs = $_[1]; $jobs_specified = 1; },
+        'k|keep-going' => \$keep_going,
         'cli' => \$cli,
         'v|verbose' => \$verbose,
         'ssh=s' => \$ssh_host,
@@ -251,6 +253,7 @@ GetOptions(
     's|silent|quiet' => \$silent,
     'yes' => \$yes,
     'j|jobs:i' => sub { $jobs = $_[1]; $jobs_specified = 1; },
+    'k|keep-going' => \$keep_going,
     'cli' => \$cli,
     'v|verbose' => \$verbose,
     'ssh=s' => \$ssh_host,
@@ -752,6 +755,9 @@ set_jobs($jobs);
 
 # Set maximum retry count
 set_max_retries($retries);
+
+# Set keep-going mode (continue after failures)
+set_keep_going($keep_going);
 
 # Set verbose mode via environment variable so Smak.pm can access it
 # SMAK_DEBUG implies verbose mode, -cli defaults to wheel mode

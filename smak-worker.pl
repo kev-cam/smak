@@ -31,4 +31,4 @@ if ($dir) {
 }
 
 # Run the worker
-SmakWorker::run_worker($host, $port, 0);  # 0 = not dry-run
+SmakWorker::run_worker($host, $port);

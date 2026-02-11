@@ -9274,6 +9274,11 @@ sub run_job_master {
     # The CLI process handles cancellation - job-master should keep running
     $SIG{INT} = 'IGNORE';
 
+    # SIGHUP tells the job-server to detach from any connected CLI client
+    # Useful when the CLI is remote and hard to locate
+    my $hup_received = 0;
+    $SIG{HUP} = sub { $hup_received = 1; };
+
     # Job-master has access to all parsed Makefile data:
     # Bring package-level variables into scope
     our %fixed_deps;
@@ -9753,12 +9758,16 @@ sub run_job_master {
                 }
             } else {
                 # Multiple commands joined by && - split them
+                # Collect in forward order, then unshift as a batch to preserve
+                # left-to-right ordering within the line
                 $in_trailing_builtins = 0;
+                my @parts_in_order;
                 for my $part (@line_parts) {
                     $part =~ s/^\s+|\s+$//g;
                     next unless $part =~ /\S/;
-                    unshift @external_parts, $part;
+                    push @parts_in_order, $part;
                 }
+                unshift @external_parts, @parts_in_order;
             }
         }
 
@@ -12715,6 +12724,20 @@ sub run_job_master {
 
         my @ready = $select->can_read(0.1);
 
+        # Handle SIGHUP: detach from connected master/CLI client
+        if ($hup_received) {
+            $hup_received = 0;
+            if (defined($master_socket)) {
+                vprint "SIGHUP received. Detaching from CLI client.\n";
+                my $old = $master_socket;
+                $select->remove($master_socket);
+                close($master_socket);
+                $watch_client = undef if $watch_client && $watch_client == $old;
+                $master_socket = undef;
+                @ready = grep { $_ != $old } @ready;
+            }
+        }
+
         # On select timeout (nothing ready), do consistency check
         if (@ready == 0) {
             $idle_timeouts++;
@@ -13341,9 +13364,9 @@ sub run_job_master {
                 while (1) {
                     my $line = <$socket>;
                     unless (defined $line) {
-                        # Check if socket is actually disconnected or just no more data
-                        if ($!{EAGAIN} || $!{EWOULDBLOCK} || !$!) {
-                            # No more data - break to continue with select loop
+                        # Check if socket has no data yet (non-blocking) or is truly disconnected
+                        if ($!{EAGAIN} || $!{EWOULDBLOCK}) {
+                            # No more data right now - break to continue with select loop
                             last MASTER_READ;
                         }
                         # Master actually disconnected - clean up silently

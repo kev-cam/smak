@@ -189,13 +189,19 @@ sub execute_builtin {
 
     if ($clean_cmd =~ /^mv\s+(\S+)\s+(\S+)\s*$/) {
         my ($src, $dst) = ($1, $2);
-        move($src, $dst) or return 1;
+        if (!move($src, $dst)) {
+            print $socket "OUTPUT mv: cannot move '$src' to '$dst': $!\n" if $socket;
+            return 1;
+        }
         return 0;
     }
 
     if ($clean_cmd =~ /^cp\s+(\S+)\s+(\S+)\s*$/) {
         my ($src, $dst) = ($1, $2);
-        copy($src, $dst) or return 1;
+        if (!copy($src, $dst)) {
+            print $socket "OUTPUT cp: cannot copy '$src' to '$dst': $!\n" if $socket;
+            return 1;
+        }
         return 0;
     }
 

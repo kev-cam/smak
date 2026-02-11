@@ -475,6 +475,56 @@ This requires:
 - Parent tracks job->child relationship
 - Original target waits for child jobs
 
+## Signal Handling
+
+SMAK installs the following signal handlers (see end of `Smak.pm`):
+
+### Parent Process (smak.pl)
+
+| Signal  | Handler            | Behavior |
+|---------|-------------------|----------|
+| `INT`   | `cancel_handler`  | In batch mode: sends SHUTDOWN to job-server, exits. In interactive/CLI mode: sets `$cancel_requested` flag so the CLI loop can handle it gracefully (restart job-server, re-open tty). |
+| `USR1`  | `interactive_debug` | Enters the interactive debugger. Useful for attaching to a running smak process: `kill -USR1 <pid>`. |
+| `USR2`  | `Carp::confess`   | Prints a full stack trace to STDERR. Useful for diagnosing hangs: `kill -USR2 <pid>`. |
+
+### Job-Master (smak-server)
+
+| Signal  | Handler            | Behavior |
+|---------|-------------------|----------|
+| `INT`   | Ignored           | SIGINT is ignored; the parent/CLI process handles cancellation via the SHUTDOWN protocol message. |
+| `HUP`   | Detach from CLI   | Disconnects from any connected CLI/master client. The job-server keeps running and can accept new connections. Useful when the CLI is remote and hard to locate: `kill -HUP <server-pid>`. |
+
+### SIGINT Detail
+
+When the parent receives SIGINT in batch mode, `cancel_handler` (Smak.pm):
+1. Sends `SHUTDOWN` to the job-master via the TCP socket
+2. Waits up to 1 second for `SHUTDOWN_ACK`
+3. Closes the socket
+4. Calls `exit`
+
+The job-master, on receiving `SHUTDOWN`:
+1. Sends `SHUTDOWN` to all worker sockets
+2. Sends `SHUTDOWN_ACK` back to master
+3. Calls `exit 0`
+
+## Job-Server Idle Timeout and Detach
+
+When `$job_server_idle_timeout > 0` (default: 600 seconds / 10 minutes), the job-server stays alive after the parent exits:
+
+1. **Parent detach**: Instead of sending SHUTDOWN, the parent closes the socket and exits. The job-server detects the disconnection (EOF on master socket) and starts its idle timer.
+
+2. **Idle timeout**: The job-master tracks idle time via `$idle_since`. When idle (no queued/running/pending jobs) with no master connected for `$job_server_idle_timeout` seconds, it cleans up `.smak.connect` and the port file, then exits.
+
+3. **Reconnection**: A subsequent `smak` invocation can reconnect to the surviving job-server via the `.smak.connect` symlink, avoiding the overhead of re-parsing Makefiles and respawning workers.
+
+4. **Configuration**: Set via `.smak.rc`:
+   ```
+   set job_server_idle_timeout = 300   # 5 minutes
+   set job_server_idle_timeout = 0     # disable (immediate shutdown on disconnect)
+   ```
+
+5. **Parent process death**: When `getppid() == 1` (parent died) and idle timeout is disabled (`<= 0`), the job-master exits immediately. When idle timeout is enabled, it lets the idle timer handle cleanup instead.
+
 ## Open Issues
 
 1. Some regression tests still failing

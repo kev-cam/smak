@@ -87,19 +87,21 @@ my $reconnect = 0;
 my $kill_old_js = 0;
 
 # Whitelist of allowed variable names for 'set' command
+# Values map to the qualified Perl variable name (undef = use local $name)
 my %allowed_vars = (
-    jobs => 1,
-    verbose => 1,
-    silent => 1,
-    dry_run => 1,
-    makefile => 1,
-    directory => 1,
-    ssh_host => 1,
-    remote_cd => 1,
-    cli => 1,
-    yes => 1,
-    reconnect => 1,      # Special: reconnect to existing job server
-    kill_old_js => 1,    # Special: kill old job server before reconnecting
+    jobs => undef,
+    verbose => undef,
+    silent => undef,
+    dry_run => undef,
+    makefile => undef,
+    directory => undef,
+    ssh_host => undef,
+    remote_cd => undef,
+    cli => undef,
+    yes => undef,
+    reconnect => undef,      # Special: reconnect to existing job server
+    kill_old_js => undef,    # Special: kill old job server before reconnecting
+    job_server_idle_timeout => 'Smak::job_server_idle_timeout',  # Idle timeout in seconds (0 = no timeout, default 600)
 );
 
 if ($smakrc && -f $smakrc) {
@@ -122,7 +124,8 @@ if ($smakrc && -f $smakrc) {
                 }
 
                 # Translate to Perl assignment
-                my $perl_code = "\$$name = $value";
+                my $qual_name = $allowed_vars{$name} // $name;
+                my $perl_code = "\$$qual_name = $value";
                 eval $perl_code;
                 if ($@) {
                     warn "$smakrc:$line_num: $@";
@@ -1002,8 +1005,16 @@ if (!$debug) {
         }
     }
 
-    # Stop job server and clean up workers (must be done before wait_for_jobs)
-    stop_job_server();
+    # Stop or detach job server (must be done before wait_for_jobs)
+    if ($Smak::job_server_idle_timeout > 0 && $Smak::job_server_pid) {
+        # Detach: close socket without sending SHUTDOWN so server stays alive
+        $Smak::detached_server_pid = $Smak::job_server_pid;
+        close($Smak::job_server_socket) if $Smak::job_server_socket;
+        $Smak::job_server_socket = undef;
+        $Smak::job_server_pid = undef;
+    } else {
+        stop_job_server();
+    }
 
     my $sts = wait_for_jobs();
 
@@ -1265,5 +1276,13 @@ interactive_debug();
 
 # Clean up job server if it was started
 if ($Smak::job_server_socket) {
-    stop_job_server();
+    if ($Smak::job_server_idle_timeout > 0 && $Smak::job_server_pid) {
+        # Detach: close socket without sending SHUTDOWN so server stays alive
+        $Smak::detached_server_pid = $Smak::job_server_pid;
+        close($Smak::job_server_socket);
+        $Smak::job_server_socket = undef;
+        $Smak::job_server_pid = undef;
+    } else {
+        stop_job_server();
+    }
 }

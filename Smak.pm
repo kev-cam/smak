@@ -297,6 +297,7 @@ our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
 our $project_root;  # Root directory of project (set by job-master at startup)
 our $job_server_idle_timeout = 600;  # Idle timeout in seconds (0 = no timeout, default 10 min)
+our $detached_server_pid;  # PID of detached job-master (skip in wait_for_jobs)
 our $keep_going = 0;  # If true, continue building other targets after a failure (like make -k)
 
 # Output control
@@ -351,6 +352,9 @@ sub start_job_server {
     if ($job_server_pid == 0) {
         # Child - run job-master with full access to parsed Makefile data
         # This allows job-master to understand dependencies and parallelize intelligently
+        # Detach from parent's stdio so we don't hold pipes open after parent exits
+        open(STDOUT, '>/dev/null');
+        open(STDERR, '>/dev/null');
         set_process_name('smak-server');
         run_job_master($jobs, $RealBin);
         exit 99;  # Should never reach here
@@ -9229,6 +9233,11 @@ sub run_job_master {
     # The CLI process handles cancellation - job-master should keep running
     $SIG{INT} = 'IGNORE';
 
+    # SIGHUP tells the job-server to detach from any connected CLI client
+    # Useful when the CLI is remote and hard to locate
+    my $hup_received = 0;
+    $SIG{HUP} = sub { $hup_received = 1; };
+
     # Job-master has access to all parsed Makefile data:
     # Bring package-level variables into scope
     our %fixed_deps;
@@ -12650,19 +12659,10 @@ sub run_job_master {
             }
         }
 
-        # If idle and master disconnected, exit
-        if ($is_idle && !defined($master_socket)) {
-            vprint "Idle and master disconnected. Job-master exiting.\n";
-            my $local_link = ".smak.connect";
-            unlink($local_link) if -l $local_link;
-            unlink($port_file) if -f $port_file;
-            last;
-        }
-
         # In non-CLI mode (batch mode), detect if parent process died
         # When parent dies, getppid() returns 1 (init process)
-        # This means master crashed or exited unexpectedly - we should clean up
-        if (getppid() == 1 && !defined($master_socket)) {
+        # If idle timeout is set, let the idle timeout handle cleanup instead
+        if (getppid() == 1 && !defined($master_socket) && $job_server_idle_timeout <= 0) {
             print STDERR "Parent process died. Job-master cleaning up and exiting.\n";
             # Kill any running workers
             shutdown_workers();
@@ -12673,6 +12673,20 @@ sub run_job_master {
         }
 
         my @ready = $select->can_read(0.1);
+
+        # Handle SIGHUP: detach from connected master/CLI client
+        if ($hup_received) {
+            $hup_received = 0;
+            if (defined($master_socket)) {
+                vprint "SIGHUP received. Detaching from CLI client.\n";
+                my $old = $master_socket;
+                $select->remove($master_socket);
+                close($master_socket);
+                $watch_client = undef if $watch_client && $watch_client == $old;
+                $master_socket = undef;
+                @ready = grep { $_ != $old } @ready;
+            }
+        }
 
         # On select timeout (nothing ready), do consistency check
         if (@ready == 0) {
@@ -13300,9 +13314,9 @@ sub run_job_master {
                 while (1) {
                     my $line = <$socket>;
                     unless (defined $line) {
-                        # Check if socket is actually disconnected or just no more data
-                        if ($!{EAGAIN} || $!{EWOULDBLOCK} || !$!) {
-                            # No more data - break to continue with select loop
+                        # Check if socket has no data yet (non-blocking) or is truly disconnected
+                        if ($!{EAGAIN} || $!{EWOULDBLOCK}) {
+                            # No more data right now - break to continue with select loop
                             last MASTER_READ;
                         }
                         # Master actually disconnected - clean up silently
@@ -15256,7 +15270,9 @@ sub wait_for_jobs
         my $p=0;
         my @pid;
         while ($line =~ s/\((\d+)\)//) {
-            if ($$ != $1) { $pid[$p++] = $1; }
+            next if $1 == $$;
+            next if defined($detached_server_pid) && $1 == $detached_server_pid;
+            $pid[$p++] = $1;
         }
         for $p (@pid) {
             # Skip if this PID doesn't exist or isn't our child

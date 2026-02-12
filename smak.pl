@@ -262,6 +262,7 @@ GetOptions(
     'scanner=s' => \$scanner_paths,
     'retries=i' => \$retries,
     'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
+    'no-builtins' => sub { $Smak::no_builtins = 1; },
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -804,13 +805,106 @@ if (-f $auto_script) {
     execute_script_file($auto_script);
 }
 
-# When SMAK_JOB_SERVER is set, we're a child of another smak with a job server
-# Just run sequentially - the parallelism is handled by the parent job-master
-# dispatching multiple jobs to workers. Don't try to spawn a new job server.
+# When SMAK_JOB_SERVER is set, we're a child of another smak with a job server.
+# Connect back to the parent job-server and relay our targets as jobs.
 if ($ENV{SMAK_JOB_SERVER}) {
-    warn "Running as child of job server (sequential mode)\n" if $ENV{SMAK_DEBUG};
-    # Continue with sequential build - $jobs stays at 0
+    require IO::Socket::INET;
+
+    my ($host, $port) = split(/:/, $ENV{SMAK_JOB_SERVER});
+    warn "Child smak connecting to parent job-server at $host:$port\n" if $ENV{SMAK_DEBUG};
+
+    my $sock = IO::Socket::INET->new(
+        PeerHost => $host,
+        PeerPort => $port,
+        Proto    => 'tcp',
+        Timeout  => 10,
+    );
+    if (!$sock) {
+        # Connection failed - fall back to sequential build
+        warn "smak: Cannot connect to parent job-server at $host:$port: $! (falling back to sequential)\n" if $ENV{SMAK_DEBUG};
+        delete $ENV{SMAK_JOB_SERVER};
+        goto SEQUENTIAL_BUILD;
+    }
+    $sock->autoflush(1);
+
+    # Identify as child smak
+    print $sock "CHILD_CONNECT\n";
+    $sock->flush();
+    my $ready = <$sock>;
+    chomp $ready if defined $ready;
+    unless (defined $ready && $ready eq 'CHILD_READY') {
+        warn "smak: Expected CHILD_READY from job-server, got: " . ($ready // 'EOF') . " (falling back to sequential)\n" if $ENV{SMAK_DEBUG};
+        close($sock);
+        delete $ENV{SMAK_JOB_SERVER};
+        goto SEQUENTIAL_BUILD;
+    }
+    warn "Child smak connected, got CHILD_READY\n" if $ENV{SMAK_DEBUG};
+
+    # Dry-run capture of targets at this level only
+    # ($relay_capture_mode prevents fork-expand of recursive makes -
+    #  those will be executed by workers, spawning further child relays)
+    use Cwd 'getcwd';
+    my $cwd = getcwd();
+    {
+        local $Smak::dry_run_mode = 1;
+        local $Smak::capture_targets = {};
+        local $Smak::relay_capture_mode = 1;
+
+        # Suppress stdout during dry-run capture
+        open(my $save_stdout, '>&', \*STDOUT);
+        open(STDOUT, '>', '/dev/null');
+
+        my @targets_to_build = @targets ? @targets : (Smak::get_default_target() || 'all');
+        for my $target (@targets_to_build) {
+            eval { Smak::build_target($target, {}, 0); };
+            warn "Child smak: build_target('$target') failed: $@\n" if $@ && $ENV{SMAK_DEBUG};
+        }
+
+        open(STDOUT, '>&', $save_stdout);
+
+        # Submit each captured target with a command to the parent job-server
+        my $job_count = 0;
+        for my $target (keys %{$Smak::capture_targets}) {
+            my $info = $Smak::capture_targets->{$target};
+            my $rule = $info->{expanded_rule} || $info->{rule} || '';
+            next unless $rule =~ /\S/;  # Skip no-command targets
+            my $exec_dir = $info->{exec_dir} || $cwd;
+
+            warn "Child smak submitting: $target (exec_dir=$exec_dir)\n" if $ENV{SMAK_DEBUG};
+            # Use line-count protocol for multi-line commands
+            my @cmd_lines = grep { /\S/ } split(/\n/, $rule);
+            print $sock "SUBMIT_JOB\n";
+            print $sock "$target\n";
+            print $sock "$exec_dir\n";
+            print $sock "COMMAND_LINES " . scalar(@cmd_lines) . "\n";
+            for my $cmd_line (@cmd_lines) {
+                print $sock "$cmd_line\n";
+            }
+            $sock->flush();
+            $job_count++;
+        }
+
+        # Signal all jobs submitted
+        print $sock "CHILD_DONE $job_count\n";
+        $sock->flush();
+        warn "Child smak submitted $job_count jobs, waiting for CHILD_COMPLETE\n" if $ENV{SMAK_DEBUG};
+    }
+
+    # Wait for completion from parent job-server
+    my $exit_code = 1;  # Default to failure if no response
+    while (my $response = <$sock>) {
+        chomp $response;
+        if ($response =~ /^CHILD_COMPLETE (\d+)$/) {
+            $exit_code = $1;
+            warn "Child smak got CHILD_COMPLETE $exit_code\n" if $ENV{SMAK_DEBUG};
+            last;
+        }
+    }
+    close($sock);
+    exit($exit_code);
 }
+
+SEQUENTIAL_BUILD:
 
 # -check mode: validate smak -n output matches make -n
 # Only does dry-runs (smak -n vs make -n), never builds

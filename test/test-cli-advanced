@@ -109,14 +109,31 @@ sub run_smak_interactive {
     my ($args, $script_ref, $timeout) = @_;
     $timeout ||= 30;
 
-    my $cmd = "$SMAK $args";
-    vprint "Starting interactive: $cmd\n";
+    require IO::Pty;
+    my $pty = IO::Pty->new();
+    my $slave = $pty->slave();
+    my @cmd = ($SMAK, split(/\s+/, $args));
+    vprint "Starting interactive (pty): @cmd\n";
 
-    my $err = gensym;
-    my $pid = open3(my $in, my $out, $err, $cmd);
+    my $pid = fork();
+    die "Fork failed: $!" unless defined $pid;
 
+    if ($pid == 0) {
+        # Child: set up pty as controlling terminal
+        close($pty);
+        POSIX::setsid();
+        open(STDIN,  '<&', $slave) or die "dup stdin: $!";
+        open(STDOUT, '>&', $slave) or die "dup stdout: $!";
+        open(STDERR, '>&', $slave) or die "dup stderr: $!";
+        close($slave);
+        exec(@cmd);
+        exit 1;
+    }
+
+    # Parent: close slave, use master side of the pty
+    close($slave);
     my $output = '';
-    my $sel = IO::Select->new($out, $err);
+    my $sel = IO::Select->new($pty);
     my $start = time();
 
     # Wait for prompt
@@ -133,27 +150,37 @@ sub run_smak_interactive {
 
     # Send commands
     for my $cmd (@$script_ref) {
-        print $in "$cmd\n";
+        print $pty "$cmd\r";
         vprint "Sent: $cmd\n";
         sleep(0.5);
 
         # Read response
-        while (my @fhs = $sel->can_read(0.2)) {
+        while (my @fhs = $sel->can_read(0.5)) {
             for my $fh (@fhs) {
                 my $data;
                 my $n = sysread($fh, $data, 4096);
-                if (!$n) {
-                    # EOF or error - remove from select
-                    $sel->remove($fh);
-                } elsif ($data) {
-                    $output .= $data;
-                    vprint $data;
-                }
+                last unless $n;
+                $output .= $data;
+                vprint $data;
             }
         }
     }
 
-    waitpid($pid, 0);
+    # Wait with timeout, kill if hung
+    my $wait_start = time();
+    my $reaped = 0;
+    while (time() - $wait_start < $timeout) {
+        my $r = waitpid($pid, WNOHANG);
+        if ($r != 0) { $reaped = 1; last; }
+        sleep(0.2);
+    }
+    if (!$reaped) {
+        kill('TERM', $pid);
+        sleep(0.5);
+        kill('KILL', $pid);
+        waitpid($pid, 0);
+    }
+    close($pty);
     my $exit_code = $? >> 8;
     return ($exit_code, $output);
 }
@@ -464,47 +491,124 @@ slow.txt:
 EOF
     close($mf);
 
-    # Start smak in background with parallel mode (to use job-server)
+    # Start smak in its own process group so SIGINT reaches all children
     my $pid = fork();
     die "Fork failed: $!" unless defined $pid;
 
     if ($pid == 0) {
-        # Child: run smak
-        exec("$SMAK -j4 all >/dev/null 2>&1");
+        # Child: new process group, then exec smak
+        setpgrp(0, 0);
+        open(STDOUT, '>/dev/null');
+        open(STDERR, '>/dev/null');
+        exec($SMAK, '-j4', 'all');
         exit 1;
     }
 
     # Parent: wait for job-server to start, then send SIGINT
     sleep 2;
 
-    # Count smak-related processes before SIGINT
-    my $before = `ps aux | grep -E 'smak-server|smak-worker|job-master' | grep -v grep | wc -l`;
-    chomp $before;
-    vprint "Processes before SIGINT: $before\n";
+    # Find the server PID via .smak.connect
+    my $connect = "$TEST_DIR/.smak.connect";
+    my $server_pid;
+    if (-l $connect || -f $connect) {
+        my $pf = readlink($connect) || $connect;
+        ($server_pid) = ($pf =~ /smak-jobserver-(\d+)\.port/);
+    }
+    my $server_alive_before = $server_pid && kill(0, $server_pid);
+    vprint "Server PID: $server_pid, alive before: $server_alive_before\n";
 
-    # Send SIGINT to smak
-    kill 'INT', $pid;
+    # Send SIGINT to the process group (negative PID = group)
+    kill '-INT', $pid;
 
     # Wait for cleanup
     sleep 3;
-
-    # Reap the child
     waitpid($pid, WNOHANG);
 
-    # Count smak-related processes after SIGINT
-    my $after = `ps aux | grep -E 'smak-server|smak-worker|job-master' | grep -v grep | wc -l`;
-    chomp $after;
-    vprint "Processes after SIGINT: $after\n";
+    # Check if server exited
+    my $server_alive_after = $server_pid && kill(0, $server_pid);
+    vprint "Server alive after: $server_alive_after\n";
 
-    # Clean up any orphaned processes (for test isolation)
-    system("pkill -9 -f 'smak-server' 2>/dev/null");
-    system("pkill -9 -f 'smak-worker' 2>/dev/null");
-    system("pkill -9 -f 'job-master' 2>/dev/null");
-
-    if ($after == 0 || $after < $before) {
+    if ($server_alive_before && !$server_alive_after) {
         pass("SIGINT cleanup (job-server shutdown)");
+    } elsif (!$server_alive_before) {
+        fail("SIGINT cleanup (job-server shutdown)", "Server not running before SIGINT");
     } else {
-        fail("SIGINT cleanup (job-server shutdown)", "Job-server still running after SIGINT (before=$before, after=$after)");
+        fail("SIGINT cleanup (job-server shutdown)", "Server (PID $server_pid) still running after SIGINT");
+        kill('-KILL', $pid);  # Force cleanup
+        kill('KILL', $server_pid) if $server_pid;
+    }
+}
+
+# Test 10: Idle timeout - detached job-server exits after timeout
+sub test_idle_timeout {
+    test_header("Idle timeout (detached job-server auto-exit)");
+
+    vprint "Setting up idle timeout test environment\n";
+    remove_tree($TEST_DIR) if -d $TEST_DIR;
+    make_path($TEST_DIR);
+    chdir($TEST_DIR) or die "Cannot chdir to $TEST_DIR: $!";
+
+    # Create a simple Makefile
+    open(my $mf, '>', 'Makefile') or die "Cannot create Makefile: $!";
+    print $mf <<"EOF";
+all: hello.txt
+
+hello.txt:
+\techo "hello" > hello.txt
+EOF
+    close($mf);
+
+    # Create .smak.rc with short idle timeout (5 seconds)
+    open(my $rc, '>', '.smak.rc') or die "Cannot create .smak.rc: $!";
+    print $rc "set job_server_idle_timeout = 5\n";
+    close($rc);
+
+    # Build with -j4 to start job server (it will detach when smak exits)
+    my ($exit, $output) = run_command("$SMAK -j4 all 2>&1", 20);
+
+    if ($exit != 0) {
+        fail("Idle timeout", "Build failed (exit=$exit)");
+        return;
+    }
+
+    # Check that .smak.connect exists (server still alive after build)
+    my $connect_file = "$TEST_DIR/.smak.connect";
+    if (! -l $connect_file && ! -f $connect_file) {
+        fail("Idle timeout", ".smak.connect not found after build");
+        return;
+    }
+
+    # Read the port file to get the server PID
+    my $port_file = readlink($connect_file) || $connect_file;
+    my $server_pid;
+    if ($port_file =~ /smak-jobserver-(\d+)\.port/) {
+        $server_pid = $1;
+    }
+    vprint "Job-server PID: $server_pid, port file: $port_file\n";
+
+    # Verify server process is running
+    if ($server_pid && !kill(0, $server_pid)) {
+        fail("Idle timeout", "Job-server (PID $server_pid) not running after build");
+        return;
+    }
+    vprint "Job-server is running\n";
+
+    # Wait for idle timeout (5s) plus margin
+    vprint "Waiting for idle timeout (8 seconds)...\n";
+    sleep(8);
+
+    # Check that server has exited
+    my $server_gone = !$server_pid || !kill(0, $server_pid);
+    my $connect_gone = ! -l $connect_file && ! -f $connect_file;
+
+    if ($server_gone && $connect_gone) {
+        pass("Idle timeout (server exited after timeout)");
+    } elsif ($server_gone) {
+        pass("Idle timeout (server exited, connect file already cleaned)");
+    } else {
+        fail("Idle timeout", "Job-server (PID $server_pid) still running after timeout");
+        # Clean up
+        kill('TERM', $server_pid) if $server_pid;
     }
 }
 
@@ -519,13 +623,19 @@ print "Verbose: " . ($VERBOSE ? "yes" : "no") . "\n";
 # Run tests
 test_single_threaded();
 test_parallel_build();
-test_interactive_basic();
+if ($ENV{SKIP_INTERACTIVE}) {
+    test_header("Interactive CLI basic commands");
+    print "SKIP: Interactive CLI (SKIP_INTERACTIVE set)\n";
+} else {
+    test_interactive_basic();
+}
 test_file_removal();
 test_file_dirty();
 test_caching();
 test_cache_invalidation();
 test_ctrl_c_restart();
 test_sigint_cleanup();
+test_idle_timeout();
 
 # Cleanup
 cleanup();

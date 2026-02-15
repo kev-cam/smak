@@ -1,0 +1,16 @@
+# Test: shell if-then with && in condition
+# This tests that smak doesn't split && inside shell if-conditions
+# Reproduces the ghdl version.tmp build failure
+
+.PHONY: all
+
+all: version.tmp
+	@echo "done"
+
+version.tmp:
+	VER_DESC=tarball; \
+	VER_REF=unknown; \
+	if test -d /tmp && desc="found"; then \
+	  VER_DESC="$$desc-ok"; \
+	fi; \
+	echo "$$VER_DESC" > $@

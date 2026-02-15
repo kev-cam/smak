@@ -1335,7 +1335,8 @@ sub expand_vars {
         my $replacement;
 
         # Check if it's a function call (contains space or comma)
-        if ($content =~ /^(\w+)\s+(.+)$/ || $content =~ /^(\w+),(.+)$/) {
+        # Note: [\w-]+ to match hyphenated functions like filter-out
+        if ($content =~ /^([\w-]+)\s+(.+)$/ || $content =~ /^([\w-]+),(.+)$/) {
             my $func = $1;
             my $args_str = $2;
 
@@ -1360,15 +1361,17 @@ sub expand_vars {
             }
             push @args, $current if $current ne '';
 
-            # Trim whitespace from arguments
-            # NOTE: For foreach, preserve whitespace in the third argument (text template)
+            # Strip leading whitespace from the FIRST argument only
+            # (the space between the function name and first arg).
+            # Subsequent arguments preserve their whitespace per GNU make:
+            #   $(subst -, ,text) → space is the replacement, not stripped
             if ($func eq 'foreach' && @args >= 3) {
                 # Trim first two args, preserve exact whitespace in third arg (text)
                 $args[0] =~ s/^\s+|\s+$//g;
                 $args[1] =~ s/^\s+|\s+$//g;
                 # $args[2] is NOT trimmed - whitespace is significant
             } else {
-                @args = map { s/^\s+|\s+$//gr } @args;
+                $args[0] =~ s/^\s+// if @args;
             }
 
             # Recursively expand variables in arguments
@@ -1741,6 +1744,43 @@ sub transform_make_vars {
 
 our %missing_inc; # bug workaround
 
+# Parse ifeq/ifneq argument string into (arg1, arg2)
+# Handles: (arg1,arg2) with nested $() and quoted forms "a" "b", 'a' 'b'
+# Returns (arg1, arg2) or () on parse failure
+sub parse_ifeq_args {
+    my ($args) = @_;
+    $args =~ s/^\s+//;
+
+    # Quoted forms: "arg1" "arg2" or 'arg1' 'arg2'
+    if ($args =~ /^"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^'([^']*)'\s+'([^']*)'$/) {
+        return ($1, $2);
+    }
+
+    # Parenthesized form: (arg1,arg2) - must track $() nesting
+    if ($args =~ /^\(/) {
+        my $inner = substr($args, 1);  # skip opening paren
+        # Remove trailing ) and whitespace
+        $inner =~ s/\)\s*$// or return ();
+        # Find the splitting comma: outside of any $() nesting
+        my $depth = 0;
+        my $len = length($inner);
+        for (my $i = 0; $i < $len; $i++) {
+            my $ch = substr($inner, $i, 1);
+            if ($ch eq '$' && $i + 1 < $len && substr($inner, $i + 1, 1) eq '(') {
+                $depth++;
+                $i++;  # skip the (
+            } elsif ($ch eq '(' && $depth > 0) {
+                $depth++;
+            } elsif ($ch eq ')' && $depth > 0) {
+                $depth--;
+            } elsif ($ch eq ',' && $depth == 0) {
+                return (substr($inner, 0, $i), substr($inner, $i + 1));
+            }
+        }
+    }
+    return ();
+}
+
 sub parse_makefile {
     my ($makefile_path) = @_;
 
@@ -1917,7 +1957,7 @@ sub parse_makefile {
     # Conditional stack: each entry is {active => 0/1, seen_else => 0/1}
     # active=1 means we're processing lines in this branch
     # seen_else=1 means we've seen the else for this if
-    my @cond_stack = ({active => 1, seen_else => 0});  # Start with active top level
+    my @cond_stack = ({active => 1, any_true => 0, seen_else => 0});  # Start with active top level
 
     while (my $line = <$fh>) {
         chomp $line;
@@ -1938,65 +1978,42 @@ sub parse_makefile {
             my $result = 0;
 
             # Parse ifeq: ifeq (arg1,arg2) or ifeq "arg1" "arg2"
-            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
-                my ($arg1, $arg2) = ($1, $2);
-                # Expand variables in arguments
-                $arg1 = transform_make_vars($arg1);
-                $arg2 = transform_make_vars($arg2);
-                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
-                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
-                # Trim whitespace
+            my @parsed = parse_ifeq_args($args);
+            if (@parsed == 2) {
+                my ($arg1, $arg2) = @parsed;
+                $arg1 = expand_vars($arg1);
+                $arg2 = expand_vars($arg2);
                 $arg1 =~ s/^\s+|\s+$//g;
                 $arg2 =~ s/^\s+|\s+$//g;
                 $result = ($arg1 eq $arg2);
                 warn "DEBUG: ifeq('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
             }
 
-            # Push new conditional state
-            # Active if parent is active AND condition is true
             my $parent_active = $cond_stack[-1]{active};
-            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            my $active = $parent_active && $result;
+            push @cond_stack, {active => $active, any_true => $active, seen_else => 0};
             next;
         }
         elsif ($line =~ /^\s*ifneq\s+(.+)$/) {
             my $args = $1;
             my $result = 0;
 
-            # Parse ifneq: ifneq (arg1,arg2) or ifneq "arg1" "arg2"
-            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
-                my ($arg1, $arg2) = ($1, $2);
-                # Expand variables in arguments
-                $arg1 = transform_make_vars($arg1);
-                $arg2 = transform_make_vars($arg2);
-                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
-                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
-                # Trim whitespace
+            my @parsed = parse_ifeq_args($args);
+            if (@parsed == 2) {
+                my ($arg1, $arg2) = @parsed;
+                $arg1 = expand_vars($arg1);
+                $arg2 = expand_vars($arg2);
                 $arg1 =~ s/^\s+|\s+$//g;
                 $arg2 =~ s/^\s+|\s+$//g;
-                $result = ($arg1 ne $arg2);  # ifneq is true when NOT equal
+                $result = ($arg1 ne $arg2);
                 warn "DEBUG: ifneq('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
             }
 
             # Push new conditional state
             # Active if parent is active AND condition is true
             my $parent_active = $cond_stack[-1]{active};
-            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            my $active = $parent_active && $result;
+            push @cond_stack, {active => $active, any_true => $active, seen_else => 0};
             next;
         }
         elsif ($line =~ /^\s*ifdef\s+(\S+)$/) {
@@ -2005,7 +2022,8 @@ sub parse_makefile {
             warn "DEBUG: ifdef $var => defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
 
             my $parent_active = $cond_stack[-1]{active};
-            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            my $active = $parent_active && $result;
+            push @cond_stack, {active => $active, any_true => $active, seen_else => 0};
             next;
         }
         elsif ($line =~ /^\s*ifndef\s+(\S+)$/) {
@@ -2015,24 +2033,71 @@ sub parse_makefile {
             warn "DEBUG: ifndef $var => defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
 
             my $parent_active = $cond_stack[-1]{active};
-            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            my $active = $parent_active && $result;
+            push @cond_stack, {active => $active, any_true => $active, seen_else => 0};
             next;
         }
-        elsif ($line =~ /^\s*else\s*$/) {
+        elsif ($line =~ /^\s*else\b(.*)$/) {
+            my $rest = $1;
+            $rest =~ s/^\s+|\s+$//g;
             if (@cond_stack <= 1) {
                 warn "Warning: else without matching if in $makefile\n";
                 next;
             }
             my $cond = $cond_stack[-1];
-            if ($cond->{seen_else}) {
-                warn "Warning: duplicate else in $makefile\n";
-                next;
-            }
-            $cond->{seen_else} = 1;
-            # Toggle active state if parent is active
             my $parent_active = $cond_stack[-2]{active};
-            $cond->{active} = $parent_active && !$cond->{active};
-            warn "DEBUG: else => active now " . $cond->{active} . "\n" if $ENV{SMAK_DEBUG};
+
+            if ($rest eq '') {
+                # Plain "else"
+                if ($cond->{seen_else}) {
+                    warn "Warning: duplicate else in $makefile\n";
+                    next;
+                }
+                $cond->{seen_else} = 1;
+                if ($cond->{any_true}) {
+                    $cond->{active} = 0;
+                } else {
+                    $cond->{active} = $parent_active ? 1 : 0;
+                    $cond->{any_true} = $cond->{active};
+                }
+                warn "DEBUG: else => active now " . $cond->{active} . "\n" if $ENV{SMAK_DEBUG};
+            }
+            elsif ($rest =~ /^ifeq\s+(.+)$/ || $rest =~ /^ifneq\s+(.+)$/) {
+                # "else ifeq (...)" or "else ifneq (...)"
+                my $args = $1;
+                my $is_neq = ($rest =~ /^ifneq/);
+                my $result = 0;
+                my @parsed = parse_ifeq_args($args);
+                if (@parsed == 2) {
+                    my ($arg1, $arg2) = @parsed;
+                    $arg1 = expand_vars($arg1);
+                    $arg2 = expand_vars($arg2);
+                    $arg1 =~ s/^\s+|\s+$//g;
+                    $arg2 =~ s/^\s+|\s+$//g;
+                    $result = $is_neq ? ($arg1 ne $arg2) : ($arg1 eq $arg2);
+                    warn "DEBUG: else " . ($is_neq ? "ifneq" : "ifeq") . "('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
+                }
+                if ($cond->{any_true}) {
+                    $cond->{active} = 0;
+                } else {
+                    $cond->{active} = $parent_active && $result ? 1 : 0;
+                    $cond->{any_true} = $cond->{active};
+                }
+            }
+            elsif ($rest =~ /^ifdef\s+(\S+)$/ || $rest =~ /^ifndef\s+(\S+)$/) {
+                # "else ifdef VAR" or "else ifndef VAR"
+                my $var = $1;
+                my $is_ndef = ($rest =~ /^ifndef/);
+                my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+                $result = !$result if $is_ndef;
+                warn "DEBUG: else " . ($is_ndef ? "ifndef" : "ifdef") . " $var = $result\n" if $ENV{SMAK_DEBUG};
+                if ($cond->{any_true}) {
+                    $cond->{active} = 0;
+                } else {
+                    $cond->{active} = $parent_active && $result ? 1 : 0;
+                    $cond->{any_true} = $cond->{active};
+                }
+            }
             next;
         }
         elsif ($line =~ /^\s*endif\s*$/) {
@@ -2150,8 +2215,9 @@ sub parse_makefile {
             next;
         }
 
-        # Variable assignment
-        if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
+        # Variable assignment (may have leading spaces inside conditionals,
+        # but NOT tab-prefixed which would be a recipe line)
+        if ($line =~ /^[ ]*([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
             $save_current_rule->();
             my ($var, $op, $value) = ($1, $2, $3);
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
@@ -2605,20 +2671,11 @@ sub parse_included_makefile {
             my $is_ifeq = ($line =~ /ifeq/);
             my $result = 0;
 
-            if ($args =~ /^\s*\(([^,]*),([^)]*)\)\s*$/ || $args =~ /^\s*"([^"]*)"\s+"([^"]*)"$/ || $args =~ /^\s*'([^']*)'\s+'([^']*)'$/) {
-                my ($arg1, $arg2) = ($1, $2);
-                $arg1 = transform_make_vars($arg1);
-                $arg2 = transform_make_vars($arg2);
-                while ($arg1 =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $arg1 =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
-                while ($arg2 =~ /\$MV\{([^}]+)\}/) {
-                    my $var = $1;
-                    my $val = $MV{$var} // '';
-                    $arg2 =~ s/\$MV\{\Q$var\E\}/$val/;
-                }
+            my @parsed = parse_ifeq_args($args);
+            if (@parsed == 2) {
+                my ($arg1, $arg2) = @parsed;
+                $arg1 = expand_vars($arg1);
+                $arg2 = expand_vars($arg2);
                 $arg1 =~ s/^\s+|\s+$//g;
                 $arg2 =~ s/^\s+|\s+$//g;
                 $result = ($arg1 eq $arg2);
@@ -2627,7 +2684,8 @@ sub parse_included_makefile {
             }
 
             my $parent_active = $cond_stack[-1]{active};
-            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            my $active = $parent_active && $result;
+            push @cond_stack, {active => $active, any_true => $active, seen_else => 0};
             next;
         }
         elsif ($line =~ /^\s*ifdef\s+(\S+)$/ || $line =~ /^\s*ifndef\s+(\S+)$/) {
@@ -2638,22 +2696,67 @@ sub parse_included_makefile {
             warn "DEBUG(include): $line => $var defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
 
             my $parent_active = $cond_stack[-1]{active};
-            push @cond_stack, {active => ($parent_active && $result), seen_else => 0};
+            my $active = $parent_active && $result;
+            push @cond_stack, {active => $active, any_true => $active, seen_else => 0};
             next;
         }
-        elsif ($line =~ /^\s*else\s*$/) {
+        elsif ($line =~ /^\s*else\b(.*)$/) {
+            my $rest = $1;
+            $rest =~ s/^\s+|\s+$//g;
             if (@cond_stack <= 1) {
                 warn "Warning: else without matching if in $include_path\n";
                 next;
             }
             my $cond = $cond_stack[-1];
-            if ($cond->{seen_else}) {
-                warn "Warning: duplicate else in $include_path\n";
-                next;
-            }
-            $cond->{seen_else} = 1;
             my $parent_active = $cond_stack[-2]{active};
-            $cond->{active} = $parent_active && !$cond->{active};
+
+            if ($rest eq '') {
+                # Plain "else"
+                if ($cond->{seen_else}) {
+                    warn "Warning: duplicate else in $include_path\n";
+                    next;
+                }
+                $cond->{seen_else} = 1;
+                if ($cond->{any_true}) {
+                    $cond->{active} = 0;
+                } else {
+                    $cond->{active} = $parent_active ? 1 : 0;
+                    $cond->{any_true} = $cond->{active};
+                }
+            }
+            elsif ($rest =~ /^ifeq\s+(.+)$/ || $rest =~ /^ifneq\s+(.+)$/) {
+                my $args = $1;
+                my $is_neq = ($rest =~ /^ifneq/);
+                my $result = 0;
+                my @parsed = parse_ifeq_args($args);
+                if (@parsed == 2) {
+                    my ($arg1, $arg2) = @parsed;
+                    $arg1 = expand_vars($arg1);
+                    $arg2 = expand_vars($arg2);
+                    $arg1 =~ s/^\s+|\s+$//g;
+                    $arg2 =~ s/^\s+|\s+$//g;
+                    $result = $is_neq ? ($arg1 ne $arg2) : ($arg1 eq $arg2);
+                    warn "DEBUG(include): else " . ($is_neq ? "ifneq" : "ifeq") . "('$arg1', '$arg2') = $result\n" if $ENV{SMAK_DEBUG};
+                }
+                if ($cond->{any_true}) {
+                    $cond->{active} = 0;
+                } else {
+                    $cond->{active} = $parent_active && $result ? 1 : 0;
+                    $cond->{any_true} = $cond->{active};
+                }
+            }
+            elsif ($rest =~ /^ifdef\s+(\S+)$/ || $rest =~ /^ifndef\s+(\S+)$/) {
+                my $var = $1;
+                my $is_ndef = ($rest =~ /^ifndef/);
+                my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+                $result = !$result if $is_ndef;
+                if ($cond->{any_true}) {
+                    $cond->{active} = 0;
+                } else {
+                    $cond->{active} = $parent_active && $result ? 1 : 0;
+                    $cond->{any_true} = $cond->{active};
+                }
+            }
             warn "DEBUG(include): else => active now " . $cond->{active} . "\n" if $ENV{SMAK_DEBUG};
             next;
         }
@@ -2735,8 +2838,9 @@ sub parse_included_makefile {
             next;
         }
 
-        # Variable assignment (most important for included files like flags.make)
-        if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
+        # Variable assignment (may have leading spaces inside conditionals,
+        # but NOT tab-prefixed which would be a recipe line)
+        if ($line =~ /^[ ]*([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
             $save_current_rule->();
             my ($var, $op, $value) = ($1, $2, $3);
             $value = transform_make_vars($value);
@@ -9919,20 +10023,26 @@ sub run_job_master {
             my $clean_line = $line;
             $clean_line =~ s/^[@-]+//;  # Strip prefixes for checking
 
-            # Check if the line contains 'cd' with '&&' - don't split these
-            # because 'cd' changes directory only within its subprocess
+            # Check if splitting on && would be unsafe:
+            # 1. Line contains 'cd' - cd changes directory only within its subprocess
+            # 2. Line contains shell control flow (if/then/fi/while/do/done/for/case)
+            #    where && is a logical operator in a condition, not a command separator
             my @line_parts = split(/\s*&&\s*/, $line);
-            my $has_cd = 0;
-            for my $part (@line_parts) {
-                my $clean_part = $part;
-                $clean_part =~ s/^\s*[@-]+//;
-                if ($clean_part =~ /^\s*cd\b/) {
-                    $has_cd = 1;
-                    last;
+            my $keep_together = 0;
+            if ($line =~ /\b(?:if|then|elif|else|fi|while|until|do|done|for|case|esac)\b/) {
+                $keep_together = 1;
+            } else {
+                for my $part (@line_parts) {
+                    my $clean_part = $part;
+                    $clean_part =~ s/^\s*[@-]+//;
+                    if ($clean_part =~ /^\s*cd\b/) {
+                        $keep_together = 1;
+                        last;
+                    }
                 }
             }
 
-            if ($has_cd) {
+            if ($keep_together) {
                 # Keep the entire line together (don't split on &&)
                 $in_trailing_builtins = 0;
                 unshift @external_parts, $line;

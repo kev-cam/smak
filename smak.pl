@@ -41,6 +41,7 @@ my $norc = 0;  # Skip reading .smak.rc files
 my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j)
 my $check = '';  # Check mode - validate smak -n matches make -n ('' = off, '1' = on, 'quiet' = quiet)
 my $keep_going = 0;  # Keep going after failures (like make -k)
+my $test_worker = 0;  # Test worker protocol mode
 
 # Check for -norc early (before reading .smak.rc)
 for my $arg (@ARGV) {
@@ -167,7 +168,12 @@ if ($reconnect || $kill_old_js) {
                     );
                     if ($shutdown_socket) {
                         print $shutdown_socket "SHUTDOWN\n";
-                        my $ack = <$shutdown_socket>;
+                        # Read ack with timeout to avoid deadlock
+                        my $rin = '';
+                        vec($rin, fileno($shutdown_socket), 1) = 1;
+                        if (select(my $rout = $rin, undef, undef, 3)) {
+                            my $ack = <$shutdown_socket>;
+                        }
                         close($shutdown_socket);
                         print "Shutdown old job server\n" if $verbose;
                         # Wait a moment for shutdown to complete
@@ -238,6 +244,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'norc' => \$norc,
         'retries=i' => \$retries,
         'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
+        'no-builtins' => sub { $Smak::no_builtins = 1; },
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -266,6 +273,7 @@ GetOptions(
     'retries=i' => \$retries,
     'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
     'no-builtins' => sub { $Smak::no_builtins = 1; },
+    'test-worker' => \$test_worker,
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -305,6 +313,48 @@ for my $arg (@ARGV) {
 if ($help) {
     print_help();
     exit 0;
+}
+
+# --test-worker: exercise the worker protocol and exit
+# This spawns one built-in worker and runs the protocol test suite.
+# Useful for verifying custom worker implementations.
+if ($test_worker) {
+    require IO::Socket::INET;
+    require SmakWorker;
+
+    # Create listener socket on random port
+    my $server = IO::Socket::INET->new(
+        LocalAddr => '127.0.0.1',
+        LocalPort => 0,
+        Proto     => 'tcp',
+        Listen    => 1,
+        ReuseAddr => 1,
+    ) or die "Cannot create test server socket: $!\n";
+
+    my $port = $server->sockport();
+    print "Worker test server listening on 127.0.0.1:$port\n";
+
+    # Fork a built-in worker
+    my $worker_pid = fork();
+    die "Cannot fork worker: $!\n" unless defined $worker_pid;
+    if ($worker_pid == 0) {
+        close($server);
+        SmakWorker::run_worker('127.0.0.1', $port);
+        exit 0;
+    }
+
+    # Accept the worker connection
+    my $worker = $server->accept();
+    die "Worker did not connect\n" unless $worker;
+    $worker->autoflush(1);
+    close($server);
+
+    # Run tests
+    my ($pass, $fail) = Smak::run_test_worker($worker);
+    close($worker);
+    waitpid($worker_pid, 0);
+
+    exit($fail > 0 ? 1 : 0);
 }
 
 # Change directory if -C option is specified
@@ -481,6 +531,8 @@ Options:
   -Kd, -Kdebug                Enter interactive debug mode
   -Ks, -Kscript FILE          Load and execute smak commands from FILE
   -Kreport                    Create verbose build log and run make-cmp
+  --no-builtins               Disable built-in command optimization (for testing)
+  --test-worker               Run worker protocol test suite and exit
   -scanner PATH[,PATH...]     Run as standalone file watcher (outputs CREATE/MODIFY/DELETE events)
 
 Environment Variables:
@@ -873,12 +925,17 @@ if ($ENV{SMAK_JOB_SERVER}) {
             next unless $rule =~ /\S/;  # Skip no-command targets
             my $exec_dir = $info->{exec_dir} || $cwd;
 
-            warn "Child smak submitting: $target (exec_dir=$exec_dir)\n" if $ENV{SMAK_DEBUG};
+            my @deps = @{$info->{deps} || []};
+            warn "Child smak submitting: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ")\n" if $ENV{SMAK_DEBUG};
             # Use line-count protocol for multi-line commands
             my @cmd_lines = grep { /\S/ } split(/\n/, $rule);
             print $sock "SUBMIT_JOB\n";
             print $sock "$target\n";
             print $sock "$exec_dir\n";
+            print $sock "DEPS " . scalar(@deps) . "\n";
+            for my $dep (@deps) {
+                print $sock "$dep\n";
+            }
             print $sock "COMMAND_LINES " . scalar(@cmd_lines) . "\n";
             for my $cmd_line (@cmd_lines) {
                 print $sock "$cmd_line\n";

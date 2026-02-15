@@ -1,2 +1,3 @@
-sphinx-build -b texinfo -d _build/doctrees -T -D language=en   . _build/texinfo && cp _build/texinfo/GHDL.texi ghdl.texi
+sphinx-build -b texinfo -d _build/doctrees -T -D language=en   . _build/texinfo
+cp _build/texinfo/GHDL.texi ghdl.texi
 makeinfo -o ghdl.info ghdl.texi

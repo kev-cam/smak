@@ -103,8 +103,8 @@ Run smak regression test suite.
 By default, all tests including interactive ones are run automatically.
 Interactive tests use script files (scripts/*.script) for automation.
 
-All tests are run in 4 modes: sequential/parallel × cache/no-cache
-Each test's -fail variant is also run in all 4 modes to verify error handling.
+All tests are run in 6 modes: sequential/parallel × cache/no-cache × builtins/no-builtins
+Each test's -fail variant is also run in all 6 modes to verify error handling.
 
 Options:
   (none)              Run all tests including scripted interactive tests
@@ -440,15 +440,15 @@ SMAK_PATH=$(realpath "${USR_SMAK_SCRIPT:-smak}" 2>/dev/null || which ${USR_SMAK_
 echo "Testing: $SMAK_PATH"
 echo ""
 if [ $NO_PARALLEL -eq 1 ]; then
-    echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail]"
+    echo "Test modes: [Seq/NC] [Seq/C]"
     echo "Results shown as: PpPp (all pass + fail tests work in both modes)"
     echo "              or: PxPx (all pass, no fail test)"
     echo "              or: PpFp (2nd mode failed, fail tests work), etc."
 else
-    echo "Test modes: [Seq/NoCache+fail] [Seq/Cache+fail] [Par/NoCache+fail] [Par/Cache+fail]"
-    echo "Results shown as: PpPpPpPp (all pass + fail tests work in all modes)"
-    echo "              or: PxPxPxPx (all pass, no fail test)"
-    echo "              or: PpFpPpPp (2nd mode failed, fail tests work), etc."
+    echo "Test modes: [Seq/NC] [Seq/C] [Par/NC] [Par/C] [Par/NC/NB] [Par/C/NB]"
+    echo "Results shown as: PpPpPpPpPpPp (all pass + fail tests work in all 6 modes)"
+    echo "              or: PxPxPxPxPxPx (all pass, no fail test)"
+    echo "              or: PpFpPpPpPpPp (2nd mode failed, fail tests work), etc."
 fi
 echo "  P=pass, F=fail, T=timeout"
 echo "  p=-fail test passed (correctly failed), f=-fail test failed (wrongly succeeded), t=-fail timeout, x=no -fail test"
@@ -571,6 +571,8 @@ WRAPPER_EOF
     local out_seq_c="$LOG_DIR/smak-test-${test_name}-seq-c-$$.log"
     local out_par_nc="$LOG_DIR/smak-test-${test_name}-par-nc-$$.log"
     local out_par_c="$LOG_DIR/smak-test-${test_name}-par-c-$$.log"
+    local out_par_nc_nb="$LOG_DIR/smak-test-${test_name}-par-nc-nb-$$.log"
+    local out_par_c_nb="$LOG_DIR/smak-test-${test_name}-par-c-nb-$$.log"
 
     # Check if fail test exists
     local fail_test="${test_script%.sh}-fail.sh"
@@ -633,7 +635,7 @@ WRAPPER_EOF
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))
         [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
-        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
         return
     fi
     if [ $has_fail_test -eq 1 ]; then
@@ -660,7 +662,7 @@ WRAPPER_EOF
             echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
             ((FAILED++))
             [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
-            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
             return
         fi
         if [ $has_fail_test -eq 1 ]; then
@@ -694,7 +696,7 @@ WRAPPER_EOF
             echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
             ((FAILED++))
             [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
-            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
             return
         fi
         if [ $has_fail_test -eq 1 ]; then
@@ -725,13 +727,67 @@ WRAPPER_EOF
             echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
             ((FAILED++))
             [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
-            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
             return
         fi
         if [ $has_fail_test -eq 1 ]; then
             local fail_out="$LOG_DIR/smak-test-${test_name}-par-c-fail-$$.log"
             run_fail_test "default" "-j 4" "$fail_out"
             result_par_cache_fail=$?
+            rm -f "$fail_out"
+        fi
+    fi
+
+    # Mode 5: Parallel + NoCache + NoBuiltins
+    if [ $NO_PARALLEL -eq 1 ] || [ $skip_remaining -eq 1 ]; then
+        result_par_nocache_nb=-2  # Special marker for skipped
+        local result_par_nocache_nb_fail=-2
+    else
+        run_single_mode "off" "-j 4 --no-builtins" "$out_par_nc_nb"
+        result_par_nocache_nb=$?
+        local result_par_nocache_nb_fail=0
+        if [ $result_par_nocache_nb -eq 124 ]; then
+            echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+            ((FAILED++))
+            [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
+            return
+        fi
+        if [ $has_fail_test -eq 1 ]; then
+            local fail_out="$LOG_DIR/smak-test-${test_name}-par-nc-nb-fail-$$.log"
+            run_fail_test "off" "-j 4 --no-builtins" "$fail_out"
+            result_par_nocache_nb_fail=$?
+            rm -f "$fail_out"
+        fi
+
+        # Check if we should skip remaining modes in fast mode
+        if [ $FAST_MODE -eq 1 ] && [ $result_par_nocache_nb -ne 0 ]; then
+            skip_remaining=1
+        fi
+        if [ $FAST_MODE -eq 1 ] && [ $has_fail_test -eq 1 ] && [ $result_par_nocache_nb_fail -eq 0 ]; then
+            skip_remaining=1
+        fi
+    fi
+
+    # Mode 6: Parallel + Cache + NoBuiltins
+    if [ $NO_PARALLEL -eq 1 ] || [ $skip_remaining -eq 1 ]; then
+        result_par_cache_nb=-2  # Special marker for skipped
+        local result_par_cache_nb_fail=-2
+    else
+        run_single_mode "default" "-j 4 --no-builtins" "$out_par_c_nb"
+        result_par_cache_nb=$?
+        local result_par_cache_nb_fail=0
+        if [ $result_par_cache_nb -eq 124 ]; then
+            echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
+            ((FAILED++))
+            [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+            rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
+            return
+        fi
+        if [ $has_fail_test -eq 1 ]; then
+            local fail_out="$LOG_DIR/smak-test-${test_name}-par-c-nb-fail-$$.log"
+            run_fail_test "default" "-j 4 --no-builtins" "$fail_out"
+            result_par_cache_nb_fail=$?
             rm -f "$fail_out"
         fi
     fi
@@ -745,16 +801,22 @@ WRAPPER_EOF
     # Display output in verbose mode
     if [ $show_output -eq 1 ]; then
         echo "=== Sequential/NoCache ==="
-        cat "$out_seq_nc"
+        cat "$out_seq_nc" 2>/dev/null
         echo ""
         echo "=== Sequential/Cache ==="
-        cat "$out_seq_c"
+        cat "$out_seq_c" 2>/dev/null
         echo ""
         echo "=== Parallel/NoCache ==="
-        cat "$out_par_nc"
+        cat "$out_par_nc" 2>/dev/null
         echo ""
         echo "=== Parallel/Cache ==="
-        cat "$out_par_c"
+        cat "$out_par_c" 2>/dev/null
+        echo ""
+        echo "=== Parallel/NoCache/NoBuiltins ==="
+        cat "$out_par_nc_nb" 2>/dev/null
+        echo ""
+        echo "=== Parallel/Cache/NoBuiltins ==="
+        cat "$out_par_c_nb" 2>/dev/null
         echo ""
     fi
 
@@ -877,13 +939,69 @@ WRAPPER_EOF
         result_str="${result_str}x"
     fi
 
+    # Mode 5: Parallel + NoCache + NoBuiltins
+    if [ $result_par_nocache_nb -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $result_par_nocache_nb -eq 0 ]; then
+        result_str="${result_str}P"
+    elif [ $result_par_nocache_nb -eq 124 ]; then
+        result_str="${result_str}T"
+        all_passed=0
+    else
+        result_str="${result_str}F"
+        all_passed=0
+    fi
+    if [ $result_par_nocache_nb_fail -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $has_fail_test -eq 1 ]; then
+        if [ $result_par_nocache_nb_fail -ne 0 ] && [ $result_par_nocache_nb_fail -ne 124 ]; then
+            result_str="${result_str}p"
+        elif [ $result_par_nocache_nb_fail -eq 124 ]; then
+            result_str="${result_str}t"
+            all_passed=0
+        else
+            result_str="${result_str}f"
+            all_passed=0
+        fi
+    else
+        result_str="${result_str}x"
+    fi
+
+    # Mode 6: Parallel + Cache + NoBuiltins
+    if [ $result_par_cache_nb -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $result_par_cache_nb -eq 0 ]; then
+        result_str="${result_str}P"
+    elif [ $result_par_cache_nb -eq 124 ]; then
+        result_str="${result_str}T"
+        all_passed=0
+    else
+        result_str="${result_str}F"
+        all_passed=0
+    fi
+    if [ $result_par_cache_nb_fail -eq -2 ]; then
+        result_str="${result_str}-"
+    elif [ $has_fail_test -eq 1 ]; then
+        if [ $result_par_cache_nb_fail -ne 0 ] && [ $result_par_cache_nb_fail -ne 124 ]; then
+            result_str="${result_str}p"
+        elif [ $result_par_cache_nb_fail -eq 124 ]; then
+            result_str="${result_str}t"
+            all_passed=0
+        else
+            result_str="${result_str}f"
+            all_passed=0
+        fi
+    else
+        result_str="${result_str}x"
+    fi
+
     # Display result
     if [ $all_passed -eq 1 ]; then
         echo -e "${GREEN}${result_str}${NC} (${duration}s)"
         ((PASSED++))
         PASSED_TESTS+=("$test_name")
         # Clean up temp files on success
-        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
     else
         echo -e "${RED}${result_str}${NC} (${duration}s)"
         ((FAILED++))
@@ -893,27 +1011,33 @@ WRAPPER_EOF
             local fail_log="$LOG_DIR/smak-test-fail-$test_name.log"
             {
                 echo "Test: $test_name"
-                echo "Results: Seq/NoCache=$result_seq_nocache Seq/Cache=$result_seq_cache Par/NoCache=$result_par_nocache Par/Cache=$result_par_cache"
+                echo "Results: Seq/NoCache=$result_seq_nocache Seq/Cache=$result_seq_cache Par/NoCache=$result_par_nocache Par/Cache=$result_par_cache Par/NoCache/NB=$result_par_nocache_nb Par/Cache/NB=$result_par_cache_nb"
                 if [ $has_fail_test -eq 1 ]; then
-                    echo "Fail test results: Seq/NoCache=$result_seq_nocache_fail Seq/Cache=$result_seq_cache_fail Par/NoCache=$result_par_nocache_fail Par/Cache=$result_par_cache_fail"
+                    echo "Fail test results: Seq/NoCache=$result_seq_nocache_fail Seq/Cache=$result_seq_cache_fail Par/NoCache=$result_par_nocache_fail Par/Cache=$result_par_cache_fail Par/NoCache/NB=$result_par_nocache_nb_fail Par/Cache/NB=$result_par_cache_nb_fail"
                 fi
                 echo "Result string: $result_str"
                 echo ""
                 echo "=== Sequential/NoCache Output ==="
-                cat "$out_seq_nc"
+                cat "$out_seq_nc" 2>/dev/null
                 echo ""
                 echo "=== Sequential/Cache Output ==="
-                cat "$out_seq_c"
+                cat "$out_seq_c" 2>/dev/null
                 echo ""
                 echo "=== Parallel/NoCache Output ==="
-                cat "$out_par_nc"
+                cat "$out_par_nc" 2>/dev/null
                 echo ""
                 echo "=== Parallel/Cache Output ==="
-                cat "$out_par_c"
+                cat "$out_par_c" 2>/dev/null
+                echo ""
+                echo "=== Parallel/NoCache/NoBuiltins Output ==="
+                cat "$out_par_nc_nb" 2>/dev/null
+                echo ""
+                echo "=== Parallel/Cache/NoBuiltins Output ==="
+                cat "$out_par_c_nb" 2>/dev/null
             } > "$fail_log"
         fi
         # Clean up temp files after saving to fail log
-        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c"
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
     fi
 }
 

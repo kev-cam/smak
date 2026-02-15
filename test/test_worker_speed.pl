@@ -3,9 +3,11 @@ use strict;
 use warnings;
 use IO::Socket::INET;
 use Time::HiRes qw(time);
+use FindBin;
 
 # Parent: create a listening socket
 my $server = IO::Socket::INET->new(
+    LocalAddr => '127.0.0.1',
     LocalPort => 0,
     Proto => 'tcp',
     Listen => 1,
@@ -14,29 +16,34 @@ my $server = IO::Socket::INET->new(
 
 my $port = $server->sockport();
 
-# Start the dry worker
+# Start the worker using SmakWorker module (EXTERNAL_CMDS protocol)
 my $worker_pid = fork();
 if ($worker_pid == 0) {
-    # Child: exec the dry worker (it will connect to us)
-    exec('/usr/local/src/smak/smak-worker-dry', "localhost:$port") or die "Failed to exec worker: $!";
+    close($server);
+    # Add smak directory to @INC for SmakWorker module
+    unshift @INC, "$FindBin::Bin/..";
+    require SmakWorker;
+    SmakWorker::run_worker('127.0.0.1', $port);
+    exit 0;
 }
 
 print "Waiting for worker to connect on port $port...\n";
 my $worker = $server->accept();
 $worker->autoflush(1);
+close($server);
 print "Worker connected\n";
 
-# Send environment
-print $worker "ENV_START\n";
-print $worker "ENV_END\n";
-
-# Wait for READY
+# Worker sends READY first
 my $ready = <$worker>;
 chomp $ready if defined $ready;
 die "Expected READY, got: " . ($ready // "undef") unless $ready eq 'READY';
 print "Worker is READY\n";
 
-# Send 100 test commands and measure throughput
+# Send environment
+print $worker "ENV_START\n";
+print $worker "ENV_END\n";
+
+# Send 100 test commands and measure throughput (EXTERNAL_CMDS protocol)
 my $num_commands = 100;
 my $start_time = time();
 
@@ -44,11 +51,14 @@ my $send_time = 0;
 my $recv_time = 0;
 
 for my $i (1..$num_commands) {
-    # Send TASK
+    # Send TASK using EXTERNAL_CMDS protocol
     my $t1 = time();
     print $worker "TASK $i\n";
     print $worker "DIR /tmp\n";
-    print $worker "CMD echo test command $i\n";
+    print $worker "EXTERNAL_CMDS 1\n";
+    print $worker "echo test command $i\n";
+    print $worker "TRAILING_BUILTINS 0\n";
+    $worker->flush();
     $send_time += (time() - $t1);
 
     # Read responses until we get READY again
@@ -73,5 +83,6 @@ print "Throughput: ${throughput} commands/second\n";
 
 # Cleanup
 print $worker "SHUTDOWN\n";
+$worker->flush();
 close($worker);
 waitpid($worker_pid, 0);

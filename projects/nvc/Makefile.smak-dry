@@ -1,145 +1,185 @@
-../../smak  all-am
-CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' aclocal-1.16 -I m4
-for dep in $?; do 	  case '../nvc/m4/ax_append_flag.m4 	../nvc/m4/ax_check_compile_flag.m4 	../nvc/m4/ax_check_gnu_make.m4 	../nvc/m4/ax_check_link_flag.m4 	../nvc/m4/ax_compare_version.m4 	../nvc/m4/ax_compiler_vendor.m4 	../nvc/m4/ax_define_dir.m4 	../nvc/m4/ax_gcc_builtin.m4 	../nvc/m4/ax_gcc_func_attribute.m4 	../nvc/m4/ax_lib_readline.m4 	../nvc/m4/ax_llvm_c.m4 ../nvc/m4/ax_prog_flex.m4 	../nvc/m4/ax_pthread.m4 	../nvc/m4/ax_with_curses.m4 	../nvc/m4/dynamic_list.m4 	../nvc/m4/force_out_of_tree.m4 ../nvc/m4/nvc.m4 	../nvc/m4/pkg.m4 ../nvc/configure.ac  	../nvc/aclocal.m4' in 	    *$dep*) 	      echo ' cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' automake-1.16 --foreign'; 	      CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' automake-1.16 --foreign 		&& exit 0; 	      exit 1;; 	  esac; 	done; 	echo ' cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' automake-1.16 --foreign Makefile'; 	CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && 	  ${SHELL} '/mnt/y/nvc/missing' automake-1.16 --foreign Makefile
-CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && ${SHELL} '/mnt/y/nvc/missing' autoconf
+echo "#define GIT_SHA \"\"" > gitsha.h
+CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && /bin/bash '/mnt/y/nvc/missing' aclocal-1.16 -I m4
+(CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && /bin/bash '/mnt/y/nvc/missing' autoheader)
+rm -f stamp-h1
+touch ../nvc/config.h.in
+CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && /bin/bash '/mnt/y/nvc/missing' autoconf
 /bin/bash ./config.status --recheck
+rm -f stamp-h1
+cd . && /bin/bash ./config.status config.h
+test -f config.h || rm -f stamp-h1
+test -f config.h || /usr/local/src/smak/test/../smak  stamp-h1
+/usr/local/src/smak/test/../smak  all-am
+for dep in $?; do 	  case '../nvc/m4/ax_append_flag.m4 	../nvc/m4/ax_check_compile_flag.m4 	../nvc/m4/ax_check_gnu_make.m4 	../nvc/m4/ax_check_link_flag.m4 	../nvc/m4/ax_compare_version.m4 	../nvc/m4/ax_compiler_vendor.m4 	../nvc/m4/ax_define_dir.m4 	../nvc/m4/ax_gcc_builtin.m4 	../nvc/m4/ax_gcc_func_attribute.m4 	../nvc/m4/ax_lib_readline.m4 	../nvc/m4/ax_llvm_c.m4 ../nvc/m4/ax_prog_flex.m4 	../nvc/m4/ax_pthread.m4 	../nvc/m4/ax_with_curses.m4 	../nvc/m4/dynamic_list.m4 	../nvc/m4/force_out_of_tree.m4 ../nvc/m4/nvc.m4 	../nvc/m4/pkg.m4 ../nvc/configure.ac  	../nvc/aclocal.m4' in 	    *$dep*) 	      echo ' cd ../nvc && /bin/bash '/mnt/y/nvc/missing' automake-1.16 --foreign'; 	      CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && /bin/bash '/mnt/y/nvc/missing' automake-1.16 --foreign 		&& exit 0; 	      exit 1;; 	  esac; 	done; 	echo ' cd ../nvc && /bin/bash '/mnt/y/nvc/missing' automake-1.16 --foreign Makefile'; 	CDPATH="${ZSH_VERSION+.}:" && cd ../nvc && 	  /bin/bash '/mnt/y/nvc/missing' automake-1.16 --foreign Makefile
 case '$?' in 	  *config.status*) 	    echo ' /bin/bash ./config.status'; 	    /bin/bash ./config.status;; 	  *) 	    echo ' cd . && /bin/bash ./config.status Makefile depfiles'; 	    cd . && /bin/bash ./config.status Makefile depfiles;; 	esac;
-gcc -g -O2   -c -o src/nvc.o 
-gcc -g -O2   -c -o src/lib.o 
-gcc -g -O2   -c -o src/util.o 
-gcc -g -O2   -c -o src/ident.o 
-gcc -g -O2   -c -o src/parse.o 
-gcc -g -O2   -c -o src/lexer.o 
-gcc -g -O2   -c -o src/tree.o 
-gcc -g -O2   -c -o src/type.o 
-depbase=`echo src/sem.o | sed 's|[^/]*$|.deps/&|;s|\.o$||'`;	gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/sem.o -MD -MP -MF $depbase.Tpo -c -o src/sem.o src/sem.c &&	mv -f $depbase.Tpo $depbase.Po
-gcc -g -O2   -c -o src/elab.o 
-gcc -g -O2   -c -o src/simp.o 
-gcc -g -O2   -c -o src/dump.o 
-gcc -g -O2   -c -o src/common.o 
-gcc -g -O2   -c -o src/fbuf.o 
-gcc -g -O2   -c -o src/hash.o 
-gcc -g -O2   -c -o src/bounds.o 
-gcc -g -O2   -c -o src/make.o 
-gcc -g -O2   -c -o src/object.o 
-gcc -g -O2   -c -o src/lower.o 
-gcc -g -O2   -c -o src/vcode.o 
-gcc -g -O2   -c -o src/names.o 
-gcc -g -O2   -c -o src/debug.o 
-gcc -g -O2   -c -o src/eval.o 
-gcc -g -O2   -c -o src/option.o 
-gcc -g -O2   -c -o src/diag.o 
-gcc -g -O2   -c -o src/scan.o 
-gcc -g -O2   -c -o src/mask.o 
-gcc -g -O2   -c -o src/thread.o 
-gcc -g -O2   -c -o src/driver.o 
-gcc -g -O2   -c -o src/inst.o 
-gcc -g -O2   -c -o src/cgen.o 
-gcc -g -O2   -c -o src/printf.o 
-/usr/bin/mkdir -p src/cov && : > src/cov/.dirstamp
-/usr/bin/mkdir -p src/cov/.deps && : > src/cov/.deps/.dirstamp
-gcc -g -O2   -c -o src/cov/cov-data.o 
-gcc -g -O2   -c -o src/cov/cov-export.o 
-gcc -g -O2   -c -o src/cov/cov-report.o 
-gcc -g -O2   -c -o src/cov/cov-exclude.o 
-gcc -g -O2   -c -o src/cov/cov-html.o 
-/usr/bin/mkdir -p src/jit && : > src/jit/.dirstamp
-/usr/bin/mkdir -p src/jit/.deps && : > src/jit/.deps/.dirstamp
-gcc -g -O2   -c -o src/jit/jit-core.o 
-gcc -g -O2   -c -o src/jit/jit-irgen.o 
-gcc -g -O2   -c -o src/jit/jit-dump.o 
-gcc -g -O2   -c -o src/jit/jit-interp.o 
-gcc -g -O2   -c -o src/jit/jit-exits.o 
-gcc -g -O2   -c -o src/jit/jit-optim.o 
-gcc -g -O2   -c -o src/jit/jit-ffi.o 
-gcc -g -O2   -c -o src/jit/jit-code.o 
-gcc -g -O2   -c -o src/jit/jit-pack.o 
-gcc -g -O2   -c -o src/jit/jit-layout.o 
-gcc -g -O2   -c -o src/jit/jit-intrin.o 
-gcc -g -O2   -c -o src/jit/jit-x86.o 
-gcc -g -O2   -c -o src/jit/jit-llvm.o 
-/usr/bin/mkdir -p src/mir && : > src/mir/.dirstamp
-/usr/bin/mkdir -p src/mir/.deps && : > src/mir/.deps/.dirstamp
-gcc -g -O2   -c -o src/mir/mir-unit.o 
-gcc -g -O2   -c -o src/mir/mir-node.o 
-gcc -g -O2   -c -o src/mir/mir-type.o 
-gcc -g -O2   -c -o src/mir/mir-dump.o 
-gcc -g -O2   -c -o src/mir/mir-optim.o 
-gcc -g -O2   -c -o src/mir/mir-vcode.o 
-/usr/bin/mkdir -p src/psl && : > src/psl/.dirstamp
-/usr/bin/mkdir -p src/psl/.deps && : > src/psl/.deps/.dirstamp
-gcc -g -O2   -c -o src/psl/psl-node.o 
-gcc -g -O2   -c -o src/psl/psl-sem.o 
-gcc -g -O2   -c -o src/psl/psl-lower.o 
-gcc -g -O2   -c -o src/psl/psl-dump.o 
-gcc -g -O2   -c -o src/psl/psl-fsm.o 
-/usr/bin/mkdir -p src/rt && : > src/rt/.dirstamp
-/usr/bin/mkdir -p src/rt/.deps && : > src/rt/.deps/.dirstamp
-gcc -g -O2   -c -o src/rt/heap.o 
-gcc -g -O2   -c -o src/rt/cover.o 
-gcc -g -O2   -c -o src/rt/wave.o 
-gcc -g -O2   -c -o src/rt/mspace.o 
-gcc -g -O2   -c -o src/rt/stdenv.o 
-gcc -g -O2   -c -o src/rt/standard.o 
-gcc -g -O2   -c -o src/rt/simpkg.o 
-gcc -g -O2   -c -o src/rt/model.o 
-gcc -g -O2   -c -o src/rt/fileio.o 
-gcc -g -O2   -c -o src/rt/printer.o 
-gcc -g -O2   -c -o src/rt/reflect.o 
-gcc -g -O2   -c -o src/rt/assert.o 
-gcc -g -O2   -c -o src/rt/ename.o 
-gcc -g -O2   -c -o src/rt/copy.o 
-gcc -g -O2   -c -o src/rt/random.o 
-/usr/bin/mkdir -p src/sdf && : > src/sdf/.dirstamp
-/usr/bin/mkdir -p src/sdf/.deps && : > src/sdf/.deps/.dirstamp
-gcc -g -O2   -c -o src/sdf/sdf-parse.o 
-gcc -g -O2   -c -o src/sdf/sdf-util.o 
-/usr/bin/mkdir -p src/vhdl && : > src/vhdl/.dirstamp
-/usr/bin/mkdir -p src/vhdl/.deps && : > src/vhdl/.deps/.dirstamp
-gcc -g -O2   -c -o src/vhdl/vhdl-predef.o 
-gcc -g -O2   -c -o src/vhdl/vhdl-lower.o 
-gcc -g -O2   -c -o src/vhdl/vhdl-util.o 
-gcc -g -O2   -c -o src/vhdl/vhdl-inst.o 
-/usr/bin/mkdir -p src/vhpi && : > src/vhpi/.dirstamp
-/usr/bin/mkdir -p src/vhpi/.deps && : > src/vhpi/.deps/.dirstamp
-gcc -g -O2   -c -o src/vhpi/vhpi_sens.o 
-gcc -g -O2   -c -o src/vhpi/vhpi-str.o 
-gcc -g -O2   -c -o src/vhpi/vhpi-model.o 
-gcc -g -O2   -c -o src/vhpi/vhpi-util.o 
-/usr/bin/mkdir -p src/vlog && : > src/vlog/.dirstamp
-/usr/bin/mkdir -p src/vlog/.deps && : > src/vlog/.deps/.dirstamp
-gcc -g -O2   -c -o src/vlog/vlog-node.o 
-gcc -g -O2   -c -o src/vlog/vlog-dump.o 
-gcc -g -O2   -c -o src/vlog/vlog-lower.o 
-gcc -g -O2   -c -o src/vlog/vlog-number.o 
-gcc -g -O2   -c -o src/vlog/vlog-trans.o 
-gcc -g -O2   -c -o src/vlog/vlog-simp.o 
-gcc -g -O2   -c -o src/vlog/vlog-util.o 
-gcc -g -O2   -c -o src/vlog/vlog-sem.o 
-depbase=`echo src/vlog/vlog-pp.o | sed 's|[^/]*$|.deps/&|;s|\.o$||'`;	gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/vlog/vlog-pp.o -MD -MP -MF $depbase.Tpo -c -o src/vlog/vlog-pp.o src/vlog/vlog-pp.c &&	mv -f $depbase.Tpo $depbase.Po
-gcc -g -O2   -c -o src/vlog/vlog-parse.o 
-gcc -g -O2   -c -o src/vlog/vlog-udp.o 
-gcc -g -O2   -c -o src/vlog/vlog-inst.o 
-gcc -g -O2   -c -o src/vlog/vlog-symtab.o 
-/usr/bin/mkdir -p src/vpi && : > src/vpi/.dirstamp
-/usr/bin/mkdir -p src/vpi/.deps && : > src/vpi/.deps/.dirstamp
-gcc -g -O2   -c -o src/vpi/vpi-model.o 
-gcc -g -O2   -c -o src/vpi/vpi-str.o 
-gcc -g -O2   -c -o src/vpi/vpi-util.o 
-depbase=`echo src/vpi/vpi-systf.o | sed 's|[^/]*$|.deps/&|;s|\.o$||'`;	gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/vpi/vpi-systf.o -MD -MP -MF $depbase.Tpo -c -o src/vpi/vpi-systf.o src/vpi/vpi-systf.c &&	mv -f $depbase.Tpo $depbase.Po
-/usr/bin/mkdir -p lib && : > lib/.dirstamp
-(rm -f lib/libnvc.a || true) && gcc-ar cr lib/libnvc.a src/lib.o src/util.o 	src/ident.o src/parse.o src/lexer.o 	src/tree.o src/type.o src/sem.o 	src/elab.o src/simp.o src/dump.o 	src/common.o src/fbuf.o src/hash.o 	src/bounds.o src/make.o src/object.o 	src/lower.o src/vcode.o src/names.o 	src/debug.o src/eval.o src/option.o 	src/diag.o src/scan.o src/mask.o 	src/thread.o src/driver.o src/inst.o 	src/cgen.o src/printf.o  	src/cov/cov-data.o src/cov/cov-export.o 	src/cov/cov-report.o src/cov/cov-exclude.o 	src/cov/cov-html.o src/jit/jit-core.o 	src/jit/jit-irgen.o src/jit/jit-dump.o 	src/jit/jit-interp.o src/jit/jit-exits.o 	src/jit/jit-optim.o src/jit/jit-ffi.o 	src/jit/jit-code.o src/jit/jit-pack.o 	src/jit/jit-layout.o src/jit/jit-intrin.o 	src/jit/jit-x86.o src/jit/jit-llvm.o src/mir/mir-unit.o 	src/mir/mir-node.o src/mir/mir-type.o 	src/mir/mir-dump.o src/mir/mir-optim.o 	src/mir/mir-vcode.o src/psl/psl-node.o 	src/psl/psl-sem.o src/psl/psl-lower.o 	src/psl/psl-dump.o src/psl/psl-fsm.o 	src/rt/heap.o src/rt/cover.o 	src/rt/wave.o src/rt/mspace.o 	src/rt/stdenv.o src/rt/standard.o 	src/rt/simpkg.o src/rt/standard.o 	src/rt/model.o src/rt/fileio.o 	src/rt/printer.o src/rt/reflect.o 	src/rt/assert.o src/rt/ename.o 	src/rt/copy.o src/rt/random.o  	src/sdf/sdf-parse.o src/sdf/sdf-util.o 	src/vhdl/vhdl-predef.o src/vhdl/vhdl-lower.o 	src/vhdl/vhdl-util.o src/vhdl/vhdl-inst.o 	src/vhpi/vhpi_sens.o src/vhpi/vhpi-str.o 	src/vhpi/vhpi-model.o src/vhpi/vhpi-util.o 	src/vlog/vlog-node.o src/vlog/vlog-dump.o 	src/vlog/vlog-lower.o src/vlog/vlog-number.o 	src/vlog/vlog-trans.o src/vlog/vlog-simp.o 	src/vlog/vlog-util.o src/vlog/vlog-sem.o 	src/vlog/vlog-pp.o src/vlog/vlog-parse.o 	src/vlog/vlog-udp.o src/vlog/vlog-inst.o 	src/vlog/vlog-symtab.o src/vpi/vpi-model.o 	src/vpi/vpi-str.o src/vpi/vpi-util.o 	src/vpi/vpi-systf.o  && gcc-ranlib lib/libnvc.a
-/usr/bin/mkdir -p thirdparty && : > thirdparty/.dirstamp
-/usr/bin/mkdir -p thirdparty/.deps && : > thirdparty/.deps/.dirstamp
-gcc -g -O2   -c -o thirdparty/fstapi.o 
-gcc -g -O2   -c -o thirdparty/lz4.o 
-gcc -g -O2   -c -o thirdparty/fastlz.o 
-gcc -g -O2   -c -o thirdparty/cpustate.o 
-gcc -g -O2   -c -o thirdparty/sha1.o 
-gcc -g -O2   -c -o thirdparty/svrand.o 
-(rm -f lib/libthirdparty.a || true) && gcc-ar cr lib/libthirdparty.a thirdparty/fstapi.o 	thirdparty/lz4.o thirdparty/fastlz.o 	thirdparty/cpustate.o thirdparty/sha1.o 	thirdparty/svrand.o   	    && gcc-ranlib lib/libthirdparty.a
-/usr/bin/mkdir -p bin && : > bin/.dirstamp
-rm -f bin/nvc && gcc -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2   -L/usr/lib/llvm-18/lib  -lpthread -Wl,--dynamic-list=../nvc/src/symbols.txt 	 -o bin/nvc src/nvc.o lib/libnvc.a 	lib/libthirdparty.a 	-lz  	 	 	-lffi  	 	-lzstd  	 	-lLLVM-18  	 -lm 
+gcc -g -O2   -c -o src/nvc.o src/nvc.c
+gcc -g -O2   -c -o src/lib.o src/lib.c
+gcc -g -O2   -c -o src/util.o src/util.c
+gcc -g -O2   -c -o src/ident.o src/ident.c
+gcc -g -O2   -c -o src/parse.o src/parse.c
+gcc -g -O2   -c -o src/lexer.o src/lexer.c
+gcc -g -O2   -c -o src/tree.o src/tree.c
+gcc -g -O2   -c -o src/type.o src/type.c
+gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/sem.o -MD -MP -MF src/.deps/sem.Tpo -c -o src/sem.o src/sem.c
+BUILTIN_MV -f src/.deps/sem.Tpo src/.deps/sem.Po
+gcc -g -O2   -c -o src/elab.o src/elab.c
+gcc -g -O2   -c -o src/simp.o src/simp.c
+gcc -g -O2   -c -o src/dump.o src/dump.c
+gcc -g -O2   -c -o src/common.o src/common.c
+gcc -g -O2   -c -o src/fbuf.o src/fbuf.c
+gcc -g -O2   -c -o src/hash.o src/hash.c
+gcc -g -O2   -c -o src/bounds.o src/bounds.c
+gcc -g -O2   -c -o src/make.o src/make.c
+gcc -g -O2   -c -o src/object.o src/object.c
+gcc -g -O2   -c -o src/lower.o src/lower.c
+gcc -g -O2   -c -o src/vcode.o src/vcode.c
+gcc -g -O2   -c -o src/names.o src/names.c
+gcc -g -O2   -c -o src/debug.o src/debug.c
+gcc -g -O2   -c -o src/eval.o src/eval.c
+gcc -g -O2   -c -o src/option.o src/option.c
+gcc -g -O2   -c -o src/diag.o src/diag.c
+gcc -g -O2   -c -o src/scan.o src/scan.c
+gcc -g -O2   -c -o src/mask.o src/mask.c
+gcc -g -O2   -c -o src/thread.o src/thread.c
+gcc -g -O2   -c -o src/driver.o src/driver.c
+gcc -g -O2   -c -o src/inst.o src/inst.c
+gcc -g -O2   -c -o src/cgen.o src/cgen.c
+gcc -g -O2   -c -o src/printf.o src/printf.c
+/usr/bin/mkdir -p src/cov
+: > src/cov/.dirstamp
+/usr/bin/mkdir -p src/cov/.deps
+: > src/cov/.deps/.dirstamp
+gcc -g -O2   -c -o src/cov/cov-data.o src/cov/cov-data.c
+gcc -g -O2   -c -o src/cov/cov-export.o src/cov/cov-export.c
+gcc -g -O2   -c -o src/cov/cov-report.o src/cov/cov-report.c
+gcc -g -O2   -c -o src/cov/cov-exclude.o src/cov/cov-exclude.c
+gcc -g -O2   -c -o src/cov/cov-html.o src/cov/cov-html.c
+/usr/bin/mkdir -p src/jit
+: > src/jit/.dirstamp
+/usr/bin/mkdir -p src/jit/.deps
+: > src/jit/.deps/.dirstamp
+gcc -g -O2   -c -o src/jit/jit-core.o src/jit/jit-core.c
+gcc -g -O2   -c -o src/jit/jit-irgen.o src/jit/jit-irgen.c
+gcc -g -O2   -c -o src/jit/jit-dump.o src/jit/jit-dump.c
+gcc -g -O2   -c -o src/jit/jit-interp.o src/jit/jit-interp.c
+gcc -g -O2   -c -o src/jit/jit-exits.o src/jit/jit-exits.c
+gcc -g -O2   -c -o src/jit/jit-optim.o src/jit/jit-optim.c
+gcc -g -O2   -c -o src/jit/jit-ffi.o src/jit/jit-ffi.c
+gcc -g -O2   -c -o src/jit/jit-code.o src/jit/jit-code.c
+gcc -g -O2   -c -o src/jit/jit-pack.o src/jit/jit-pack.c
+gcc -g -O2   -c -o src/jit/jit-layout.o src/jit/jit-layout.c
+gcc -g -O2   -c -o src/jit/jit-intrin.o src/jit/jit-intrin.c
+gcc -g -O2   -c -o src/jit/jit-x86.o src/jit/jit-x86.c
+gcc -g -O2   -c -o src/jit/jit-llvm.o src/jit/jit-llvm.c
+/usr/bin/mkdir -p src/mir
+: > src/mir/.dirstamp
+/usr/bin/mkdir -p src/mir/.deps
+: > src/mir/.deps/.dirstamp
+gcc -g -O2   -c -o src/mir/mir-unit.o src/mir/mir-unit.c
+gcc -g -O2   -c -o src/mir/mir-node.o src/mir/mir-node.c
+gcc -g -O2   -c -o src/mir/mir-type.o src/mir/mir-type.c
+gcc -g -O2   -c -o src/mir/mir-dump.o src/mir/mir-dump.c
+gcc -g -O2   -c -o src/mir/mir-optim.o src/mir/mir-optim.c
+gcc -g -O2   -c -o src/mir/mir-vcode.o src/mir/mir-vcode.c
+/usr/bin/mkdir -p src/psl
+: > src/psl/.dirstamp
+/usr/bin/mkdir -p src/psl/.deps
+: > src/psl/.deps/.dirstamp
+gcc -g -O2   -c -o src/psl/psl-node.o src/psl/psl-node.c
+gcc -g -O2   -c -o src/psl/psl-sem.o src/psl/psl-sem.c
+gcc -g -O2   -c -o src/psl/psl-lower.o src/psl/psl-lower.c
+gcc -g -O2   -c -o src/psl/psl-dump.o src/psl/psl-dump.c
+gcc -g -O2   -c -o src/psl/psl-fsm.o src/psl/psl-fsm.c
+/usr/bin/mkdir -p src/rt
+: > src/rt/.dirstamp
+/usr/bin/mkdir -p src/rt/.deps
+: > src/rt/.deps/.dirstamp
+gcc -g -O2   -c -o src/rt/heap.o src/rt/heap.c
+gcc -g -O2   -c -o src/rt/cover.o src/rt/cover.c
+gcc -g -O2   -c -o src/rt/wave.o src/rt/wave.c
+gcc -g -O2   -c -o src/rt/mspace.o src/rt/mspace.c
+gcc -g -O2   -c -o src/rt/stdenv.o src/rt/stdenv.c
+gcc -g -O2   -c -o src/rt/standard.o src/rt/standard.c
+gcc -g -O2   -c -o src/rt/simpkg.o src/rt/simpkg.c
+gcc -g -O2   -c -o src/rt/model.o src/rt/model.c
+gcc -g -O2   -c -o src/rt/fileio.o src/rt/fileio.c
+gcc -g -O2   -c -o src/rt/printer.o src/rt/printer.c
+gcc -g -O2   -c -o src/rt/reflect.o src/rt/reflect.c
+gcc -g -O2   -c -o src/rt/assert.o src/rt/assert.c
+gcc -g -O2   -c -o src/rt/ename.o src/rt/ename.c
+gcc -g -O2   -c -o src/rt/copy.o src/rt/copy.c
+gcc -g -O2   -c -o src/rt/random.o src/rt/random.c
+/usr/bin/mkdir -p src/sdf
+: > src/sdf/.dirstamp
+/usr/bin/mkdir -p src/sdf/.deps
+: > src/sdf/.deps/.dirstamp
+gcc -g -O2   -c -o src/sdf/sdf-parse.o src/sdf/sdf-parse.c
+gcc -g -O2   -c -o src/sdf/sdf-util.o src/sdf/sdf-util.c
+/usr/bin/mkdir -p src/vhdl
+: > src/vhdl/.dirstamp
+/usr/bin/mkdir -p src/vhdl/.deps
+: > src/vhdl/.deps/.dirstamp
+gcc -g -O2   -c -o src/vhdl/vhdl-predef.o src/vhdl/vhdl-predef.c
+gcc -g -O2   -c -o src/vhdl/vhdl-lower.o src/vhdl/vhdl-lower.c
+gcc -g -O2   -c -o src/vhdl/vhdl-util.o src/vhdl/vhdl-util.c
+gcc -g -O2   -c -o src/vhdl/vhdl-inst.o src/vhdl/vhdl-inst.c
+/usr/bin/mkdir -p src/vhpi
+: > src/vhpi/.dirstamp
+/usr/bin/mkdir -p src/vhpi/.deps
+: > src/vhpi/.deps/.dirstamp
+gcc -g -O2   -c -o src/vhpi/vhpi_sens.o src/vhpi/vhpi_sens.c
+gcc -g -O2   -c -o src/vhpi/vhpi-str.o src/vhpi/vhpi-str.c
+gcc -g -O2   -c -o src/vhpi/vhpi-model.o src/vhpi/vhpi-model.c
+gcc -g -O2   -c -o src/vhpi/vhpi-util.o src/vhpi/vhpi-util.c
+/usr/bin/mkdir -p src/vlog
+: > src/vlog/.dirstamp
+/usr/bin/mkdir -p src/vlog/.deps
+: > src/vlog/.deps/.dirstamp
+gcc -g -O2   -c -o src/vlog/vlog-node.o src/vlog/vlog-node.c
+gcc -g -O2   -c -o src/vlog/vlog-dump.o src/vlog/vlog-dump.c
+gcc -g -O2   -c -o src/vlog/vlog-lower.o src/vlog/vlog-lower.c
+gcc -g -O2   -c -o src/vlog/vlog-number.o src/vlog/vlog-number.c
+gcc -g -O2   -c -o src/vlog/vlog-trans.o src/vlog/vlog-trans.c
+gcc -g -O2   -c -o src/vlog/vlog-simp.o src/vlog/vlog-simp.c
+gcc -g -O2   -c -o src/vlog/vlog-util.o src/vlog/vlog-util.c
+gcc -g -O2   -c -o src/vlog/vlog-sem.o src/vlog/vlog-sem.c
+gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/vlog/vlog-pp.o -MD -MP -MF src/vlog/.deps/vlog-pp.Tpo -c -o src/vlog/vlog-pp.o src/vlog/vlog-pp.c
+BUILTIN_MV -f src/vlog/.deps/vlog-pp.Tpo src/vlog/.deps/vlog-pp.Po
+gcc -g -O2   -c -o src/vlog/vlog-parse.o src/vlog/vlog-parse.c
+gcc -g -O2   -c -o src/vlog/vlog-udp.o src/vlog/vlog-udp.c
+gcc -g -O2   -c -o src/vlog/vlog-inst.o src/vlog/vlog-inst.c
+gcc -g -O2   -c -o src/vlog/vlog-symtab.o src/vlog/vlog-symtab.c
+/usr/bin/mkdir -p src/vpi
+: > src/vpi/.dirstamp
+/usr/bin/mkdir -p src/vpi/.deps
+: > src/vpi/.deps/.dirstamp
+gcc -g -O2   -c -o src/vpi/vpi-model.o src/vpi/vpi-model.c
+gcc -g -O2   -c -o src/vpi/vpi-str.o src/vpi/vpi-str.c
+gcc -g -O2   -c -o src/vpi/vpi-util.o src/vpi/vpi-util.c
+gcc -DHAVE_CONFIG_H -I. -I../nvc  -I../nvc/thirdparty -I../nvc/src 	 -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2 -MT src/vpi/vpi-systf.o -MD -MP -MF src/vpi/.deps/vpi-systf.Tpo -c -o src/vpi/vpi-systf.o src/vpi/vpi-systf.c
+BUILTIN_MV -f src/vpi/.deps/vpi-systf.Tpo src/vpi/.deps/vpi-systf.Po
+/usr/bin/mkdir -p lib
+: > lib/.dirstamp
+rm -f lib/libnvc.a
+gcc-ar cr lib/libnvc.a src/lib.o src/util.o 	src/ident.o src/parse.o src/lexer.o 	src/tree.o src/type.o src/sem.o 	src/elab.o src/simp.o src/dump.o 	src/common.o src/fbuf.o src/hash.o 	src/bounds.o src/make.o src/object.o 	src/lower.o src/vcode.o src/names.o 	src/debug.o src/eval.o src/option.o 	src/diag.o src/scan.o src/mask.o 	src/thread.o src/driver.o src/inst.o 	src/cgen.o src/printf.o  	src/cov/cov-data.o src/cov/cov-export.o 	src/cov/cov-report.o src/cov/cov-exclude.o 	src/cov/cov-html.o src/jit/jit-core.o 	src/jit/jit-irgen.o src/jit/jit-dump.o 	src/jit/jit-interp.o src/jit/jit-exits.o 	src/jit/jit-optim.o src/jit/jit-ffi.o 	src/jit/jit-code.o src/jit/jit-pack.o 	src/jit/jit-layout.o src/jit/jit-intrin.o 	src/jit/jit-x86.o src/jit/jit-llvm.o src/mir/mir-unit.o 	src/mir/mir-node.o src/mir/mir-type.o 	src/mir/mir-dump.o src/mir/mir-optim.o 	src/mir/mir-vcode.o src/psl/psl-node.o 	src/psl/psl-sem.o src/psl/psl-lower.o 	src/psl/psl-dump.o src/psl/psl-fsm.o 	src/rt/heap.o src/rt/cover.o 	src/rt/wave.o src/rt/mspace.o 	src/rt/stdenv.o src/rt/standard.o 	src/rt/simpkg.o src/rt/standard.o 	src/rt/model.o src/rt/fileio.o 	src/rt/printer.o src/rt/reflect.o 	src/rt/assert.o src/rt/ename.o 	src/rt/copy.o src/rt/random.o  	src/sdf/sdf-parse.o src/sdf/sdf-util.o 	src/vhdl/vhdl-predef.o src/vhdl/vhdl-lower.o 	src/vhdl/vhdl-util.o src/vhdl/vhdl-inst.o 	src/vhpi/vhpi_sens.o src/vhpi/vhpi-str.o 	src/vhpi/vhpi-model.o src/vhpi/vhpi-util.o 	src/vlog/vlog-node.o src/vlog/vlog-dump.o 	src/vlog/vlog-lower.o src/vlog/vlog-number.o 	src/vlog/vlog-trans.o src/vlog/vlog-simp.o 	src/vlog/vlog-util.o src/vlog/vlog-sem.o 	src/vlog/vlog-pp.o src/vlog/vlog-parse.o 	src/vlog/vlog-udp.o src/vlog/vlog-inst.o 	src/vlog/vlog-symtab.o src/vpi/vpi-model.o 	src/vpi/vpi-str.o src/vpi/vpi-util.o 	src/vpi/vpi-systf.o 
+gcc-ranlib lib/libnvc.a
+/usr/bin/mkdir -p thirdparty
+: > thirdparty/.dirstamp
+/usr/bin/mkdir -p thirdparty/.deps
+: > thirdparty/.deps/.dirstamp
+gcc -g -O2   -c -o thirdparty/fstapi.o thirdparty/fstapi.c
+gcc -g -O2   -c -o thirdparty/lz4.o thirdparty/lz4.c
+gcc -g -O2   -c -o thirdparty/fastlz.o thirdparty/fastlz.c
+gcc -g -O2   -c -o thirdparty/cpustate.o thirdparty/cpustate.c
+gcc -g -O2   -c -o thirdparty/sha1.o thirdparty/sha1.c
+gcc -g -O2   -c -o thirdparty/svrand.o thirdparty/svrand.c
+rm -f lib/libthirdparty.a
+gcc-ar cr lib/libthirdparty.a thirdparty/fstapi.o 	thirdparty/lz4.o thirdparty/fastlz.o 	thirdparty/cpustate.o thirdparty/sha1.o 	thirdparty/svrand.o   	   
+gcc-ranlib lib/libthirdparty.a
+/usr/bin/mkdir -p bin
+: > bin/.dirstamp
+rm -f bin/nvc
+gcc -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm-18/include  -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS   -g -O2   -L/usr/lib/llvm-18/lib  -lpthread -Wl,--dynamic-list=../nvc/src/symbols.txt 	 -o bin/nvc src/nvc.o lib/libnvc.a 	lib/libthirdparty.a 	-lz  	 	 	-lffi  	 	-lzstd  	 	-lLLVM-18  	 -lm 
 ./bin/nvc --std=1993 --work=lib/std -a --relative=../nvc --bootstrap ../nvc/lib/std/standard.vhd
 ./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/std_logic_1164.vhdl
 ./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/ieee/numeric_bit.vhdl
@@ -276,4 +316,14 @@ rm -f bin/nvc && gcc -Wall -mpopcnt -flto=auto -pthread 	   	   	-I/usr/lib/llvm
 ./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/vital/memory_p.vhdl
 ./bin/nvc --std=1993 -L lib/ --work=lib/ieee -a --relative=../nvc ../nvc/lib/vital/memory_b.vhdl
 ./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/vital/timing_p.vhdl
-./bin/nvc -
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/vital/timing_b.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/vital/prmtvs_p.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/vital/prmtvs_b.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/vital/memory_p.vhdl
+./bin/nvc --std=2008 -L lib/ --work=lib/ieee.08 -a --relative=../nvc ../nvc/lib/vital/memory_b.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/vital/timing_p.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/vital/timing_b.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/vital/prmtvs_p.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/vital/prmtvs_b.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/vital/memory_p.vhdl
+./bin/nvc --std=2019 -L lib/ --work=lib/ieee.19 -a --relative=../nvc ../nvc/lib/vital/memory_b.vhdl

@@ -237,7 +237,14 @@ sub readline {
             }
 
             my $char = $self->read_char();
-            next unless defined $char;
+            unless (defined $char) {
+                if ($stdin_ready) {
+                    # select() said readable but sysread returned 0 → EOF
+                    $result = undef;
+                    last;
+                }
+                next;
+            }
 
             my $ord = ord($char);
 

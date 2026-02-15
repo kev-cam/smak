@@ -354,9 +354,8 @@ sub start_job_server {
     if ($job_server_pid == 0) {
         # Child - run job-master with full access to parsed Makefile data
         # This allows job-master to understand dependencies and parallelize intelligently
-        # Detach from parent's stdio so we don't hold pipes open after parent exits
-        open(STDOUT, '>/dev/null');
-        open(STDERR, '>/dev/null');
+        # Note: Don't redirect STDIN/STDOUT/STDERR here - it breaks PTY-based
+        # interactive tests. The parent handles stdio cleanup on exit.
         set_process_name('smak-server');
         run_job_master($jobs, $RealBin);
         exit 99;  # Should never reach here
@@ -834,6 +833,7 @@ sub execute_builtin {
                     $capture_targets->{$full_tgt} = {
                         deps => [map { "$sub_directory/$_" } @{$info->{deps} || []}],
                         rule => $info->{rule} || '',
+                        expanded_rule => $info->{expanded_rule} || '',
                         exec_dir => $info->{exec_dir} || $sub_directory,
                     };
                 }
@@ -5127,6 +5127,12 @@ sub build_target {
                             $exec_part = $1;
                         }
 
+                        # Skip cd commands - directory change is handled via -C option
+                        # by normalize_cd_make() earlier in the pipeline
+                        next if $exec_part =~ /^\s*cd\s/;
+                        # Skip true/false
+                        next if $exec_part =~ /^\s*(true|false)\s*$/;
+
                         my $exit = execute_builtin($exec_part);
                         if (!defined $exit) {
                             # Not a builtin - hand remainder to external execution
@@ -5521,6 +5527,182 @@ sub collect_target_graph {
 # Note: This is a simple comparison tool. Both smak and make dry-run outputs
 # should already be fully expanded/normalized by their respective engines.
 # Differences found here indicate bugs in smak's dry-run expansion logic.
+# Run the built-in worker protocol test suite.
+# Accepts a connected worker socket and exercises the full EXTERNAL_CMDS protocol.
+# Returns ($pass_count, $fail_count).
+sub run_test_worker {
+    my ($worker) = @_;
+    my ($pass, $fail) = (0, 0);
+    my $task_id = 0;
+
+    # Helper: read lines from worker until READY, collecting them
+    my $read_until_ready = sub {
+        my @lines;
+        while (1) {
+            my $line = <$worker>;
+            return (undef, @lines) unless defined $line;
+            chomp $line;
+            push @lines, $line;
+            last if $line eq 'READY';
+        }
+        return (1, @lines);
+    };
+
+    # Helper: send a task and collect response
+    my $send_task = sub {
+        my (%opts) = @_;
+        $task_id++;
+        my $dir = $opts{dir} // '/tmp';
+        my @cmds = @{$opts{cmds} // ['true']};
+        my @builtins = @{$opts{builtins} // []};
+        my $dry = $opts{dry} ? '_DRY' : '';
+
+        print $worker "TASK $task_id\n";
+        print $worker "DIR $dir\n";
+        print $worker "EXTERNAL_CMDS$dry " . scalar(@cmds) . "\n";
+        print $worker "$_\n" for @cmds;
+        print $worker "TRAILING_BUILTINS " . scalar(@builtins) . "\n";
+        print $worker "$_\n" for @builtins;
+        $worker->flush();
+
+        return $read_until_ready->();
+    };
+
+    my $report = sub {
+        my ($ok, $name, $reason) = @_;
+        if ($ok) {
+            print "  PASS: $name\n";
+            $pass++;
+        } else {
+            print "  FAIL: $name - $reason\n";
+            $fail++;
+        }
+    };
+
+    print "Worker Protocol Test Suite\n";
+    print "=" x 40 . "\n";
+
+    # --- Test 1: READY handshake ---
+    {
+        my $line = <$worker>;
+        chomp $line if defined $line;
+        $report->(defined $line && $line eq 'READY',
+                  'READY handshake',
+                  "expected READY, got: " . ($line // 'EOF'));
+    }
+
+    # --- Test 2: ENV exchange ---
+    {
+        print $worker "ENV_START\n";
+        print $worker "ENV SMAK_TEST_VAR=hello_from_test\n";
+        print $worker "ENV_END\n";
+        $worker->flush();
+        # Worker silently absorbs ENV - no response expected.
+        # We verify it worked by using the variable in a later test.
+        $report->(1, 'ENV exchange', '');
+    }
+
+    # --- Test 3: Simple task (true) ---
+    {
+        my ($ok, @lines) = $send_task->(cmds => ['true']);
+        my $has_start = grep { /^TASK_START $task_id$/ } @lines;
+        my $has_end = grep { /^TASK_END $task_id 0$/ } @lines;
+        my $has_ready = grep { $_ eq 'READY' } @lines;
+        $report->($ok && $has_start && $has_end && $has_ready,
+                  'Simple task (true)',
+                  "responses: " . join(', ', @lines));
+    }
+
+    # --- Test 4: Output capture (echo) ---
+    {
+        my ($ok, @lines) = $send_task->(cmds => ['echo hello_world']);
+        my @outputs = grep { /^OUTPUT / } @lines;
+        my $has_hello = grep { /hello_world/ } @outputs;
+        my $has_end = grep { /^TASK_END $task_id 0$/ } @lines;
+        $report->($ok && $has_hello && $has_end,
+                  'Output capture (echo)',
+                  "outputs: " . join(', ', @outputs));
+    }
+
+    # --- Test 5: Multi-command task ---
+    {
+        my ($ok, @lines) = $send_task->(cmds => ['echo first', 'echo second']);
+        my @outputs = map { /^OUTPUT (.*)/ ? $1 : () } @lines;
+        my $has_first = grep { /first/ } @outputs;
+        my $has_second = grep { /second/ } @outputs;
+        $report->($ok && $has_first && $has_second,
+                  'Multi-command task',
+                  "outputs: " . join(', ', @outputs));
+    }
+
+    # --- Test 6: Trailing builtins ---
+    {
+        my $test_dir = "/tmp/smak-test-worker-$$";
+        # First ensure clean state
+        system("rm -rf $test_dir");
+        my ($ok, @lines) = $send_task->(
+            cmds => ['true'],
+            builtins => ["mkdir -p $test_dir"],
+        );
+        my $dir_exists = -d $test_dir;
+        system("rm -rf $test_dir");
+        my $has_end = grep { /^TASK_END $task_id 0$/ } @lines;
+        $report->($ok && $dir_exists && $has_end,
+                  'Trailing builtins (mkdir)',
+                  "dir_exists=$dir_exists, responses: " . join(', ', @lines));
+    }
+
+    # --- Test 7: Failure handling ---
+    {
+        my ($ok, @lines) = $send_task->(cmds => ['false']);
+        my ($end_line) = grep { /^TASK_END $task_id / } @lines;
+        my $exit_nonzero = 0;
+        if ($end_line && $end_line =~ /^TASK_END \d+ (\d+)$/) {
+            $exit_nonzero = ($1 != 0);
+        }
+        $report->($ok && $exit_nonzero,
+                  'Failure handling (false)',
+                  "end_line: " . ($end_line // 'none'));
+    }
+
+    # --- Test 8: Directory handling ---
+    {
+        my ($ok, @lines) = $send_task->(dir => '/tmp', cmds => ['pwd']);
+        my @outputs = map { /^OUTPUT (.*)/ ? $1 : () } @lines;
+        # pwd may resolve symlinks, so check for /tmp or /private/tmp
+        my $in_tmp = grep { m{/tmp} } @outputs;
+        $report->($ok && $in_tmp,
+                  'Directory handling (pwd in /tmp)',
+                  "outputs: " . join(', ', @outputs));
+    }
+
+    # --- Test 9: ENV variable propagation ---
+    {
+        my ($ok, @lines) = $send_task->(cmds => ['sh -c "echo $SMAK_TEST_VAR"']);
+        my @outputs = map { /^OUTPUT (.*)/ ? $1 : () } @lines;
+        my $has_val = grep { /hello_from_test/ } @outputs;
+        $report->($ok && $has_val,
+                  'ENV variable propagation',
+                  "outputs: " . join(', ', @outputs));
+    }
+
+    # --- Test 10: SHUTDOWN ---
+    {
+        print $worker "SHUTDOWN\n";
+        $worker->flush();
+        # Worker should disconnect cleanly
+        my $line = <$worker>;
+        # EOF (undef) or no more data = clean shutdown
+        $report->(!defined $line,
+                  'SHUTDOWN (clean disconnect)',
+                  "got: " . ($line // 'EOF (correct)'));
+    }
+
+    print "=" x 40 . "\n";
+    print "$pass passed, $fail failed\n";
+    return ($pass, $fail);
+}
+
 sub run_check_mode {
     my ($target, $makefile_path) = @_;
 
@@ -6129,6 +6311,11 @@ sub unified_cli {
     if ($detached) {
         # Detach was requested (explicit detach command only, not Ctrl-C)
         $SmakCli::cli_owner = -1;  # Mark CLI as unowned
+        # Tell job-server to linger (don't exit on disconnect)
+        if ($socket) {
+            print $socket "DETACH\n";
+            $socket->flush();
+        }
         if ($own_server) {
             print "Detaching from CLI (job server $Smak::job_server_pid still running)...\n";
         } else {
@@ -6139,6 +6326,14 @@ sub unified_cli {
         # Always shut down the server when quitting (even when attached)
         if ($socket) {
             print "Shutting down job server...\n";
+            print $socket "SHUTDOWN\n";
+            my $ack = <$socket>;
+        }
+	$ret = "stop";
+    }
+    else {
+        # EOF on input (script ended, pipe closed) - shut down cleanly
+        if ($socket) {
             print $socket "SHUTDOWN\n";
             my $ack = <$socket>;
         }
@@ -7416,7 +7611,7 @@ sub cmd_btree {
         my $info = $captured_info{$tgt};
         $all_targets{$tgt} = $info->{deps} || [];
         $target_info{$tgt} = {
-            rule => $info->{rule} || '',
+            rule => $info->{expanded_rule} || $info->{rule} || '',
             exec_dir => $info->{exec_dir} || '.',
             siblings => [],
             compound_parent => '',
@@ -9269,6 +9464,7 @@ sub run_job_master {
     # SIGHUP tells the job-server to detach from any connected CLI client
     # Useful when the CLI is remote and hard to locate
     my $hup_received = 0;
+    my $explicitly_detached = 0;  # Set when detached via SIGHUP or detach command
     $SIG{HUP} = sub { $hup_received = 1; };
 
     # Job-master has access to all parsed Makefile data:
@@ -9583,6 +9779,7 @@ sub run_job_master {
     our %child_job_targets;  # child_socket => { target => 1, ... } (jobs belonging to each child)
     our %target_to_child;    # target => child_socket (reverse lookup for completion tracking)
     our %child_exit_codes;   # child_socket => max_exit_code (track failures per child)
+    our %child_all_submitted; # child_socket => 1 (set when CHILD_DONE received, all jobs submitted)
     our %builtin_fork_pipes; # stringified_pipe_fh => { pid, target, pipe_fh } (builtin fork children)
     our %completed_targets;  # target => 1 (successfully built targets)
     our %phony_ran_this_session;  # target => 1 (phony targets that ran successfully this session)
@@ -9816,6 +10013,43 @@ sub run_job_master {
         }
 
         return $expanded;
+    }
+
+    # Assert that a command has no unexpanded makefile variables.
+    # Called before sending commands to workers - any unexpanded variables
+    # indicate a bug in the expansion pipeline.
+    sub assert_no_unexpanded_vars {
+        my ($cmd, $target, $context) = @_;
+        return unless defined $cmd && $cmd =~ /\S/;
+        $context //= 'dispatch';
+
+        # $MV{VAR} is smak's internal pre-expansion format - always a bug if present
+        if ($cmd =~ /\$MV\{([^}]+)\}/) {
+            die "ASSERTION FAILED [$context]: Unexpanded \$MV{$1} in command for target '$target':\n$cmd\n";
+        }
+
+        # Check for make automatic variables that should have been expanded:
+        # $@ (target), $< (first prereq), $^ (all prereqs), $* (stem)
+        # But $@ is valid shell ("$@" = all args), so only flag bare occurrences
+        # that look like make usage (not inside double-quotes preceded by \)
+        for my $var (qw($@ $< $^ $*)) {
+            my $escaped = quotemeta($var);
+            # Match the variable NOT preceded by \ and NOT inside $(...) shell syntax
+            if ($cmd =~ /(?<!\\)${escaped}(?![{(a-zA-Z0-9_])/) {
+                # $@ in shell is common ("$@"), so skip it
+                next if $var eq '$@';
+                warn "WARNING [$context]: Possible unexpanded automatic variable '$var' in command for target '$target':\n$cmd\n";
+            }
+        }
+
+        # Check for $(ALLCAPS_VAR) patterns that look like makefile variables
+        # Skip: $(shell ...), $(wildcard ...), and lowercase/mixed-case (likely shell subcommands)
+        while ($cmd =~ /\$\(([A-Z][A-Z0-9_]*)\)/g) {
+            my $var = $1;
+            # These are common make functions, not variables - skip them
+            next if $var =~ /^(SHELL|MAKE|MAKEFLAGS|MFLAGS|CURDIR|MAKELEVEL)$/;
+            warn "WARNING [$context]: Possible unexpanded makefile variable '\$($var)' in command for target '$target':\n$cmd\n";
+        }
     }
 
     sub is_phony_target {
@@ -10752,6 +10986,9 @@ sub run_job_master {
 
             my $processed_rule = process_command($expanded_rule);
 
+            # Assert no unexpanded variables remain after expansion
+            assert_no_unexpanded_vars($processed_rule, $target, 'queue');
+
             # Handle multi-output pattern rules (e.g., parse%cc parse%h: parse%y)
             # Create a compound pseudo-target (e.g., "parse.cc&parse.h") that holds the build command.
             # Individual targets depend on the compound target.
@@ -10994,8 +11231,10 @@ sub run_job_master {
                 if !$child_exit_codes{$child_sock} || $exit_code > $child_exit_codes{$child_sock};
         }
 
-        # Check if all child's jobs are done
-        if (!keys %{$child_job_targets{$child_sock}}) {
+        # Check if all child's jobs are done AND child has finished submitting (CHILD_DONE received)
+        # Without the CHILD_DONE check, we'd race: a fast worker could complete the first job
+        # before the remaining SUBMIT_JOBs are read from the socket, causing premature CHILD_COMPLETE.
+        if (!keys %{$child_job_targets{$child_sock}} && $child_all_submitted{$child_sock}) {
             my $child_exit = $child_exit_codes{$child_sock} || 0;
             print STDERR "All child jobs complete, sending CHILD_COMPLETE $child_exit\n" if $ENV{SMAK_DEBUG};
             if (defined fileno($child_sock)) {
@@ -11006,6 +11245,7 @@ sub run_job_master {
             @child_sockets = grep { $_ != $child_sock } @child_sockets;
             delete $child_job_targets{$child_sock};
             delete $child_exit_codes{$child_sock};
+            delete $child_all_submitted{$child_sock};
             close($child_sock);
         }
     }
@@ -11088,7 +11328,8 @@ sub run_job_master {
         my $all_done = ($busy_workers == 0 && $queued == 0 && $running == 0 && $pending == 0 && $builtin_forks == 0);
 
         # Debug: if we have idle workers but work isn't done, show what's blocking
-        if ($busy_workers == 0 && !$all_done && $context =~ /IDLE/) {
+        # (Skip when builtin forks are running - that's expected wait time, not a stuck state)
+        if ($busy_workers == 0 && !$all_done && $builtin_forks == 0 && $context =~ /IDLE/) {
             print STDERR "IDLE-BLOCK: queued=$queued running=$running pending=$pending\n";
             if ($pending > 0) {
                 for my $comp_target (keys %pending_composite) {
@@ -11511,6 +11752,11 @@ sub run_job_master {
             @builtins = @$builtin_ref;
         }
 
+        # Assert no unexpanded variables before sending to worker
+        for my $cmd (@ext_cmds, @builtins) {
+            assert_no_unexpanded_vars($cmd, $target, 'dispatch');
+        }
+
         my $cmds_tag = $dry_run_mode ? "EXTERNAL_CMDS_DRY" : "EXTERNAL_CMDS";
         print $worker "$cmds_tag " . scalar(@ext_cmds) . "\n";
         for my $cmd (@ext_cmds) {
@@ -11652,14 +11898,6 @@ sub run_job_master {
 
 	        # If we've gone past the end of the queue, exit the for loop
 	        last if ($i > $#job_queue);
-
-                # CHILD JOB CHECK: Jobs from child smak bypass all dependency checks
-                # The child already computed the correct order via collect_target_graph
-                if ($job->{from_child}) {
-                    print STDERR "DEBUG dispatch: Child job '$target' - bypassing dep checks\n" if $ENV{SMAK_DEBUG};
-                    $job_index = $i;
-                    last;  # Found a dispatchable job
-                }
 
                 # LAYER CHECK: Skip jobs in layers higher than current dispatch layer
                 # Jobs in higher layers depend on jobs in lower layers - can't run until
@@ -12719,10 +12957,19 @@ sub run_job_master {
             }
         }
 
+        # If idle and master disconnected (not via explicit detach), exit immediately
+        # The idle timeout only applies when the server was explicitly detached (SIGHUP/detach cmd)
+        if ($is_idle && !defined($master_socket) && !$explicitly_detached) {
+            vprint "Idle and master disconnected. Job-master exiting.\n";
+            my $local_link = ".smak.connect";
+            unlink($local_link) if -l $local_link;
+            unlink($port_file) if -f $port_file;
+            last;
+        }
+
         # In non-CLI mode (batch mode), detect if parent process died
         # When parent dies, getppid() returns 1 (init process)
-        # If idle timeout is set, let the idle timeout handle cleanup instead
-        if (getppid() == 1 && !defined($master_socket) && $job_server_idle_timeout <= 0) {
+        if (getppid() == 1 && !defined($master_socket)) {
             print STDERR "Parent process died. Job-master cleaning up and exiting.\n";
             # Kill any running workers
             shutdown_workers();
@@ -12739,6 +12986,7 @@ sub run_job_master {
             $hup_received = 0;
             if (defined($master_socket)) {
                 vprint "SIGHUP received. Detaching from CLI client.\n";
+                $explicitly_detached = 1;
                 my $old = $master_socket;
                 $select->remove($master_socket);
                 close($master_socket);
@@ -13331,6 +13579,23 @@ sub run_job_master {
                         print $new_conn "CHILD_READY\n";
                         $new_conn->flush();
                         print STDERR "Child smak ready, sent CHILD_READY\n" if $ENV{SMAK_DEBUG};
+                    } elsif ($first_line eq 'SHUTDOWN') {
+                        # Remote shutdown request (from kill_old_js or similar)
+                        print STDERR "Remote SHUTDOWN request received\n" if $ENV{SMAK_DEBUG};
+                        # Send ack, then shut down
+                        for my $worker (@workers) {
+                            print $worker "SHUTDOWN\n";
+                        }
+                        for my $worker (@workers) {
+                            close($worker);
+                        }
+                        print $new_conn "OK\n";
+                        close($new_conn);
+                        # Clean up port file
+                        my $port_dir = get_port_file_dir();
+                        my $port_file = "$port_dir/smak-jobserver-$$.port";
+                        unlink($port_file) if -f $port_file;
+                        exit(0);
                     } else {
                         # Regular master connecting - replace old master
                         if ($master_socket) {
@@ -13397,6 +13662,11 @@ sub run_job_master {
                     shutdown_workers();
                     print $master_socket "SHUTDOWN_ACK\n";
                     exit 0;
+
+                } elsif ($line eq 'DETACH') {
+                    # CLI requested explicit detach - linger for reconnection
+                    vprint "Detach requested by master. Will linger for idle timeout.\n";
+                    $explicitly_detached = 1;
 
                 } elsif ($line eq 'STATUS') {
                     # Report job-master status for debugging
@@ -14402,9 +14672,19 @@ sub run_job_master {
                 $socket->blocking(1);
 
             } elsif (grep { $_ == $socket } @child_sockets) {
-                # Message from a child smak
+                # Message from a child smak - drain ALL available messages
+                # (Perl's <> reads kernel buffer into userspace; select() only sees kernel buffer,
+                # so we must loop to consume all buffered data or messages get stranded)
+                $socket->blocking(0);
+
+              CHILD_READ:
+                while (1) {
                 my $line = <$socket>;
                 unless (defined $line) {
+                    if ($!{EAGAIN} || $!{EWOULDBLOCK}) {
+                        # No more data right now - break to continue with select loop
+                        last CHILD_READ;
+                    }
                     # Child disconnected - clean up tracking
                     print STDERR "Child smak disconnected\n" if $ENV{SMAK_DEBUG};
                     if (exists $child_job_targets{$socket}) {
@@ -14414,19 +14694,35 @@ sub run_job_master {
                         delete $child_job_targets{$socket};
                     }
                     delete $child_exit_codes{$socket};
+                    delete $child_all_submitted{$socket};
                     $select->remove($socket);
                     @child_sockets = grep { $_ != $socket } @child_sockets;
                     close($socket);
-                    next;
+                    last CHILD_READ;
                 }
                 chomp $line;
 
                 if ($line eq 'SUBMIT_JOB') {
-                    # Child is submitting a job (line-count protocol: target, exec_dir, COMMAND_LINES N, N lines)
+                    # Child is submitting a job (protocol: target, exec_dir, DEPS N, deps, COMMAND_LINES N, cmds)
+                    # Temporarily switch to blocking for multi-line protocol read
+                    $socket->blocking(1);
                     my $target = <$socket>;
                     my $exec_dir = <$socket>;
                     chomp $target if defined $target;
                     chomp $exec_dir if defined $exec_dir;
+
+                    # Read dependency lines
+                    my @deps;
+                    my $deps_header = <$socket>;
+                    chomp $deps_header if defined $deps_header;
+                    if (defined $deps_header && $deps_header =~ /^DEPS (\d+)$/) {
+                        my $count = $1;
+                        for (1..$count) {
+                            my $dep_line = <$socket>;
+                            chomp $dep_line if defined $dep_line;
+                            push @deps, $dep_line if defined $dep_line;
+                        }
+                    }
 
                     # Read command lines
                     my $cmd_header = <$socket>;
@@ -14445,47 +14741,182 @@ sub run_job_master {
                         # Fallback: single-line command (backward compat)
                         $command = $cmd_header // '';
                     }
+                    $socket->blocking(0);
 
                     if (defined $target && defined $exec_dir && $command ne '') {
-                        print STDERR "Child submitted job: $target (exec_dir=$exec_dir)\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Child submitted job: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ")\n" if $ENV{SMAK_DEBUG};
+
+                        # Assert child relay sent fully-expanded commands
+                        assert_no_unexpanded_vars($command, $target, 'child-submit');
 
                         # Track this job belongs to this child socket
                         $child_job_targets{$socket}{$target} = 1;
                         $target_to_child{$target} = $socket;
 
-                        # Queue as normal job
-                        # Use exec_dir as dir so verify_target_exists looks in the right place
+                        # Queue job with deps (layers computed after all jobs received)
                         push @job_queue, {
                             target => $target,
                             dir => $exec_dir,
                             exec_dir => $exec_dir,
                             command => $command,
-                            deps => [],
+                            deps => \@deps,
                             layer => 0,
                             from_child => 1,
                         };
-                        # Try to dispatch
-                        dispatch_jobs();
                     }
                 } elsif ($line =~ /^CHILD_DONE\s*(\d+)?$/) {
                     # Child smak finished submitting all jobs
                     my $job_count = $1 // 0;
                     print STDERR "Child smak done, submitted $job_count jobs\n" if $ENV{SMAK_DEBUG};
 
+                    # Mark that this child has finished submitting - check_child_completion
+                    # can now safely send CHILD_COMPLETE when all jobs are done
+                    $child_all_submitted{$socket} = 1;
+
                     # If child submitted 0 jobs (or all already completed), send CHILD_COMPLETE now
                     if ($job_count == 0 || !exists $child_job_targets{$socket} ||
                         !keys %{$child_job_targets{$socket}}) {
-                        print STDERR "Child has no pending jobs, sending CHILD_COMPLETE 0\n" if $ENV{SMAK_DEBUG};
-                        print $socket "CHILD_COMPLETE 0\n";
+                        my $child_exit = $child_exit_codes{$socket} || 0;
+                        print STDERR "Child has no pending jobs, sending CHILD_COMPLETE $child_exit\n" if $ENV{SMAK_DEBUG};
+                        print $socket "CHILD_COMPLETE $child_exit\n";
                         $socket->flush();
                         $select->remove($socket);
                         @child_sockets = grep { $_ != $socket } @child_sockets;
                         delete $child_job_targets{$socket};
                         delete $child_exit_codes{$socket};
+                        delete $child_all_submitted{$socket};
                         close($socket);
+                        last CHILD_READ;
                     }
                     # Otherwise keep socket open - CHILD_COMPLETE sent when all jobs finish
                 }
+                } # end while(1) CHILD_READ loop
+                $socket->blocking(1) if grep { $_ == $socket } @child_sockets;
+
+                # Post-process child jobs: compute layers and check needs_rebuild
+                my @child_jobs = grep { $_->{from_child} && $_->{layer} == 0 } @job_queue;
+                if (@child_jobs) {
+                    # Build set of child job targets for dep classification
+                    my %child_targets;
+                    for my $job (@child_jobs) {
+                        $child_targets{$job->{target}} = 1;
+                    }
+
+                    # Mark source file deps as completed (they aren't child jobs and exist on disk)
+                    for my $job (@child_jobs) {
+                        for my $dep (@{$job->{deps}}) {
+                            next if exists $child_targets{$dep};
+                            next if exists $completed_targets{$dep};
+                            my $dep_path = "$job->{exec_dir}/$dep";
+                            if (-e $dep_path) {
+                                $completed_targets{$dep} = 1;
+                                $in_progress{$dep} = "done";
+                            }
+                        }
+                    }
+
+                    # Compute layers (iterate until stable - deps may reference other child jobs)
+                    for my $job (@child_jobs) {
+                        my $layer = compute_target_layer($job->{deps});
+                        $job->{layer} = $layer;
+                        $target_layer{$job->{target}} = $layer;
+                        $max_dispatch_layer = $layer if $layer > $max_dispatch_layer;
+                        $job_layers[$layer] //= [];
+                        push @{$job_layers[$layer]}, $job;
+                        print STDERR "Child job '$job->{target}' assigned to layer $layer\n" if $ENV{SMAK_DEBUG};
+                    }
+
+                    # Check needs_rebuild: skip up-to-date targets
+                    # Two-pass: first find targets that need rebuild based on file timestamps,
+                    # then propagate - any target whose dep will be rebuilt also needs rebuild.
+                    my %needs_build;
+                    for my $job (@child_jobs) {
+                        my $target_path = "$job->{exec_dir}/$job->{target}";
+                        unless (-e $target_path) {
+                            $needs_build{$job->{target}} = 1;  # Doesn't exist → needs build
+                            next;
+                        }
+                        my $target_mtime = (stat($target_path))[9];
+                        for my $dep (@{$job->{deps}}) {
+                            my $dep_path = "$job->{exec_dir}/$dep";
+                            next unless -e $dep_path;
+                            my $dep_mtime = (stat($dep_path))[9];
+                            if ($dep_mtime > $target_mtime) {
+                                $needs_build{$job->{target}} = 1;
+                                last;
+                            }
+                        }
+                    }
+
+                    # Propagate: if any dep is being rebuilt, this target needs rebuild too
+                    my $changed = 1;
+                    while ($changed) {
+                        $changed = 0;
+                        for my $job (@child_jobs) {
+                            next if $needs_build{$job->{target}};
+                            for my $dep (@{$job->{deps}}) {
+                                if ($needs_build{$dep}) {
+                                    $needs_build{$job->{target}} = 1;
+                                    $changed = 1;
+                                    last;
+                                }
+                            }
+                        }
+                    }
+
+                    my @to_remove;
+                    for my $job (@child_jobs) {
+                        unless ($needs_build{$job->{target}}) {
+                            print STDERR "Child job '$job->{target}' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
+                            push @to_remove, $job->{target};
+                            $completed_targets{$job->{target}} = 1;
+                            $in_progress{$job->{target}} = "done";
+                            # Also mark complete in child tracking
+                            if (exists $child_job_targets{$socket}) {
+                                delete $child_job_targets{$socket}{$job->{target}};
+                            }
+                            delete $target_to_child{$job->{target}};
+                        }
+                    }
+
+                    # Remove up-to-date jobs from queues
+                    if (@to_remove) {
+                        my %remove_set = map { $_ => 1 } @to_remove;
+                        @job_queue = grep { !($remove_set{$_->{target}}) } @job_queue;
+                        for my $layer_ref (@job_layers) {
+                            next unless $layer_ref;
+                            @$layer_ref = grep { !($remove_set{$_->{target}}) } @$layer_ref;
+                        }
+                        print STDERR "Removed " . scalar(@to_remove) . " up-to-date child jobs\n" if $ENV{SMAK_DEBUG};
+
+                        # Check if ALL child jobs were removed - send CHILD_COMPLETE directly
+                        if (grep { $_ == $socket } @child_sockets) {
+                            if ($child_all_submitted{$socket} &&
+                                (!exists $child_job_targets{$socket} || !keys %{$child_job_targets{$socket}})) {
+                                my $child_exit = $child_exit_codes{$socket} || 0;
+                                print STDERR "All child jobs up-to-date, sending CHILD_COMPLETE $child_exit\n" if $ENV{SMAK_DEBUG};
+                                print $socket "CHILD_COMPLETE $child_exit\n";
+                                $socket->flush();
+                                $select->remove($socket);
+                                @child_sockets = grep { $_ != $socket } @child_sockets;
+                                delete $child_job_targets{$socket};
+                                delete $child_exit_codes{$socket};
+                                delete $child_all_submitted{$socket};
+                                close($socket);
+                            }
+                        }
+                    }
+                }
+
+                # Advance dispatch layer past empty layers (up-to-date removal may have cleared lower layers)
+                while ($current_dispatch_layer <= $max_dispatch_layer) {
+                    my $layer_ref = $job_layers[$current_dispatch_layer];
+                    last if $layer_ref && @$layer_ref > 0;  # Found a layer with jobs
+                    $current_dispatch_layer++;
+                }
+
+                # Dispatch all queued jobs after processing child submissions
+                dispatch_jobs() if @job_queue > 0;
 
             } elsif (exists $builtin_fork_pipes{"$socket"}) {
                 # Builtin fork child completion pipe

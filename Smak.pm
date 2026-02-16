@@ -295,6 +295,7 @@ our $max_retries = 1;  # Maximum retry count for failed jobs
 our $ssh_host = '';  # SSH host for remote workers
 our $remote_cd = '';  # Remote directory for SSH workers
 our $job_server_socket;  # Socket to job-master
+our $in_job_server = 0;  # Set to 1 inside run_job_master
 our $job_server_pid;  # PID of job-master process
 our $job_server_master_port;  # Master port for reconnection
 our $project_root;  # Root directory of project (set by job-master at startup)
@@ -574,6 +575,20 @@ sub is_builtin_command {
     if ($clean_cmd =~ /[|><]/) {
         return 0;
     }
+    # For multi-line commands, check each line — ALL must be builtins
+    my @cmd_lines = split(/\n/, $clean_cmd);
+    if (@cmd_lines > 1) {
+        for my $line (@cmd_lines) {
+            $line =~ s/^\s*[@-]+//;
+            $line =~ s/^\s+|\s+$//g;
+            next unless $line =~ /\S/;
+            my $first = (split(/\s+/, $line))[0] || '';
+            unless ($first =~ /^(rm|mkdir|echo|true|false|cd|:)$/) {
+                return 0;  # Non-builtin line found
+            }
+        }
+        return 1;
+    }
     my @words = split(/\s+/, $clean_cmd);
     my $first_cmd = $words[0] || '';
     if ($first_cmd =~ /^(rm|mkdir|echo|true|false|cd|:)$/) {
@@ -721,7 +736,9 @@ sub execute_builtin {
     # make/smak -C dir [-f makefile] [VAR=val...] [targets...] - recursive make
     elsif ($command eq 'make' || $command eq 'smak' || $command =~ m{/(?:make|smak)(?:\.pl)?$}) {
         # In parallel mode, let the job server dispatch loop handle recursive make
-        return undef if $job_server_socket && !$dry_run_mode;
+        # $in_job_server: inside job server, $job_server_socket is undef but we still
+        # need to defer to the async fork mechanism for parallel recursive makes
+        return undef if ($job_server_socket || $in_job_server) && !$dry_run_mode;
 
         my $full_cmd = "$command " . join(' ', @parts);
         $full_cmd = normalize_cd_make($full_cmd);
@@ -881,12 +898,32 @@ sub try_execute_compound_builtin {
     # Each line is a separate command that should be executed sequentially
     my @lines = split(/\n/, $cmd);
     if (@lines > 1) {
+        # Pre-check: verify ALL lines can be handled before executing any.
+        # Without this, earlier lines (e.g., echo) execute and then a later
+        # non-builtin line (e.g., sleep) causes undef return — the worker
+        # re-executes everything, duplicating the echo output.
+        my @clean_lines;
         for my $line (@lines) {
-            $line =~ s/^\s+|\s+$//g;
-            next unless $line =~ /\S/;
+            my $clean = $line;
+            $clean =~ s/^\s+|\s+$//g;
+            next unless $clean =~ /\S/;
+            push @clean_lines, $clean;
+            # Strip @ and - prefixes, then check first word
+            my $check = $clean;
+            $check =~ s/^[@-]+//;
+            $check =~ s/^\s+//;
+            # Also strip leading ( for compound patterns like (rm -f x || true)
+            $check =~ s/^\(\s*//;
+            my ($first) = split(/\s+/, $check);
+            unless (defined $first && $first =~ /^(rm|mkdir|echo|true|false|cd|:)$/) {
+                return undef;
+            }
+        }
+        # All lines validated - now execute
+        for my $line (@clean_lines) {
             my $exit = try_execute_compound_builtin($line, $silent_mode_flag);
-            return undef unless defined $exit;  # Line wasn't a builtin
-            return $exit if $exit != 0;         # Line failed
+            return undef unless defined $exit;
+            return $exit if $exit != 0;
         }
         return 0;  # All lines succeeded
     }
@@ -972,7 +1009,26 @@ sub try_execute_compound_builtin {
         return 0;
     }
 
-    # Fall back to executing parts individually
+    # Pre-check: verify ALL parts can be handled before executing any.
+    # Same rationale as the multi-line pre-check above: without this,
+    # earlier builtins (echo) execute, then a non-builtin causes undef
+    # return, and the worker re-executes everything including the echo.
+    for my $part (@parts) {
+        my $inner = $part;
+        if ($part =~ /^\s*\((.+?)\s*\|\|\s*true\s*\)\s*$/) {
+            $inner = $1;
+        } elsif ($part =~ /^\s*\((.+)\)\s*$/) {
+            $inner = $1;
+        }
+        $inner =~ s/^[@-]+//;
+        $inner =~ s/^\s+|\s+$//g;
+        my ($first) = split(/\s+/, $inner);
+        unless (defined $first && $first =~ /^(rm|mkdir|echo|true|false|cd|:)$/) {
+            return undef;
+        }
+    }
+
+    # Fall back to executing parts individually (all pre-validated above)
     for my $part (@parts) {
         my $ignore_errors = 0;
         my $inner_cmd = $part;
@@ -5465,9 +5521,14 @@ sub build_target {
             use Cwd 'getcwd';
             my $cwd = getcwd();
             my $use_builtin = is_builtin_command($cmd_line);
+            # Compound recursive make chains (e.g., "smak -C dir1 && smak -C dir2 && true")
+            # must go to the job server for parallel execution, even if they're "builtins"
+            my $compound_recursive = ($use_builtin && $cmd_line =~ /&&/ &&
+                $cmd_line =~ /(?:make|smak)(?:\.pl)?\s.*-C/);
             # Submit to job server if: job server exists AND jobs > 0 AND
-            # (command is not built-in OR target has dependencies that need tracking)
-            if ($job_server_socket && 0 != $jobs && (!$use_builtin || @deps > 0)) {
+            # (command is not built-in OR target has dependencies that need tracking
+            #  OR it's a compound recursive make chain that benefits from parallel forking)
+            if ($job_server_socket && 0 != $jobs && (!$use_builtin || @deps > 0 || $compound_recursive)) {
                 warn "DEBUG[" . __LINE__ . "]:     Using job server ($jobs)\n" if $ENV{SMAK_DEBUG};
                 # Parallel mode - submit to job server (job master will echo the command)
                 submit_job($target, $cmd_line, $cwd);
@@ -9561,6 +9622,11 @@ sub run_job_master {
     # All target paths will be computed relative to this
     $project_root = getcwd();
 
+    # Mark that we're inside the job server — execute_builtin uses this to
+    # return undef for recursive make commands so they fall through to the
+    # async parallel fork mechanism in dispatch_jobs
+    $in_job_server = 1;
+
     # Job-master should ignore SIGINT (Ctrl-C)
     # The CLI process handles cancellation - job-master should keep running
     $SIG{INT} = 'IGNORE';
@@ -9607,7 +9673,7 @@ sub run_job_master {
         LocalAddr => '127.0.0.1',
         LocalPort => 0,  # Let OS assign port
         Proto     => 'tcp',
-        Listen    => 1,
+        Listen    => 64,  # Handle burst of parallel recursive make connections
         Reuse     => 1,
     ) or die "Cannot create master server: $!\n";
 
@@ -9884,7 +9950,8 @@ sub run_job_master {
     our %target_to_child;    # target => child_socket (reverse lookup for completion tracking)
     our %child_exit_codes;   # child_socket => max_exit_code (track failures per child)
     our %child_all_submitted; # child_socket => 1 (set when CHILD_DONE received, all jobs submitted)
-    our %builtin_fork_pipes; # stringified_pipe_fh => { pid, target, pipe_fh } (builtin fork children)
+    our %builtin_fork_pipes; # stringified_pipe_fh => { pid, target, pipe_fh, group? } (builtin fork children)
+    our %builtin_fork_groups; # target => { total, completed, max_exit } (parallel recursive make groups)
     our %completed_targets;  # target => 1 (successfully built targets)
     our %phony_ran_this_session;  # target => 1 (phony targets that ran successfully this session)
     our %failed_targets;  # target => exit_code (failed targets)
@@ -12694,125 +12761,136 @@ sub run_job_master {
 
                         # Check if it's a recursive smak/make call (with -C or -f)
                         if ($cmd_part =~ m{^(?:perl\s+)?(?:(?:\.\.?/|/)?[\w/.-]*(?:smak(?:\.pl)?|make)|\$\{[^\}]*(?:smak|make)[^\}]*\})(?:\s+-\S+)*\s+(?:-C|-f)\s+(\S+)}) {
-                            # Recursive make - fork child to process like a worker
-                            # The child runs the smak command, which connects back via
-                            # CHILD_CONNECT and relays its targets as jobs
-                            my @child_commands;
+                            # Recursive make - collect all remaining recursive make commands
+                            # and fork each one separately for parallel execution
+                            my @recursive_cmds;
                             for my $k ($i .. $#cmd_parts) {
                                 my $c = $cmd_parts[$k];
                                 $c =~ s/^\s+|\s+$//g;
                                 $c =~ s/^[@-]+//;
-                                # Normalize recursive makes in remaining parts too
                                 $c = normalize_cd_make($c);
                                 next if $c eq '' || $c eq 'true' || $c eq ':';
-                                push @child_commands, $c;
+                                push @recursive_cmds, $c;
                             }
 
                             my $exec_dir = $peek_job->{exec_dir} || $peek_job->{dir} || '.';
-                            print STDERR "DEBUG: Recursive make builtin - forking child to process: " .
-                                join(' && ', @child_commands) . " (exec_dir=$exec_dir)\n" if $ENV{SMAK_DEBUG};
+                            my $n_cmds = scalar @recursive_cmds;
+                            print STDERR "DEBUG: Recursive make builtin - forking $n_cmds children: " .
+                                join(' && ', @recursive_cmds) . " (exec_dir=$exec_dir)\n" if $ENV{SMAK_DEBUG};
 
-                            # Create pipe for child to report completion
-                            pipe(my $read_fh, my $write_fh) or do {
-                                warn "Warning: Cannot create pipe for recursive make: $!\n";
-                                $all_expanded = 0;
-                                last;
-                            };
-
-                            my $pid = fork();
-                            if (!defined $pid) {
-                                warn "Warning: Cannot fork for recursive make: $!\n";
-                                close($read_fh);
-                                close($write_fh);
-                                $all_expanded = 0;
-                                last;
+                            # Set up group tracking for parallel execution
+                            if ($n_cmds > 1) {
+                                $builtin_fork_groups{$target} = { total => $n_cmds, completed => 0, max_exit => 0 };
                             }
 
-                            if ($pid == 0) {
-                                # Child process: execute commands like a worker would
-                                close($read_fh);
+                            # Fork each recursive make command separately
+                            my $fork_ok = 1;
+                            for my $child_cmd (@recursive_cmds) {
+                                pipe(my $read_fh, my $write_fh) or do {
+                                    warn "Warning: Cannot create pipe for recursive make: $!\n";
+                                    $fork_ok = 0;
+                                    last;
+                                };
 
-                                # Close inherited server sockets (save port first)
-                                my $ms_port = $master_server ? $master_server->sockport() : undef;
-                                close($master_server) if $master_server;
-                                close($worker_server) if $worker_server;
-                                close($observer_server) if $observer_server;
-
-                                # Ensure SMAK_JOB_SERVER is set so child smak
-                                # processes detect the job-server and use relay mode
-                                $ENV{SMAK_JOB_SERVER} = "127.0.0.1:$ms_port" if $ms_port;
-
-                                # Change to exec_dir
-                                unless (chdir($exec_dir)) {
-                                    warn "Cannot chdir to '$exec_dir': $!\n";
-                                    print $write_fh "EXIT 1\n";
+                                my $pid = fork();
+                                if (!defined $pid) {
+                                    warn "Warning: Cannot fork for recursive make: $!\n";
+                                    close($read_fh);
                                     close($write_fh);
-                                    POSIX::_exit(1);
+                                    $fork_ok = 0;
+                                    last;
                                 }
 
-                                my $child_exit = 0;
-                                for my $child_cmd (@child_commands) {
-                                    last if $child_exit != 0;
+                                if ($pid == 0) {
+                                    # Child process: execute single recursive make command
+                                    close($read_fh);
 
+                                    # Restore SIGINT so Ctrl-C works (job-master sets SIG_IGN)
+                                    $SIG{INT} = 'DEFAULT';
+
+                                    # Close inherited server sockets
+                                    close($master_server) if $master_server;
+                                    close($worker_server) if $worker_server;
+                                    close($observer_server) if $observer_server;
+
+                                    # Do NOT set SMAK_JOB_SERVER — relay mode has
+                                    # target-name collisions when multiple subdirectories
+                                    # run simultaneously (e.g., both have "main.o").
+                                    # Instead, each child runs its own independent build.
+                                    delete $ENV{SMAK_JOB_SERVER};
+                                    delete $ENV{USR_SMAK_OPT};  # Don't inherit parent's -j
+
+                                    # Change to exec_dir
+                                    unless (chdir($exec_dir)) {
+                                        warn "Cannot chdir to '$exec_dir': $!\n";
+                                        print $write_fh "EXIT 1\n";
+                                        close($write_fh);
+                                        POSIX::_exit(1);
+                                    }
+
+                                    my $child_exit = 0;
                                     # Try builtin first (rm, mkdir, echo, etc.)
                                     my $builtin_result = execute_builtin($child_cmd);
                                     if (defined $builtin_result) {
                                         $child_exit = $builtin_result;
-                                        next;
+                                    } else {
+                                        # Fork+exec for external command
+                                        my $cmd_pid = fork();
+                                        if (!defined $cmd_pid) {
+                                            $child_exit = 127;
+                                        } elsif ($cmd_pid == 0) {
+                                            # Grandchild: exec the command
+                                            if ($child_cmd =~ /[|><;`\$&*?\\]/) {
+                                                exec("/bin/sh", "-c", $child_cmd);
+                                            } else {
+                                                my @words;
+                                                my $current = '';
+                                                my ($in_sq, $in_dq) = (0, 0);
+                                                for my $ch (split //, $child_cmd) {
+                                                    if ($ch eq "'" && !$in_dq) { $in_sq = !$in_sq; }
+                                                    elsif ($ch eq '"' && !$in_sq) { $in_dq = !$in_dq; }
+                                                    elsif ($ch =~ /\s/ && !$in_sq && !$in_dq) {
+                                                        push @words, $current if $current ne '';
+                                                        $current = '';
+                                                    } else { $current .= $ch; }
+                                                }
+                                                push @words, $current if $current ne '';
+                                                { no warnings 'exec'; exec { $words[0] } @words; }
+                                            }
+                                            POSIX::_exit(127);
+                                        } else {
+                                            waitpid($cmd_pid, 0);
+                                            if ($? == -1) {
+                                                $child_exit = 127;
+                                            } elsif ($? & 127) {
+                                                $child_exit = 128 + ($? & 127);
+                                            } else {
+                                                $child_exit = $? >> 8;
+                                            }
+                                        }
                                     }
 
-                                    # Fork+exec for external commands
-                                    my $cmd_pid = fork();
-                                    if (!defined $cmd_pid) {
-                                        $child_exit = 127;
-                                        last;
-                                    }
-                                    if ($cmd_pid == 0) {
-                                        # Grandchild: exec the command
-                                        if ($child_cmd =~ /[|><;`\$&*?\\]/) {
-                                            # Shell metacharacters present - need shell
-                                            exec("/bin/sh", "-c", $child_cmd);
-                                        } else {
-                                            # Direct exec - parse into words
-                                            my @words;
-                                            my $current = '';
-                                            my ($in_sq, $in_dq) = (0, 0);
-                                            for my $ch (split //, $child_cmd) {
-                                                if ($ch eq "'" && !$in_dq) { $in_sq = !$in_sq; }
-                                                elsif ($ch eq '"' && !$in_sq) { $in_dq = !$in_dq; }
-                                                elsif ($ch =~ /\s/ && !$in_sq && !$in_dq) {
-                                                    push @words, $current if $current ne '';
-                                                    $current = '';
-                                                } else { $current .= $ch; }
-                                            }
-                                            push @words, $current if $current ne '';
-                                            { no warnings 'exec'; exec { $words[0] } @words; }
-                                        }
-                                        POSIX::_exit(127);
-                                    }
-                                    waitpid($cmd_pid, 0);
-                                    if ($? == -1) {
-                                        $child_exit = 127;
-                                    } elsif ($? & 127) {
-                                        $child_exit = 128 + ($? & 127);
-                                    } else {
-                                        $child_exit = $? >> 8;
-                                    }
+                                    print $write_fh "EXIT $child_exit\n";
+                                    close($write_fh);
+                                    POSIX::_exit($child_exit);
                                 }
 
-                                print $write_fh "EXIT $child_exit\n";
+                                # Parent: track this fork
                                 close($write_fh);
-                                POSIX::_exit($child_exit);
+                                $builtin_fork_pipes{"$read_fh"} = {
+                                    pid => $pid,
+                                    target => $target,
+                                    pipe_fh => $read_fh,
+                                    ($n_cmds > 1 ? (group => $target) : ()),
+                                };
+                                $select->add($read_fh);
                             }
 
-                            # Parent: track the builtin fork child
-                            close($write_fh);
-                            $builtin_fork_pipes{"$read_fh"} = {
-                                pid => $pid,
-                                target => $target,
-                                pipe_fh => $read_fh,
-                            };
-                            $select->add($read_fh);
+                            if (!$fork_ok) {
+                                delete $builtin_fork_groups{$target};
+                                $all_expanded = 0;
+                                last;
+                            }
 
                             # Remove job from queue
                             splice(@job_queue, $job_index, 1);
@@ -12978,7 +13056,11 @@ sub run_job_master {
             vprint "Dispatched task $task_id to worker\n";
 
 	    # Check if command should be echoed (based on @ prefix detection before processing)
+	    # Also detect @ prefix in the raw command (child relay jobs may not set silent flag)
 	    my $silent = $job->{silent} || 0;
+	    if (!$silent && $job->{command} && $job->{command} =~ /^\s*@/) {
+		$silent = 1;
+	    }
 
 	    # In dry-run mode, the worker will send the command as OUTPUT, so don't print it here
 	    if (!$silent_mode && !$silent && !$dry_run_mode) {
@@ -15033,6 +15115,7 @@ sub run_job_master {
                 my $info = delete $builtin_fork_pipes{"$socket"};
                 my $bf_target = $info->{target};
                 my $bf_pid = $info->{pid};
+                my $bf_group = $info->{group};
 
                 # Read exit code from pipe
                 my $line = <$socket>;
@@ -15052,6 +15135,32 @@ sub run_job_master {
                 }
 
                 print STDERR "Builtin fork child for '$bf_target' completed with exit code $bf_exit_code\n" if $ENV{SMAK_DEBUG};
+
+                # If part of a parallel group, track group completion
+                if ($bf_group && exists $builtin_fork_groups{$bf_group}) {
+                    my $grp = $builtin_fork_groups{$bf_group};
+                    $grp->{completed}++;
+                    $grp->{max_exit} = $bf_exit_code if $bf_exit_code > $grp->{max_exit};
+
+                    print STDERR "Builtin fork group '$bf_group': $grp->{completed}/$grp->{total} done (max_exit=$grp->{max_exit})\n" if $ENV{SMAK_DEBUG};
+
+                    # If one failed and not keep_going, request stop
+                    if ($bf_exit_code != 0 && !$keep_going && !$stop_requested) {
+                        $stop_requested = 1;
+                        @job_queue = ();
+                        print STDERR "smak: *** [$bf_target] Error $bf_exit_code\n";
+                    }
+
+                    # Not all done yet - wait for remaining group members
+                    if ($grp->{completed} < $grp->{total}) {
+                        check_and_send_idle("builtin_fork group partial");
+                        next;
+                    }
+
+                    # All done - use aggregate exit code for target completion
+                    $bf_exit_code = $grp->{max_exit};
+                    delete $builtin_fork_groups{$bf_group};
+                }
 
                 if ($bf_exit_code == 0) {
                     # Success - mark target complete

@@ -228,6 +228,8 @@ sub execute_builtin {
         my $text = $1;
         # Don't handle as builtin if shell metacharacters are present
         return undef if $text =~ /[>|<;&`\$]/;
+        # Strip surrounding quotes (like shell would)
+        $text =~ s/^"(.*)"$/$1/s || $text =~ s/^'(.*)'$/$1/s;
         print $socket "OUTPUT $text\n" if $socket;
         return 0;
     }
@@ -391,7 +393,11 @@ sub run_worker {
                     }
 
                     # Not a built-in, execute externally
-                    my ($pid, $cmd_fh, $is_direct) = execute_command_direct($ext_cmd);
+                    # Strip @ (silent) and - (ignore errors) prefixes that make understands
+                    my $run_cmd = $ext_cmd;
+                    $run_cmd =~ s/^[@-]+//;
+                    $run_cmd =~ s/^\s+//;
+                    my ($pid, $cmd_fh, $is_direct) = execute_command_direct($run_cmd);
                     if ($pid) {
                         while (my $out_line = <$cmd_fh>) {
                             chomp $out_line;
@@ -412,7 +418,11 @@ sub run_worker {
                         my $builtin_exit = execute_builtin($builtin_cmd, $socket);
                         if (!defined $builtin_exit) {
                             # Not a built-in, fall back to shell
-                            my $pid = open(my $cmd_fh, '-|', "$builtin_cmd 2>&1");
+                            # Strip @ (silent) and - (ignore errors) prefixes
+                            my $shell_cmd = $builtin_cmd;
+                            $shell_cmd =~ s/^[@-]+//;
+                            $shell_cmd =~ s/^\s+//;
+                            my $pid = open(my $cmd_fh, '-|', "$shell_cmd 2>&1");
                             if ($pid) {
                                 while (my $out_line = <$cmd_fh>) {
                                     chomp $out_line;

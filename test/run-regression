@@ -1069,6 +1069,7 @@ else
         "test_nvc.sh"
         "test_xyce.sh"
         "test_ghdl.sh"
+        "test_projects.sh"
     )
 
     for test in test_*.sh; do
@@ -1247,6 +1248,41 @@ if [ $FULL_MODE -eq 1 ]; then
         fi
     else
         echo -e "run-tests not found:                      ${YELLOW}SKIP${NC}"
+        ((SKIPPED++))
+        ((TOTAL++))
+    fi
+fi
+
+# Run project build tests if in full mode
+if [ $FULL_MODE -eq 1 ]; then
+    echo ""
+    echo "Project Build Tests:"
+    echo "-------------------"
+
+    if [ -x "./test_projects.sh" ]; then
+        if [ $VERBOSE -eq 1 ]; then
+            ./test_projects.sh
+            proj_result=$?
+        else
+            ./test_projects.sh > $LOG_DIR/smak-projects-test.log 2>&1
+            proj_result=$?
+        fi
+
+        if [ $proj_result -eq 0 ]; then
+            echo -e "Project builds:                           ${GREEN}PASS${NC}"
+            ((PASSED++))
+            ((TOTAL++))
+        else
+            echo -e "Project builds:                           ${RED}FAIL${NC}"
+            if [ $VERBOSE -eq 0 ]; then
+                cat $LOG_DIR/smak-projects-test.log
+            fi
+            ((FAILED++))
+            ((TOTAL++))
+            FAILED_TESTS+=("project-builds")
+        fi
+    else
+        echo -e "test_projects.sh not found:               ${YELLOW}SKIP${NC}"
         ((SKIPPED++))
         ((TOTAL++))
     fi

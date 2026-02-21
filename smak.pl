@@ -1156,16 +1156,8 @@ if (!$debug) {
         }
     }
 
-    # Stop or detach job server (must be done before wait_for_jobs)
-    if ($Smak::job_server_idle_timeout > 0 && $Smak::job_server_pid) {
-        # Detach: close socket without sending SHUTDOWN so server stays alive
-        $Smak::detached_server_pid = $Smak::job_server_pid;
-        close($Smak::job_server_socket) if $Smak::job_server_socket;
-        $Smak::job_server_socket = undef;
-        $Smak::job_server_pid = undef;
-    } else {
-        stop_job_server();
-    }
+    # Stop job server - batch mode always shuts down cleanly
+    stop_job_server();
 
     my $sts = wait_for_jobs();
 
@@ -1427,13 +1419,5 @@ interactive_debug();
 
 # Clean up job server if it was started
 if ($Smak::job_server_socket) {
-    if ($Smak::job_server_idle_timeout > 0 && $Smak::job_server_pid) {
-        # Detach: close socket without sending SHUTDOWN so server stays alive
-        $Smak::detached_server_pid = $Smak::job_server_pid;
-        close($Smak::job_server_socket);
-        $Smak::job_server_socket = undef;
-        $Smak::job_server_pid = undef;
-    } else {
-        stop_job_server();
-    }
+    stop_job_server();
 }

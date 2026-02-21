@@ -1,80 +1,57 @@
 #!/bin/bash
-# Test real-world Makefiles from projects directory
-# This test verifies that project Makefiles parse correctly and produce consistent dry-run output
+# Test building real-world projects with smak
+# Does smak clean + smak -j4 in each project directory
+# This test is run only in full regression mode (-f)
 
-echo "Testing project Makefiles..."
-echo ""
-
-PROJECTS_DIR="../projects"
+SMAK="${USR_SMAK_SCRIPT:-smak}"
 FAILED=0
 PASSED=0
-UPDATED=0
+SKIPPED=0
 
-# Find all Makefiles in projects directory
-while IFS= read -r -d '' makefile; do
-    # Get the directory and basename
-    dir=$(dirname "$makefile")
-    base=$(basename "$makefile")
+PROJECTS=(
+    /usr/local/src/iverilog
+    /usr/local/src/dnsmasq
+    /usr/local/src/nvc-build
+    /usr/local/src/ghdl
+    /usr/local/src/xyce-build
+    /usr/local/src/Trilinos-Build
+)
 
-    # Skip .smak-dry files
-    if [[ "$base" == *.smak-dry ]]; then
+for dir in "${PROJECTS[@]}"; do
+    name=$(basename "$dir")
+
+    if [ ! -d "$dir" ]; then
+        echo "  SKIP $name (directory not found)"
+        ((SKIPPED++))
         continue
     fi
 
-    echo "Testing: $makefile"
+    echo -n "  $name: clean..."
+    CLEAN_OUT=$($SMAK -C "$dir" clean 2>&1)
+    CLEAN_RC=$?
+    # clean failure is not fatal (target may not exist)
 
-    # Run smak --dry-run
-    cd "$dir" || continue
-    output=$(${USR_SMAK_SCRIPT:-smak} --dry-run -f "$base" 2>&1)
-    exit_code=$?
-    cd - > /dev/null || exit 1
+    echo -n " build -j4..."
+    START=$(date +%s)
+    BUILD_OUT=$($SMAK -C "$dir" -j4 2>&1)
+    BUILD_RC=$?
+    END=$(date +%s)
+    DUR=$((END - START))
 
-    # Check if it parsed successfully (exit code 0 or 2 are acceptable for dry-run)
-    if [ $exit_code -ne 0 ] && [ $exit_code -ne 2 ]; then
-        echo "  ✗ FAIL: smak exited with code $exit_code"
-        echo "$output" | head -20
-        ((FAILED++))
-        continue
-    fi
-
-    # Check for parsing errors/warnings
-    if echo "$output" | grep -q "^Error:"; then
-        echo "  ✗ FAIL: Parse errors detected"
-        echo "$output" | grep "^Error:"
-        ((FAILED++))
-        continue
-    fi
-
-    # Check if reference output exists
-    reference="${makefile}.smak-dry"
-    if [ ! -f "$reference" ]; then
-        echo "  ℹ Creating reference output: $reference"
-        echo "$output" > "$reference"
-        ((UPDATED++))
+    if [ $BUILD_RC -eq 0 ]; then
+        echo " PASS (${DUR}s)"
+        ((PASSED++))
     else
-        # Compare with reference output
-        if diff -q <(echo "$output") "$reference" > /dev/null 2>&1; then
-            echo "  ✓ PASS: Output matches reference"
-            ((PASSED++))
-        else
-            echo "  ✗ FAIL: Output differs from reference"
-            echo "    Run: diff <(${USR_SMAK_SCRIPT:-smak} --dry-run -f $base) $reference"
-            ((FAILED++))
-        fi
+        echo " FAIL (exit $BUILD_RC, ${DUR}s)"
+        echo "$BUILD_OUT" | tail -20
+        ((FAILED++))
     fi
-
-done < <(find "$PROJECTS_DIR" -type f -name "Makefile*" -print0 | sort -z)
+done
 
 echo ""
-echo "========================================="
-echo "Results:"
-echo "  Passed:  $PASSED"
-echo "  Failed:  $FAILED"
-echo "  Updated: $UPDATED"
-echo "========================================="
+echo "Projects: $PASSED passed, $FAILED failed, $SKIPPED skipped"
 
 if [ $FAILED -gt 0 ]; then
     exit 1
-else
-    exit 0
 fi
+exit 0

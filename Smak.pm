@@ -357,6 +357,9 @@ sub start_job_server {
         # This allows job-master to understand dependencies and parallelize intelligently
         # Note: Don't redirect STDIN/STDOUT/STDERR here - it breaks PTY-based
         # interactive tests. The parent handles stdio cleanup on exit.
+        # Create new process group so SIGHUP from session leader exit doesn't
+        # kill the job-server and its workers (needed for 'detach' to work)
+        setpgrp(0, 0);
         set_process_name('smak-server');
         run_job_master($jobs, $RealBin);
         exit 99;  # Should never reach here
@@ -6480,6 +6483,13 @@ sub unified_cli {
         if ($socket) {
             print $socket "DETACH\n";
             $socket->flush();
+            # Shut down write side so job-server sees clean EOF (not RST)
+            $socket->shutdown(1);  # SHUT_WR
+            # Brief pause for job-server to process DETACH before we close
+            select(undef, undef, undef, 0.1);
+            close($socket);
+            $socket = undef;
+            $Smak::job_server_socket = undef;
         }
         if ($own_server) {
             print "Detaching from CLI (job server $Smak::job_server_pid still running)...\n";
@@ -6853,6 +6863,7 @@ sub cmd_build {
             my $exit_code = 0;
             my $timeout = 300;  # 5 minute timeout
             my $deadline = time() + $timeout;
+            my $read_buf = '';  # sysread line buffer (avoids Perl buffered I/O vs select bug)
 
             while (!$job_done && !$cancelled && time() < $deadline) {
                 # Check for Ctrl-C cancel request
@@ -6862,46 +6873,54 @@ sub cmd_build {
                     $socket->flush();
                     $SmakCli::cancel_requested = 0;
                     $cancelled = 1;
-                    # Drain socket to clear pending messages
-                    while ($select->can_read(0.3)) {
-                        my $drain = <$socket>;
-                        last unless defined $drain;
-                    }
                     last;
                 }
 
-                # Process messages from job server
-                if ($select->can_read(0.1)) {
-                    my $response = <$socket>;
-                    unless (defined $response) {
-                        print "Connection to job server lost\n";
-                        last;
+                # Read from job server using sysread to avoid Perl buffered I/O issue:
+                # select() checks kernel buffer, but <> reads into Perl's buffer;
+                # if <> drains the kernel in one read, subsequent select() won't
+                # report the socket as readable even though lines wait in Perl's buffer.
+                if ($select->can_read(0.1) || length($read_buf)) {
+                    if ($select->can_read(0)) {
+                        my $data;
+                        my $n = sysread($socket, $data, 65536);
+                        unless ($n) {
+                            print "Connection to job server lost\n";
+                            last;
+                        }
+                        $read_buf .= $data;
                     }
-                    chomp $response;
 
-                    if ($response =~ /^OUTPUT (.*)$/) {
-                        print "$1\n";
-                    } elsif ($response =~ /^ERROR (.*)$/) {
-                        print STDERR "ERROR: $1\n";
-                    } elsif ($response =~ /^WARN (.*)$/) {
-                        print STDERR "WARN: $1\n";
-                    } elsif ($response =~ /^JOB_COMPLETE\s+(\S+)\s+(\d+)$/) {
-                        my ($completed_target, $code) = ($1, $2);
-                        # Stop when we get completion for our requested target
-                        # Use flexible matching: exact match, or target at end of path
-                        if ($completed_target eq $target ||
-                            $completed_target =~ /(?:^|\/)$target$/) {
-                            $job_done = 1;
-                            $exit_code = $code;
+                    # Process all complete lines in the buffer
+                    while ($read_buf =~ s/^(.*?)\n//) {
+                        my $response = $1;
+                        $response =~ s/\r$//;
+
+                        if ($response =~ /^OUTPUT (.*)$/) {
+                            print "$1\n";
+                        } elsif ($response =~ /^ERROR (.*)$/) {
+                            print STDERR "ERROR: $1\n";
+                        } elsif ($response =~ /^WARN (.*)$/) {
+                            print STDERR "WARN: $1\n";
+                        } elsif ($response =~ /^JOB_COMPLETE\s+(\S+)\s+(\d+)$/) {
+                            my ($completed_target, $code) = ($1, $2);
+                            # Stop when we get completion for our requested target
+                            # Use flexible matching: exact match, or target at end of path
+                            if ($completed_target eq $target ||
+                                $completed_target =~ /(?:^|\/)$target$/) {
+                                $job_done = 1;
+                                $exit_code = $code;
+                            }
+                        } elsif ($response =~ /^IDLE\s+(\d+)\s+([\d.]+)$/) {
+                            # IDLE means all work is complete
+                            my ($idle_exit, $idle_time) = ($1, $2);
+                            # Only accept IDLE from after we started this build
+                            if ($idle_time >= $build_start_time) {
+                                $job_done = 1;
+                                $exit_code = $idle_exit;
+                            }
                         }
-                    } elsif ($response =~ /^IDLE\s+(\d+)\s+([\d.]+)$/) {
-                        # IDLE means all work is complete
-                        my ($idle_exit, $idle_time) = ($1, $2);
-                        # Only accept IDLE from after we started this build
-                        if ($idle_time >= $build_start_time) {
-                            $job_done = 1;
-                            $exit_code = $idle_exit;
-                        }
+                        last if $job_done;
                     }
                 }
             }
@@ -13161,7 +13180,8 @@ sub run_job_master {
 
         # In non-CLI mode (batch mode), detect if parent process died
         # When parent dies, getppid() returns 1 (init process)
-        if (getppid() == 1 && !defined($master_socket)) {
+        # Skip if explicitly detached (CLI 'detach' command) - server should linger
+        if (getppid() == 1 && !defined($master_socket) && !$explicitly_detached) {
             print STDERR "Parent process died. Job-master cleaning up and exiting.\n";
             # Kill any running workers
             shutdown_workers();

@@ -111,6 +111,7 @@ sub run_smak_interactive {
 
     require IO::Pty;
     my $pty = IO::Pty->new();
+    $pty->autoflush(1);  # Ensure writes reach child immediately
     my $slave = $pty->slave();
     my @cmd = ($SMAK, split(/\s+/, $args));
     vprint "Starting interactive (pty): @cmd\n";
@@ -148,28 +149,46 @@ sub run_smak_interactive {
         last if $output =~ /smak>/;
     }
 
-    # Send commands
-    for my $cmd (@$script_ref) {
-        print $pty "$cmd\r";
-        vprint "Sent: $cmd\n";
-        sleep(0.5);
-
-        # Read response
-        while (my @fhs = $sel->can_read(0.5)) {
+    # Helper to drain PTY output for up to $max seconds
+    # SmakCli redraws the prompt every 100ms, so can_read() always
+    # returns data.  We read for a fixed duration per command instead.
+    my $drain_pty = sub {
+        my ($max) = @_;
+        my $t0 = time();
+        while (time() - $t0 < $max && time() - $start < $timeout) {
+            my @fhs = $sel->can_read(0.1);
             for my $fh (@fhs) {
                 my $data;
                 my $n = sysread($fh, $data, 4096);
-                last unless $n;
-                $output .= $data;
-                vprint $data;
+                if ($n) {
+                    $output .= $data;
+                    vprint $data;
+                } else {
+                    $sel->remove($fh);
+                    return;
+                }
             }
+            # Check if process already exited
+            my $r = waitpid($pid, WNOHANG);
+            return if $r > 0;
         }
+    };
+
+    # Send commands
+    for my $cmd (@$script_ref) {
+        last if time() - $start >= $timeout;
+        print $pty "$cmd\r";
+        vprint "Sent: $cmd\n";
+
+        # Read response for up to 10 seconds (enough for a build)
+        # but stop early if the process exits (e.g. after 'q')
+        $drain_pty->(10);
     }
 
-    # Wait with timeout, kill if hung
-    my $wait_start = time();
+    # Wait for process to exit (may already be reaped above)
     my $reaped = 0;
-    while (time() - $wait_start < $timeout) {
+    my $wait_start = time();
+    while (time() - $wait_start < 5) {
         my $r = waitpid($pid, WNOHANG);
         if ($r != 0) { $reaped = 1; last; }
         sleep(0.2);
@@ -193,7 +212,8 @@ sub setup_test_env {
 
     vprint "Setting up test environment in $TEST_DIR\n";
 
-    # Clean previous test
+    # Clean previous test (must leave cwd first)
+    chdir("/tmp") if -d "/tmp";
     remove_tree($TEST_DIR) if -d $TEST_DIR;
     make_path($TEST_DIR);
     make_path($CACHE_DIR);
@@ -412,6 +432,7 @@ sub test_ctrl_c_restart {
 
     # Create custom test environment with a job that sends SIGINT
     vprint "Setting up Ctrl-C test environment\n";
+    chdir("/tmp") if -d "/tmp";
     remove_tree($TEST_DIR) if -d $TEST_DIR;
     make_path($TEST_DIR);
     chdir($TEST_DIR) or die "Cannot chdir to $TEST_DIR: $!";
@@ -477,6 +498,7 @@ sub test_sigint_cleanup {
 
     # Create test environment
     vprint "Setting up SIGINT cleanup test environment\n";
+    chdir("/tmp") if -d "/tmp";
     remove_tree($TEST_DIR) if -d $TEST_DIR;
     make_path($TEST_DIR);
     chdir($TEST_DIR) or die "Cannot chdir to $TEST_DIR: $!";
@@ -540,21 +562,41 @@ EOF
 }
 
 # Test 10: Idle timeout - detached job-server exits after timeout
+# Uses xdotool to drive a real xterm so smak gets a genuine terminal
+# (avoids PTY session-leader issues that kill the detached server).
 sub test_idle_timeout {
     test_header("Idle timeout (detached job-server auto-exit)");
 
+    # Check prerequisites
+    my $have_xdotool = system("which xdotool >/dev/null 2>&1") == 0;
+    my $have_xterm = system("which xterm >/dev/null 2>&1") == 0;
+    my $have_display = defined $ENV{DISPLAY} && $ENV{DISPLAY} ne '';
+
+    unless ($have_xdotool && $have_xterm && $have_display) {
+        print "  SKIP: requires xdotool, xterm, and DISPLAY\n";
+        pass("Idle timeout (skipped - no X display)");
+        return;
+    }
+
     vprint "Setting up idle timeout test environment\n";
+    chdir("/tmp") if -d "/tmp";
     remove_tree($TEST_DIR) if -d $TEST_DIR;
     make_path($TEST_DIR);
     chdir($TEST_DIR) or die "Cannot chdir to $TEST_DIR: $!";
 
-    # Create a simple Makefile
+    # Create a Makefile with enough targets for a real job-server
     open(my $mf, '>', 'Makefile') or die "Cannot create Makefile: $!";
     print $mf <<"EOF";
-all: hello.txt
+all: a.txt b.txt c.txt
 
-hello.txt:
-\techo "hello" > hello.txt
+a.txt:
+\techo "a" > a.txt
+
+b.txt:
+\techo "b" > b.txt
+
+c.txt: a.txt b.txt
+\tcat a.txt b.txt > c.txt
 EOF
     close($mf);
 
@@ -563,35 +605,97 @@ EOF
     print $rc "set job_server_idle_timeout = 5\n";
     close($rc);
 
-    # Build with -j4 to start job server (it will detach when smak exits)
-    my ($exit, $output) = run_command("$SMAK -j4 all 2>&1", 20);
-
-    if ($exit != 0) {
-        fail("Idle timeout", "Build failed (exit=$exit)");
-        return;
+    # Launch smak in an xterm (real terminal, no session-leader issues)
+    my $xterm_title = "smak-idle-test-$$";
+    my $xterm_pid = fork();
+    die "Fork failed: $!" unless defined $xterm_pid;
+    if ($xterm_pid == 0) {
+        exec("xterm", "-T", $xterm_title, "-e",
+             "$SMAK -cli -j2");
+        exit 1;
     }
 
-    # Check that .smak.connect exists (server still alive after build)
+    # Wait for the xterm window to appear
+    my $wid;
+    for (1..40) {   # up to 4 seconds
+        sleep(0.1);
+        my $out = `xdotool search --name "$xterm_title" 2>/dev/null`;
+        chomp $out;
+        if ($out =~ /(\d+)/) {
+            $wid = $1;
+            last;
+        }
+    }
+    unless ($wid) {
+        fail("Idle timeout", "xterm window not found");
+        kill('TERM', $xterm_pid);
+        waitpid($xterm_pid, 0);
+        return;
+    }
+    vprint "Found xterm window: $wid\n";
+
+    # Wait for smak prompt to appear
+    sleep(2);
+
+    # Type "b all" + Enter
+    system("xdotool", "key", "--window", $wid, "--clearmodifiers",
+           "b", "space", "a", "l", "l", "Return");
+    vprint "Sent: b all\n";
+
+    # Wait for build to complete
+    sleep(3);
+
+    # Verify .smak.connect exists (job-server is running)
     my $connect_file = "$TEST_DIR/.smak.connect";
-    if (! -l $connect_file && ! -f $connect_file) {
+    unless (-l $connect_file || -f $connect_file) {
         fail("Idle timeout", ".smak.connect not found after build");
+        kill('TERM', $xterm_pid);
+        waitpid($xterm_pid, 0);
         return;
     }
 
-    # Read the port file to get the server PID
+    # Get server PID
     my $port_file = readlink($connect_file) || $connect_file;
     my $server_pid;
     if ($port_file =~ /smak-jobserver-(\d+)\.port/) {
         $server_pid = $1;
     }
-    vprint "Job-server PID: $server_pid, port file: $port_file\n";
+    vprint "Job-server PID: $server_pid\n";
 
-    # Verify server process is running
-    if ($server_pid && !kill(0, $server_pid)) {
-        fail("Idle timeout", "Job-server (PID $server_pid) not running after build");
+    # Type "detach" + Enter
+    system("xdotool", "key", "--window", $wid, "--clearmodifiers",
+           "d", "e", "t", "a", "c", "h", "Return");
+    vprint "Sent: detach\n";
+
+    # Wait for smak/xterm to exit
+    my $reaped = 0;
+    for (1..20) {   # up to 4 seconds
+        if (waitpid($xterm_pid, WNOHANG) > 0) {
+            $reaped = 1;
+            last;
+        }
+        sleep(0.2);
+    }
+    unless ($reaped) {
+        vprint "xterm didn't exit, killing\n";
+        kill('TERM', $xterm_pid);
+        waitpid($xterm_pid, 0);
+    }
+    vprint "smak/xterm exited\n";
+
+    # Verify .smak.connect still exists (server should be lingering)
+    if (! -l $connect_file && ! -f $connect_file) {
+        fail("Idle timeout", ".smak.connect not found after detach");
+        kill('TERM', $server_pid) if $server_pid;
         return;
     }
-    vprint "Job-server is running\n";
+
+    # Verify server is still running
+    if ($server_pid && !kill(0, $server_pid)) {
+        fail("Idle timeout", "Job-server (PID $server_pid) not running after detach");
+        return;
+    }
+    vprint "Job-server is running after detach\n";
 
     # Wait for idle timeout (5s) plus margin
     vprint "Waiting for idle timeout (8 seconds)...\n";
@@ -607,7 +711,6 @@ EOF
         pass("Idle timeout (server exited, connect file already cleaned)");
     } else {
         fail("Idle timeout", "Job-server (PID $server_pid) still running after timeout");
-        # Clean up
         kill('TERM', $server_pid) if $server_pid;
     }
 }

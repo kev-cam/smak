@@ -265,7 +265,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track [mtime, size] of all parsed makefiles for cache validation
-our $CACHE_VERSION = 13;  # Increment to invalidate old caches (bumped: always-on caching)
+our $CACHE_VERSION = 14;  # Increment to invalidate old caches (bumped: additive cache format)
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -1138,60 +1138,45 @@ sub execute_command_sequential {
                  ($relay_capture_mode ? " (relay capture mode)" : " (SMAK_NO_BUILTINS)") . "\n" if $ENV{SMAK_DEBUG};
             # Fall through to spawn subprocess
         } else {
-            # Handle all recursive calls in-process
+            # Handle recursive calls by forking disposable children
             use Cwd 'getcwd';
             my $saved_dir = getcwd();
-            my $saved_makefile = $makefile;
+            my $error;
 
             eval {
                 for my $call (@recursive_calls) {
                     my $subtarget = $call->{target};
 
-                    if ($call->{type} eq 'C') {
-                        # -C dir: change to directory and build
-                        my $subdir = $call->{dir};
-                        warn "DEBUG[" . __LINE__ . "]: In-process build: -C dir='$subdir' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
+                    STDOUT->flush();
+                    my $pid = fork();
+                    die "Cannot fork for recursive make: $!\n" unless defined $pid;
 
-                        # Convert subdir to absolute path to avoid issues with relative paths
-                        my $abs_subdir = $subdir;
-                        unless ($abs_subdir =~ m{^/}) {
-                            $abs_subdir = "$saved_dir/$subdir";
-                        }
-
-                        chdir($abs_subdir) or die "Cannot chdir to $abs_subdir: $!\n";
-
-                        my $sub_makefile = "Makefile";
-                        if (-f $sub_makefile) {
+                    if ($pid == 0) {
+                        # Child: disposable process handles sub-makefile
+                        if ($call->{type} eq 'C') {
+                            my $subdir = $call->{dir};
+                            my $abs_subdir = $subdir =~ m{^/} ? $subdir : "$saved_dir/$subdir";
+                            chdir($abs_subdir) or die "Cannot chdir to $abs_subdir: $!\n";
+                            parse_makefile("Makefile");
+                        } elsif ($call->{type} eq 'f') {
+                            my $sub_makefile = $call->{makefile};
+                            die "Makefile '$sub_makefile' not found\n" unless -f $sub_makefile;
+                            parse_makefile($sub_makefile);
                             $makefile = $sub_makefile;
-                            parse_makefile($sub_makefile) unless $parsed_file_mtimes{$sub_makefile};
                         }
-
                         build_target($subtarget);
-                        chdir($saved_dir);
-                        $makefile = $saved_makefile;
-                    } elsif ($call->{type} eq 'f') {
-                        # -f makefile: use different makefile in current directory
-                        my $sub_makefile = $call->{makefile};
-                        warn "DEBUG[" . __LINE__ . "]: In-process build: -f makefile='$sub_makefile' target='$subtarget'\n" if $ENV{SMAK_DEBUG};
+                        exit(0);
+                    }
 
-                        if (-f $sub_makefile) {
-                            $makefile = $sub_makefile;
-                            parse_makefile($sub_makefile) unless $parsed_file_mtimes{$sub_makefile};
-                        } else {
-                            die "Makefile '$sub_makefile' not found\n";
-                        }
-
-                        build_target($subtarget);
-                        $makefile = $saved_makefile;
+                    # Parent: wait for child
+                    waitpid($pid, 0);
+                    if ($? != 0) {
+                        die "Recursive make failed (exit " . ($? >> 8) . ")\n";
                     }
                 }
             };
 
-            my $error = $@;
-
-            # Restore directory and makefile
-            chdir($saved_dir);
-            $makefile = $saved_makefile;
+            $error = $@;
 
             # If there are non-recursive commands after recursive ones, execute them
             if (!$error && @non_recursive_parts > 0) {
@@ -2274,6 +2259,15 @@ sub parse_makefile {
             next;
         }
 
+        # Expand $(VAR) prefix in variable names and target names
+        # (CMake idiom: $(VERBOSE)MAKESILENT = -s → MAKESILENT = -s)
+        # GNU make expands variable references in the LHS of assignments
+        if ($line =~ /^([ ]*)\$\((\w+)\)(.*)$/) {
+            my ($ws, $prefix_var, $rest) = ($1, $2, $3);
+            my $prefix_val = $MV{$prefix_var} // '';
+            $line = "$ws$prefix_val$rest";
+        }
+
         # Variable assignment (may have leading spaces inside conditionals,
         # but NOT tab-prefixed which would be a recipe line)
         if ($line =~ /^[ ]*([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
@@ -2897,6 +2891,14 @@ sub parse_included_makefile {
             next;
         }
 
+        # Expand $(VAR) prefix in variable names and target names
+        # (CMake idiom: $(VERBOSE)MAKESILENT = -s → MAKESILENT = -s)
+        if ($line =~ /^([ ]*)\$\((\w+)\)(.*)$/) {
+            my ($ws, $prefix_var, $rest) = ($1, $2, $3);
+            my $prefix_val = $MV{$prefix_var} // '';
+            $line = "$ws$prefix_val$rest";
+        }
+
         # Variable assignment (may have leading spaces inside conditionals,
         # but NOT tab-prefixed which would be a recipe line)
         if ($line =~ /^[ ]*([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
@@ -3327,8 +3329,11 @@ sub get_cache_file {
         };
     }
 
-    # Use makefile basename for cache file (simple approach)
-    my $cache_file = "$dir/state.cache";
+    # Use makefile path as cache key (encode slashes to allow per-makefile caches)
+    use Cwd 'abs_path';
+    my $abs = abs_path($makefile_path) || $makefile_path;
+    (my $key = $abs) =~ s/[\/]/_/g;
+    my $cache_file = "$dir/$key.cache";
     return $cache_file;
 }
 
@@ -3411,6 +3416,9 @@ sub save_state_cache {
         print $fh "    " . _quote_string($pattern) . " => " . $inactive_patterns{$pattern} . ",\n";
     }
     print $fh ");\n\n";
+
+    # Ensure do() returns a true value
+    print $fh "1;\n";
 
     close($fh);
     warn "DEBUG: State saved successfully\n" if $ENV{SMAK_DEBUG};
@@ -4481,7 +4489,9 @@ sub build_target {
     use Cwd 'getcwd';
     my $cwd_for_visit = getcwd();
     my $visit_key = "$cwd_for_visit\t$makefile\t$target";
-    return if $visited->{$visit_key};
+    if ($visited->{$visit_key}) {
+        return;
+    }
     $visited->{$visit_key} = 1;
 
     # Early exit for files in ignored directories (e.g., /usr/include, /usr/local/include)
@@ -5416,73 +5426,51 @@ sub build_target {
                         }
                     }
 
-                    # Save current makefile state
-                    my $saved_makefile = $makefile;
-
-                    # Save and set command-line variable assignments
-                    my %saved_vars;
-                    if ($sub_vars_ref && %$sub_vars_ref) {
-                        for my $var (keys %$sub_vars_ref) {
-                            $saved_vars{$var} = $MV{$var};
-                            $MV{$var} = $sub_vars_ref->{$var};
-                            warn "DEBUG[" . __LINE__ . "]: Set variable $var='$sub_vars_ref->{$var}'\n" if $ENV{SMAK_DEBUG};
-                        }
-                    }
-
                     # Determine the makefile name (use default if not specified)
                     $sub_makefile = 'Makefile' unless $sub_makefile;
 
-                    # Switch to sub-makefile
-                    $makefile = $sub_makefile;
-
-                    # Parse the sub-makefile if not already parsed
-                    my $test_key = "$makefile\t" . ($sub_targets[0] || 'all');
-                    unless (exists $fixed_deps{$test_key} || exists $pattern_deps{$test_key} || exists $pseudo_deps{$test_key}) {
-                        eval {
-                            parse_makefile($makefile);
-                        };
-                        if ($@) {
-                            warn "Warning: Could not parse sub-makefile '$makefile': $@\n";
-                            # Restore state and fall back to executing as external command
-                            $makefile = $saved_makefile;
-                            # Fall through to normal command execution
-                            goto EXECUTE_EXTERNAL_COMMAND;
-                        }
-                    }
-
-                    # Build sub-targets internally
-                    # Before recursing into sub-targets, build the parent's dependencies
-                    if (@deps && $job_server_socket) {
-                        warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " parent deps before -f recursive make\n" if $ENV{SMAK_DEBUG};
-                        for my $dep (@deps) {
-                            warn "DEBUG[" . __LINE__ . "]:     Building parent dep: $dep\n" if $ENV{SMAK_DEBUG};
-                            build_target($dep, $visited, $depth + 1);
-                        }
-                    }
                     unless ($silent_mode || $silent) {
                         print "$display_cmd\n";
                     }
-                    if (@sub_targets) {
-                        for my $sub_target (@sub_targets) {
-                            build_target($sub_target, $visited, $depth + 1);
-                        }
-                    } else {
-                        # No targets specified, build first target
-                        my $first_target = get_first_target($makefile);
-                        build_target($first_target, $visited, $depth + 1) if $first_target;
-                    }
 
-                    # Restore variable assignments
-                    for my $var (keys %saved_vars) {
-                        if (defined $saved_vars{$var}) {
-                            $MV{$var} = $saved_vars{$var};
+                    # Fork a child to handle the sub-makefile.
+                    # The child parses, builds, and exits — no save/restore needed.
+                    STDOUT->flush();
+                    my $pid = fork();
+                    if (!defined $pid) {
+                        warn "Cannot fork for sub-makefile '$sub_makefile': $!\n";
+                        goto EXECUTE_EXTERNAL_COMMAND;
+                    }
+                    if ($pid == 0) {
+                        # Child: disposable process for sub-makefile
+                        $makefile = $sub_makefile;
+                        eval { parse_makefile($makefile); };
+                        if ($@) {
+                            warn "Warning: Could not parse sub-makefile '$makefile': $@\n";
+                            exit(2);
+                        }
+                        # Apply command-line variable overrides
+                        if ($sub_vars_ref && %$sub_vars_ref) {
+                            for my $var (keys %$sub_vars_ref) {
+                                $MV{$var} = $sub_vars_ref->{$var};
+                            }
+                        }
+                        if (@sub_targets) {
+                            for my $sub_target (@sub_targets) {
+                                build_target($sub_target, {}, 0);
+                            }
                         } else {
-                            delete $MV{$var};
+                            my $first_target = get_first_target($makefile);
+                            build_target($first_target, {}, 0) if $first_target;
                         }
+                        exit(0);
                     }
-
-                    # Restore makefile state
-                    $makefile = $saved_makefile;
+                    # Parent: wait for child to finish
+                    waitpid($pid, 0);
+                    if ($? != 0 && !$dry_run_mode) {
+                        my $exit_code = $? >> 8;
+                        die "smak: *** Sub-makefile '$sub_makefile' failed (exit $exit_code)\n";
+                    }
                     next;
                 } else {
                     # No -f or -C options, build targets in current makefile

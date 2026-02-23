@@ -5415,6 +5415,13 @@ sub build_target {
                 }
 
                 if ($sub_makefile) {
+                    # In parallel mode, let the job server handle -f recursive
+                    # makes via builtin fork + child relay for parallelism.
+                    # Fork-and-wait is only used in sequential mode (no job server).
+                    if ($job_server_socket && !$dry_run_mode) {
+                        goto EXECUTE_EXTERNAL_COMMAND;
+                    }
+
                     # Check if any variable values contain backticks that need shell evaluation
                     # If so, fall back to external execution so the shell can handle them
                     if ($sub_vars_ref && %$sub_vars_ref) {
@@ -5443,6 +5450,9 @@ sub build_target {
                     }
                     if ($pid == 0) {
                         # Child: disposable process for sub-makefile
+                        # Don't use parent's job server socket — parent is
+                        # blocked in waitpid and can't read completions
+                        $job_server_socket = undef;
                         $makefile = $sub_makefile;
                         eval { parse_makefile($makefile); };
                         if ($@) {
@@ -12820,11 +12830,11 @@ sub run_job_master {
                                     close($worker_server) if $worker_server;
                                     close($observer_server) if $observer_server;
 
-                                    # Do NOT set SMAK_JOB_SERVER — relay mode has
-                                    # target-name collisions when multiple subdirectories
-                                    # run simultaneously (e.g., both have "main.o").
-                                    # Instead, each child runs its own independent build.
-                                    delete $ENV{SMAK_JOB_SERVER};
+                                    # Set SMAK_JOB_SERVER so the child smak connects
+                                    # back as a child relay for parallel dispatch.
+                                    if (exists $worker_env{SMAK_JOB_SERVER}) {
+                                        $ENV{SMAK_JOB_SERVER} = $worker_env{SMAK_JOB_SERVER};
+                                    }
                                     delete $ENV{USR_SMAK_OPT};  # Don't inherit parent's -j
 
                                     # Change to exec_dir

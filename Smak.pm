@@ -6169,10 +6169,14 @@ sub run_test_mode {
     my ($target1, $target2, $makefile_path) = @_;
 
     use FindBin qw($RealBin);
+    use File::Basename qw(dirname basename);
     my $smak = "$RealBin/smak";
     my $mf = quotemeta($makefile_path);
     my $t1 = quotemeta($target1);
     my $t2 = quotemeta($target2);
+    # Derive working directory from makefile path so relative paths work
+    my $mf_dir = dirname($makefile_path);
+    my $cd = ($mf_dir ne '.' && $mf_dir ne '') ? "-C " . quotemeta($mf_dir) : '';
     my $pass_count = 0;
     my $fail_count = 0;
     my $step = 0;
@@ -6216,7 +6220,10 @@ sub run_test_mode {
             delete $ENV{MAKEFLAGS};
             delete $ENV{MAKELEVEL};
             open(STDERR, '>&', STDOUT);
-            exec('make', '-q', '-f', $makefile_path, $target2);
+            my @make_args = ('make', '-q');
+            push @make_args, '-C', $mf_dir if $mf_dir ne '.' && $mf_dir ne '';
+            push @make_args, '-f', $makefile_path, $target2;
+            exec(@make_args);
             die "exec make failed: $!";
         }
         my $output;
@@ -6224,7 +6231,7 @@ sub run_test_mode {
         close($fh);
         my $rc = $? >> 8;
 
-        print "  \$ make -q -f $makefile_path $target2\n";
+        print "  \$ make -q -C $mf_dir -f $makefile_path $target2\n";
         if ($rc == 0) {
             print "  ok (make confirms up-to-date)\n\n";
             $pass_count++;
@@ -6242,7 +6249,10 @@ sub run_test_mode {
                     delete $ENV{MAKEFLAGS};
                     delete $ENV{MAKELEVEL};
                     open(STDERR, '>&', STDOUT);
-                    exec('make', '-n', '-f', $makefile_path, $target2);
+                    my @make_args = ('make', '-n');
+                    push @make_args, '-C', $mf_dir if $mf_dir ne '.' && $mf_dir ne '';
+                    push @make_args, '-f', $makefile_path, $target2;
+                    exec(@make_args);
                     die "exec make failed: $!";
                 }
                 if (defined $pid2) {
@@ -6286,28 +6296,28 @@ sub run_test_mode {
     # Phase 1: -check (dry-run comparison)
     print "=== Phase 1: -check ===\n\n";
     $clear_cache->();
-    $run->("smak $target1 (setup)", "$smak -f $mf $t1 2>&1") or goto DONE;
-    $run->("-check", "$smak -f $mf -check 2>&1") or goto DONE;
+    $run->("smak $target1 (setup)", "$smak $cd -f $mf $t1 2>&1") or goto DONE;
+    $run->("-check", "$smak $cd -f $mf -check 2>&1") or goto DONE;
 
     # Phase 2: sequential build + verify
     print "=== Phase 2: sequential build ===\n\n";
     $clear_cache->();
-    $run->("smak $target1 (clean)", "$smak -f $mf $t1 2>&1") or goto DONE;
-    $run->("smak $target2 (sequential)", "$smak -f $mf $t2 2>&1") or goto DONE;
+    $run->("smak $target1 (clean)", "$smak $cd -f $mf $t1 2>&1") or goto DONE;
+    $run->("smak $target2 (sequential)", "$smak $cd -f $mf $t2 2>&1") or goto DONE;
     $verify_up_to_date->("verify make $target2 is up-to-date") or goto DONE;
 
     # Phase 3: -j1 build + verify
     print "=== Phase 3: -j1 build ===\n\n";
     $clear_cache->();
-    $run->("smak $target1 (clean)", "$smak -f $mf $t1 2>&1") or goto DONE;
-    $run->("smak -j1 $target2", "$smak -f $mf -j1 $t2 2>&1") or goto DONE;
+    $run->("smak $target1 (clean)", "$smak $cd -f $mf $t1 2>&1") or goto DONE;
+    $run->("smak -j1 $target2", "$smak $cd -f $mf -j1 $t2 2>&1") or goto DONE;
     $verify_up_to_date->("verify make $target2 is up-to-date (-j1)") or goto DONE;
 
     # Phase 4: -j3 build + verify
     print "=== Phase 4: -j3 build ===\n\n";
     $clear_cache->();
-    $run->("smak $target1 (clean)", "$smak -f $mf $t1 2>&1") or goto DONE;
-    $run->("smak -j3 $target2", "$smak -f $mf -j3 $t2 2>&1") or goto DONE;
+    $run->("smak $target1 (clean)", "$smak $cd -f $mf $t1 2>&1") or goto DONE;
+    $run->("smak -j3 $target2", "$smak $cd -f $mf -j3 $t2 2>&1") or goto DONE;
     $verify_up_to_date->("verify make $target2 is up-to-date (-j3)") or goto DONE;
 
     DONE:
@@ -6363,6 +6373,7 @@ sub normalize_check_output {
         # Skip make error/warning messages (from -k keep-going mode)
         next if $line =~ /^make(?:\[\d+\])?: \*\*\*/;
         next if $line =~ /^make(?:\[\d+\])?: Target '.*' not remade/;
+        next if $line =~ /^make(?:\[\d+\])?: Failed to remake makefile/;
 
         # Skip automake config header boilerplate (test -f config.h || ...)
         next if $line =~ /^\s*test\s+-f\s+\S+\.h\s+\|\|/;

@@ -187,7 +187,7 @@ sub execute_builtin {
         return 0;
     }
 
-    if ($clean_cmd =~ /^mv\s+(\S+)\s+(\S+)\s*$/) {
+    if ($clean_cmd =~ /^mv\s+(?:-\w+\s+)*(\S+)\s+(\S+)\s*$/) {
         my ($src, $dst) = ($1, $2);
         if (!move($src, $dst)) {
             print $socket "OUTPUT mv: cannot move '$src' to '$dst': $!\n" if $socket;
@@ -374,9 +374,7 @@ sub run_worker {
 
             if ($is_dry_run) {
                 # DRY-RUN MODE: Print command
-                my $display_cmd = $command;
-                $display_cmd =~ s/\bBUILTIN_MV\b/mv/g;
-                print $socket "OUTPUT $display_cmd\n";
+                print $socket "OUTPUT $command\n";
                 $socket->flush();
             } else {
                 # REGULAR MODE: Execute commands using direct exec where possible

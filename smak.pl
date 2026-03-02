@@ -40,6 +40,7 @@ my $remote_cd = '';  # Remote directory for SSH workers
 my $norc = 0;  # Skip reading .smak.rc files
 my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j)
 my $check = '';  # Check mode - validate smak -n matches make -n ('' = off, '1' = on, 'quiet' = quiet)
+my $test = '';   # Test mode - full regression: -test=clean,all (target1=clean, target2=build)
 my $keep_going = 0;  # Keep going after failures (like make -k)
 my $test_worker = 0;  # Test worker protocol mode
 
@@ -244,6 +245,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'norc' => \$norc,
         'retries=i' => \$retries,
         'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
+        'test=s' => \$test,
         'no-builtins' => sub { $Smak::no_builtins = 1; },
     );
     # Restore and append remaining command line args
@@ -272,6 +274,7 @@ GetOptions(
     'scanner=s' => \$scanner_paths,
     'retries=i' => \$retries,
     'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
+    'test=s' => \$test,
     'no-builtins' => sub { $Smak::no_builtins = 1; },
     'test-worker' => \$test_worker,
 ) or die "Error in command line arguments\n";
@@ -795,6 +798,9 @@ sub execute_script_file {
 # Set dry-run mode if requested
 if ($dry_run) {
     set_dry_run_mode(1);
+    # Dry-run implies --no-builtins: no need to optimize command execution
+    # when we're just printing commands (also keeps output closer to make -n)
+    $Smak::no_builtins = 1;
     # Dry-run implies -j1: use job server with dry-worker
     # This ensures dry-run exercises the same code path as parallel builds
     # But only if -j wasn't explicitly specified (-j0 forces sequential)
@@ -918,6 +924,8 @@ if ($ENV{SMAK_JOB_SERVER}) {
         open(STDOUT, '>&', $save_stdout);
 
         # Submit each captured target with a command to the parent job-server
+        # Track multi-output sibling groups so we only submit once per group
+        my %submitted_sibling_group;
         my $job_count = 0;
         for my $target (keys %{$Smak::capture_targets}) {
             my $info = $Smak::capture_targets->{$target};
@@ -925,8 +933,18 @@ if ($ENV{SMAK_JOB_SERVER}) {
             next unless $rule =~ /\S/;  # Skip no-command targets
             my $exec_dir = $info->{exec_dir} || $cwd;
 
+            # Check for multi-output siblings - only submit once per group
+            my @siblings = @{$info->{siblings} || []};
+            if (@siblings > 1) {
+                my $group_key = join('&', sort @siblings);
+                if ($submitted_sibling_group{$group_key}++) {
+                    warn "Child smak skipping sibling: $target (already submitted via group $group_key)\n" if $ENV{SMAK_DEBUG};
+                    next;
+                }
+            }
+
             my @deps = @{$info->{deps} || []};
-            warn "Child smak submitting: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ")\n" if $ENV{SMAK_DEBUG};
+            warn "Child smak submitting: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ", siblings=" . scalar(@siblings) . ")\n" if $ENV{SMAK_DEBUG};
             # Use line-count protocol for multi-line commands
             my @cmd_lines = grep { /\S/ } split(/\n/, $rule);
             print $sock "SUBMIT_JOB\n";
@@ -935,6 +953,12 @@ if ($ENV{SMAK_JOB_SERVER}) {
             print $sock "DEPS " . scalar(@deps) . "\n";
             for my $dep (@deps) {
                 print $sock "$dep\n";
+            }
+            # Send siblings (other targets produced by this same command)
+            my @other_siblings = grep { $_ ne $target } @siblings;
+            print $sock "SIBLINGS " . scalar(@other_siblings) . "\n";
+            for my $sib (@other_siblings) {
+                print $sock "$sib\n";
             }
             print $sock "COMMAND_LINES " . scalar(@cmd_lines) . "\n";
             for my $cmd_line (@cmd_lines) {
@@ -981,6 +1005,18 @@ if ($check) {
     # Exit codes: 0 = match, 1 = mismatch, 2 = error
     my $check_exit_code = ($match == 1 ? 0 : ($match == 0 ? 1 : 2));
     exit($check_exit_code);
+}
+
+# -test mode: full regression test
+# -test=<target1>,<target2>  (e.g., -test=clean,all)
+# Steps: check, then sequential build, then -j1, then -j3
+if ($test) {
+    my ($target1, $target2) = split(/,/, $test, 2);
+    unless (defined $target1 && defined $target2 && $target1 ne '' && $target2 ne '') {
+        die "smak: *** -test requires two comma-separated targets (e.g., -test=clean,all). Stop.\n";
+    }
+    my $exit = Smak::run_test_mode($target1, $target2, $makefile);
+    exit($exit);
 }
 
 # Start job server if parallel builds are requested

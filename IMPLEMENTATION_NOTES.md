@@ -56,6 +56,15 @@ When `make -n` encounters a recursive make call, it passes `-n` through MAKEFLAG
 - `smak` (sequential) should behave the same as `make`
 - `smak -j1` should behave the same as `make`
 
+## Built-in commands
+Simple file operations are handled by smak itself to avoid invoking shells and to capture file-system changes (--no-builtins to disable)
+
+mv
+rm
+cd
+echo (?)
+touch
+
 ## Recent Fixes
 
 ### 2026-01-21: Compound Command Handling

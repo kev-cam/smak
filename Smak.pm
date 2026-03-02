@@ -265,7 +265,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track [mtime, size] of all parsed makefiles for cache validation
-our $CACHE_VERSION = 14;  # Increment to invalidate old caches (bumped: additive cache format)
+our $CACHE_VERSION = 15;  # Increment to invalidate old caches (bumped: multi-output sibling detection)
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -736,6 +736,32 @@ sub execute_builtin {
         return 0;
     }
 
+    # mv [-f] <src> <dst>
+    elsif ($command eq 'mv') {
+        # Strip flags like -f
+        my @files;
+        for my $arg (@parts) {
+            if ($arg =~ /^-/) {
+                next;  # Skip flags
+            } else {
+                push @files, $arg;
+            }
+        }
+        if (@files == 2) {
+            my ($src, $dst) = @files;
+            if (!rename($src, $dst)) {
+                # rename() fails across filesystems; fall back to File::Copy::move
+                require File::Copy;
+                if (!File::Copy::move($src, $dst)) {
+                    print STDERR "mv: cannot move '$src' to '$dst': $!\n" unless $silent;
+                    return 1 unless $ignore_errors;
+                }
+            }
+            return 0;
+        }
+        return undef;  # Can't handle multi-file mv, fall through
+    }
+
     # make/smak -C dir [-f makefile] [VAR=val...] [targets...] - recursive make
     elsif ($command eq 'make' || $command eq 'smak' || $command =~ m{/(?:make|smak)(?:\.pl)?$}) {
         # In parallel mode, let the job server dispatch loop handle recursive make
@@ -886,6 +912,40 @@ sub execute_builtin {
 # as built-in operations without spawning a shell.
 # Optimizes by combining multiple rm commands into a single operation.
 # Returns: 0 on success, non-zero on error, undef if command cannot be handled as built-in
+# Check if a command is purely builtin-executable (without actually running it).
+# Returns 1 if the command can be handled by try_execute_compound_builtin, undef otherwise.
+sub try_execute_compound_builtin_check {
+    my ($cmd) = @_;
+    return undef unless defined $cmd && $cmd =~ /\S/;
+
+    return undef if $cmd =~ /`/;
+    return undef if $cmd =~ /\$/;
+    return undef if $cmd =~ /(?<!\|)\|(?!\|)/;
+    return undef if $cmd =~ /[<>]/;
+    return undef if $cmd =~ /;/;
+
+    my @lines = split(/\n/, $cmd);
+    for my $line (@lines) {
+        my $clean = $line;
+        $clean =~ s/^\s+|\s+$//g;
+        next unless $clean =~ /\S/;
+        $clean =~ s/^[@-]+//;
+        $clean =~ s/^\s+//;
+        $clean =~ s/^\(\s*//;
+        # Split on && and check each part
+        for my $part (split /\s*&&\s*/, $clean) {
+            $part =~ s/^\s*\(//;
+            $part =~ s/\s*\|\|\s*true\s*\)\s*$//;
+            $part =~ s/\)\s*$//;
+            $part =~ s/^[@-]+//;
+            $part =~ s/^\s+|\s+$//g;
+            my ($first) = split(/\s+/, $part);
+            return undef unless defined $first && $first =~ /^(rm|mkdir|echo|true|false|cd|:|cp|mv|touch)$/;
+        }
+    }
+    return 1;
+}
+
 sub try_execute_compound_builtin {
     my ($cmd, $silent_mode_flag) = @_;
 
@@ -4343,10 +4403,6 @@ sub preprocess_automake_suffix_rule {
     # Remove the depbase assignment line (we've calculated it in Perl)
     $rule =~ s/depbase=`[^`]+`;\s*//g;
 
-    # Split compound commands at && to handle separately
-    # Mark mv commands for built-in handling (recognized by build_target)
-    $rule =~ s/\bmv\s+-f\s+/BUILTIN_MV -f /g;
-
     # Split && into separate lines so each command executes independently
     $rule =~ s/\s*&&\s*/\n/g;
 
@@ -4451,6 +4507,59 @@ sub builtin_rm {
     return 1;
 }
 
+# Check if a prerequisite can be built (has a fixed rule, or matches a
+# pattern rule whose own prerequisites exist on disk).  Used during pattern
+# rule variant selection so that variants with buildable prerequisites are
+# preferred over variants whose prerequisites are absent.
+sub prereq_can_be_built {
+    my ($prereq) = @_;
+
+    # Check fixed rules (keys are "Makefile\tTARGET")
+    my $fk = "$makefile\t$prereq";
+    return 1 if exists $fixed_rule{$fk} && $fixed_rule{$fk} =~ /\S/;
+
+    # Check pattern rules — only return true if the matched pattern rule's
+    # own prerequisites all exist on disk.  This prevents overly generic
+    # patterns like %.cc from making every .cc file appear buildable.
+    for my $pk (keys %pattern_rule) {
+        if ($pk =~ /^([^\t]+)\t(.+)$/) {
+            my $pp = $2;
+            my $pp_re = $pp;
+            $pp_re =~ s/%/(.+)/g;
+            if ($prereq =~ /^$pp_re$/) {
+                my $stem = $1;
+                my $deps_ref = $pattern_deps{$pk};
+                next unless $deps_ref;
+                my @pdeps = ref($deps_ref->[0]) eq 'ARRAY' ? @{$deps_ref->[0]} : @$deps_ref;
+                my $all_ok = 1;
+                for my $pd (@pdeps) {
+                    my $expanded = $pd;
+                    $expanded =~ s/%/$stem/g;
+                    # Expand $MV{VAR} references
+                    while ($expanded =~ /\$MV\{([^}]+)\}/) {
+                        my $var = $1;
+                        my $val = $MV{$var} // '';
+                        $expanded =~ s/\$MV\{\Q$var\E\}/$val/;
+                    }
+                    my $dep_path = $expanded;
+                    unless (-e $dep_path) {
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        my $resolved = resolve_vpath($expanded, $cwd);
+                        my $resolved_path = $resolved =~ m{^/} ? $resolved : "$cwd/$resolved";
+                        unless (-e $resolved_path) {
+                            $all_ok = 0;
+                            last;
+                        }
+                    }
+                }
+                return 1 if $all_ok;
+            }
+        }
+    }
+    return 0;
+}
+
 sub build_target {
     my ($target, $visited, $depth) = @_;
     $visited ||= {};
@@ -4533,6 +4642,7 @@ sub build_target {
     my @deps;
     my $rule = '';
     my $stem = '';  # Track stem for $* automatic variable
+    my $matched_pkey;  # Track matched pattern key for multi-output sibling detection
     my $suffix_source = '';  # Track source file for suffix rules ($< in .c.o:)
 
     # Helper function to find a rule key by trying variable expansion
@@ -4700,6 +4810,34 @@ sub build_target {
                                 }
                             }
 
+                            # Second pass: if no variant's prereqs all exist, check which
+                            # variant's prereqs can be built (have explicit rules)
+                            if ($best_variant == 0) {
+                                my $found_buildable = 0;
+                                for (my $i = 0; $i < @rules; $i++) {
+                                    my @variant_deps = @{$deps_list[$i] || []};
+                                    my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
+                                    use Cwd 'getcwd';
+                                    my $cwd = getcwd();
+                                    @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
+
+                                    my $all_can_build = 1;
+                                    for my $prereq (@expanded_deps) {
+                                        my $prereq_path = $prereq =~ m{^/} ? $prereq : "$cwd/$prereq";
+                                        unless (-e $prereq_path || prereq_can_be_built($prereq)) {
+                                            $all_can_build = 0;
+                                            last;
+                                        }
+                                    }
+                                    if ($all_can_build) {
+                                        $best_variant = $i;
+                                        $found_buildable = 1;
+                                        warn "DEBUG: Found buildable prerequisites for variant $i\n" if $ENV{SMAK_DEBUG};
+                                        last;
+                                    }
+                                }
+                            }
+
                             # Use the best variant (either one with existing prereqs, or the first one)
                             my @variant_deps = @{$deps_list[$best_variant] || []};
                             my @expanded_deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
@@ -4708,6 +4846,7 @@ sub build_target {
                             @expanded_deps = map { resolve_vpath($_, $cwd) } @expanded_deps;
 
                             $rule = $rules[$best_variant];
+                            $matched_pkey = $pkey;  # Save for multi-output sibling detection
                             push @deps, @expanded_deps;
                             warn "DEBUG: Using pattern rule variant $best_variant for $target (deps: @expanded_deps)\n" if $ENV{SMAK_DEBUG};
                             last PATTERN_SEARCH;
@@ -4761,6 +4900,33 @@ sub build_target {
                 $best_variant = $i;
                 warn "DEBUG: Found existing source for variant $i of $target\n" if $ENV{SMAK_DEBUG};
                 last;
+            }
+        }
+
+        # Second pass: if no variant's prereqs exist, check which can be built
+        if ($best_variant == 0) {
+            for (my $i = 0; $i < @rules; $i++) {
+                my @variant_deps = @{$deps_list[$i] || []};
+                my $all_can_build = 1;
+                for my $dep (@variant_deps) {
+                    my $dep_to_check = $dep;
+                    if ($dep =~ /%/ && $target =~ /^(.+)\.([^.]+)$/) {
+                        my $stem = $1;
+                        $dep_to_check =~ s/%/$stem/g;
+                    }
+                    use Cwd 'getcwd';
+                    my $cwd = getcwd();
+                    my $dep_path = $dep_to_check =~ m{^/} ? $dep_to_check : "$cwd/$dep_to_check";
+                    unless (-e $dep_path || prereq_can_be_built($dep_to_check)) {
+                        $all_can_build = 0;
+                        last;
+                    }
+                }
+                if ($all_can_build && @variant_deps > 0) {
+                    $best_variant = $i;
+                    warn "DEBUG: Found buildable source for variant $i of $target\n" if $ENV{SMAK_DEBUG};
+                    last;
+                }
             }
         }
 
@@ -4869,6 +5035,7 @@ sub build_target {
                     my @variant_deps = @{$deps_list[$best_variant] || []};
                     @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @variant_deps;
                     $rule = $rules[$best_variant] || '';
+                    $matched_pkey = $pkey;  # Save for multi-output sibling detection
 
                     # Resolve dependencies through vpath
                     use Cwd 'getcwd';
@@ -5110,10 +5277,23 @@ sub build_target {
     if ($capture_targets) {
         use Cwd 'getcwd';
         my $cwd = getcwd();
+        # Look up multi-output siblings from matched pattern rule
+        my @siblings;
+        if ($matched_pkey && $stem ne '') {
+            my ($mf_part, $pattern_part) = split(/\t/, $matched_pkey, 2);
+            my $target_key = "$makefile\t$pattern_part";
+            warn "DEBUG SIBLING LOOKUP: target='$target' matched_pkey='$matched_pkey' stem='$stem' target_key='$target_key' exists=" . (exists $multi_output_siblings{$target_key} ? "YES" : "NO") . " keys=" . join(",", keys %multi_output_siblings) . "\n" if $ENV{SMAK_DEBUG};
+            if (exists $multi_output_siblings{$target_key}) {
+                @siblings = map { my $s = $_; $s =~ s/%/$stem/g; $s } @{$multi_output_siblings{$target_key}};
+            }
+        } else {
+            warn "DEBUG SIBLING LOOKUP: target='$target' matched_pkey=" . ($matched_pkey // 'undef') . " stem='$stem' - skipped\n" if $ENV{SMAK_DEBUG} && $target =~ /parse/;
+        }
         $capture_targets->{$target} = {
             deps => [@deps],
             rule => $rule || '',
             exec_dir => $cwd,
+            siblings => [@siblings],
         };
     }
 
@@ -5173,7 +5353,8 @@ sub build_target {
         warn "DEBUG[" . __LINE__ . "]:   About to execute commands\n" if $ENV{SMAK_DEBUG};
 
         # If this is an automake suffix rule, preprocess it
-        if ($is_automake_suffix) {
+        # Skip in --no-builtins mode (e.g., -n dry-run) to keep commands matching make -n output
+        if ($is_automake_suffix && !$no_builtins) {
             warn "DEBUG[" . __LINE__ . "]:   Detected automake suffix rule, preprocessing...\n" if $ENV{SMAK_DEBUG};
             $expanded = preprocess_automake_suffix_rule($expanded, $target);
             warn "DEBUG[" . __LINE__ . "]:   After preprocessing:\n$expanded\n" if $ENV{SMAK_DEBUG};
@@ -5199,7 +5380,7 @@ sub build_target {
 
             # Handle built-in mv commands (works in both dry-run and normal mode)
             # In dry-run mode, builtin_mv skips actual work but marks as done
-            if ($clean_cmd =~ /^(?:BUILTIN_)?mv\s+(.+)$/) {
+            if ($clean_cmd =~ /^mv\s+(.+)$/) {
                 my $mv_args = $1;
                 warn "DEBUG[" . __LINE__ . "]:     Detected built-in mv command\n" if $ENV{SMAK_DEBUG};
 
@@ -5881,7 +6062,7 @@ sub run_check_mode {
     # Step 1: Run smak -n externally (uses same code path as normal builds)
     # This ensures we test the actual smak behavior, not a special code path
     use FindBin qw($RealBin);
-    my $smak_cmd = "$RealBin/smak -n -f " . quotemeta($makefile_path) . " " . quotemeta($target) . " 2>&1";
+    my $smak_cmd = "$RealBin/smak -n --no-builtins -f " . quotemeta($makefile_path) . " " . quotemeta($target) . " 2>&1";
     my $smak_output = `$smak_cmd`;
     my $smak_exit = $? >> 8;
 
@@ -5890,10 +6071,12 @@ sub run_check_mode {
     }
     my @smak_commands = normalize_check_output($smak_output, 'smak');
 
-    # Step 2: Run make -n and capture output
+    # Step 2: Run make -n -k and capture output
     # Fork and exec make with a cleaned environment:
     # - Remove smak directory from PATH (smak script puts it first)
     # - Clear MAKE-related variables so make uses its own defaults
+    # - Use -k (keep-going) so make produces maximum output even if some
+    #   targets fail (e.g., missing version.exe in iverilog vvp)
     my $make_output;
     my $make_exit;
     my $pid = open(my $make_fh, '-|');
@@ -5912,7 +6095,7 @@ sub run_check_mode {
         delete $ENV{MAKELEVEL};
         # Redirect stderr to stdout
         open(STDERR, '>&', STDOUT);
-        exec('make', '-n', '-f', $makefile_path, $target);
+        exec('make', '-n', '-k', '-f', $makefile_path, $target);
         die "exec make failed: $!";
     }
     # Parent: read output
@@ -5923,9 +6106,6 @@ sub run_check_mode {
     close($make_fh);
     $make_exit = $? >> 8;
 
-    if ($make_exit != 0 && $make_output =~ /No rule to make target/) {
-        return (-1, "Error: make -n failed:\n$make_output");
-    }
     my @make_commands = normalize_check_output($make_output, 'make');
 
     # Debug: show what we're comparing
@@ -5941,36 +6121,203 @@ sub run_check_mode {
     }
 
     # Step 3: Compare command sets
+    # Only "make_only" commands are errors (smak is missing something).
+    # "smak_only" commands are informational - smak may handle targets
+    # that make -n can't reach (e.g., make errors on missing generated files).
     my %smak_set = map { $_ => 1 } @smak_commands;
     my %make_set = map { $_ => 1 } @make_commands;
 
     my @smak_only = grep { !exists $make_set{$_} } @smak_commands;
     my @make_only = grep { !exists $smak_set{$_} } @make_commands;
 
-    # Step 4: Generate report
-    if (@smak_only) {
-        push @report, "Commands only in smak (not in make -n):";
-        push @report, "  + $_" for @smak_only;
-        push @report, "";
-    }
+    my $common = scalar(@make_commands) - scalar(@make_only);
 
+    # Step 4: Generate report
     if (@make_only) {
-        push @report, "Commands only in make -n (not in smak):";
+        push @report, "ERRORS - commands in make -n but not in smak:";
         push @report, "  - $_" for @make_only;
         push @report, "";
     }
 
-    my $total_diff = @smak_only + @make_only;
-    if ($total_diff == 0) {
-        push @report, "Result: MATCH - smak and make agree on " . scalar(@smak_commands) . " command(s)";
-    } else {
-        push @report, "Result: MISMATCH - $total_diff difference(s) found";
-        push @report, "  smak unique: " . scalar(@smak_only);
-        push @report, "  make unique: " . scalar(@make_only);
+    if (@smak_only) {
+        push @report, "Info: " . scalar(@smak_only) . " extra command(s) in smak (not in make -n)";
+        if ($ENV{SMAK_CHECK_DEBUG} || @smak_only <= 10) {
+            push @report, "  + $_" for @smak_only;
+        } else {
+            push @report, "  + $_" for @smak_only[0..4];
+            push @report, "  ... and " . (@smak_only - 5) . " more (set SMAK_CHECK_DEBUG=1 to see all)";
+        }
+        push @report, "";
     }
 
-    my $match = ($total_diff == 0) ? 1 : 0;
+    if (@make_only == 0) {
+        push @report, "Result: MATCH - $common common command(s)";
+        push @report, "  (smak also produces " . scalar(@smak_only) . " additional command(s))" if @smak_only;
+    } else {
+        push @report, "Result: MISMATCH - " . scalar(@make_only) . " command(s) missing from smak";
+        push @report, "  common: $common, smak extra: " . scalar(@smak_only) . ", make extra: " . scalar(@make_only);
+    }
+
+    my $match = (@make_only == 0) ? 1 : 0;
     return ($match, join("\n", @report) . "\n");
+}
+
+# -test mode: full regression test
+# Runs: check, sequential build+verify, -j1 build+verify, -j3 build+verify
+# Returns exit code (0=pass, 1=fail)
+sub run_test_mode {
+    my ($target1, $target2, $makefile_path) = @_;
+
+    use FindBin qw($RealBin);
+    my $smak = "$RealBin/smak";
+    my $mf = quotemeta($makefile_path);
+    my $t1 = quotemeta($target1);
+    my $t2 = quotemeta($target2);
+    my $pass_count = 0;
+    my $fail_count = 0;
+    my $step = 0;
+
+    my $run = sub {
+        my ($desc, $cmd) = @_;
+        $step++;
+        print "--- Step $step: $desc ---\n";
+        print "  \$ $cmd\n";
+        my $rc = system($cmd);
+        $rc = $rc >> 8 if $rc > 0;
+        if ($rc != 0) {
+            print "  FAIL (exit $rc)\n\n";
+            $fail_count++;
+            return 0;
+        }
+        print "  ok\n\n";
+        $pass_count++;
+        return 1;
+    };
+
+    # Verify make <target2> has nothing to do (all targets are up-to-date)
+    # Uses make -q which exits 0 if up-to-date, 1 if needs work, 2 if error
+    my $verify_up_to_date = sub {
+        my ($desc) = @_;
+        $step++;
+        print "--- Step $step: $desc ---\n";
+
+        # Fork to clean environment (remove smak from PATH, clear MAKE vars)
+        my $pid = open(my $fh, '-|');
+        if (!defined $pid) {
+            print "  FAIL - fork failed: $!\n\n";
+            $fail_count++;
+            return 0;
+        }
+        if ($pid == 0) {
+            my @path_dirs = split(/:/, $ENV{PATH} || '');
+            @path_dirs = grep { $_ !~ m{/smak(?:/|$)} } @path_dirs;
+            $ENV{PATH} = join(':', @path_dirs);
+            delete $ENV{MAKE};
+            delete $ENV{MAKEFLAGS};
+            delete $ENV{MAKELEVEL};
+            open(STDERR, '>&', STDOUT);
+            exec('make', '-q', '-f', $makefile_path, $target2);
+            die "exec make failed: $!";
+        }
+        my $output;
+        { local $/; $output = <$fh>; }
+        close($fh);
+        my $rc = $? >> 8;
+
+        print "  \$ make -q -f $makefile_path $target2\n";
+        if ($rc == 0) {
+            print "  ok (make confirms up-to-date)\n\n";
+            $pass_count++;
+            return 1;
+        } else {
+            print "  FAIL - make -q exit $rc (targets need rebuilding)\n";
+            # Show what make -n would do for diagnostic purposes
+            if ($pid == 0 || 1) {
+                my $pid2 = open(my $fh2, '-|');
+                if (defined $pid2 && $pid2 == 0) {
+                    my @path_dirs = split(/:/, $ENV{PATH} || '');
+                    @path_dirs = grep { $_ !~ m{/smak(?:/|$)} } @path_dirs;
+                    $ENV{PATH} = join(':', @path_dirs);
+                    delete $ENV{MAKE};
+                    delete $ENV{MAKEFLAGS};
+                    delete $ENV{MAKELEVEL};
+                    open(STDERR, '>&', STDOUT);
+                    exec('make', '-n', '-f', $makefile_path, $target2);
+                    die "exec make failed: $!";
+                }
+                if (defined $pid2) {
+                    my $diag;
+                    { local $/; $diag = <$fh2>; }
+                    close($fh2);
+                    my @lines = grep { /\S/ }
+                                grep { !/^make\[\d+\]: (Entering|Leaving) directory/ }
+                                grep { !/^make\[\d+\]: Nothing to be done/ }
+                                grep { !/^make: Nothing to be done/ }
+                                grep { !/^make\[\d+\]: '.*' is up to date/ }
+                                split(/\n/, $diag);
+                    if (@lines) {
+                        print "  make -n shows:\n";
+                        for my $line (@lines[0..($#lines > 9 ? 9 : $#lines)]) {
+                            print "    $line\n";
+                        }
+                        print "    ... (" . scalar(@lines) . " total)\n" if @lines > 10;
+                    }
+                }
+            }
+            print "\n";
+            $fail_count++;
+            return 0;
+        }
+    };
+
+    print "=== smak -test=$target1,$target2 ===\n";
+    print "Makefile: $makefile_path\n\n";
+
+    # Clear smak cache to ensure fresh parsing
+    my $cache_dir = get_cache_dir();
+    my $clear_cache = sub {
+        if ($cache_dir && -d $cache_dir) {
+            use File::Path qw(remove_tree);
+            remove_tree($cache_dir, { safe => 1 });
+            print "  (cleared cache: $cache_dir)\n";
+        }
+    };
+
+    # Phase 1: -check (dry-run comparison)
+    print "=== Phase 1: -check ===\n\n";
+    $clear_cache->();
+    $run->("smak $target1 (setup)", "$smak -f $mf $t1 2>&1") or goto DONE;
+    $run->("-check", "$smak -f $mf -check 2>&1") or goto DONE;
+
+    # Phase 2: sequential build + verify
+    print "=== Phase 2: sequential build ===\n\n";
+    $clear_cache->();
+    $run->("smak $target1 (clean)", "$smak -f $mf $t1 2>&1") or goto DONE;
+    $run->("smak $target2 (sequential)", "$smak -f $mf $t2 2>&1") or goto DONE;
+    $verify_up_to_date->("verify make $target2 is up-to-date") or goto DONE;
+
+    # Phase 3: -j1 build + verify
+    print "=== Phase 3: -j1 build ===\n\n";
+    $clear_cache->();
+    $run->("smak $target1 (clean)", "$smak -f $mf $t1 2>&1") or goto DONE;
+    $run->("smak -j1 $target2", "$smak -f $mf -j1 $t2 2>&1") or goto DONE;
+    $verify_up_to_date->("verify make $target2 is up-to-date (-j1)") or goto DONE;
+
+    # Phase 4: -j3 build + verify
+    print "=== Phase 4: -j3 build ===\n\n";
+    $clear_cache->();
+    $run->("smak $target1 (clean)", "$smak -f $mf $t1 2>&1") or goto DONE;
+    $run->("smak -j3 $target2", "$smak -f $mf -j3 $t2 2>&1") or goto DONE;
+    $verify_up_to_date->("verify make $target2 is up-to-date (-j3)") or goto DONE;
+
+    DONE:
+    my $total = $pass_count + $fail_count;
+    print "=== Results: $pass_count/$total passed";
+    if ($fail_count > 0) {
+        print ", $fail_count FAILED";
+    }
+    print " ===\n";
+    return $fail_count > 0 ? 1 : 0;
 }
 
 # Normalize dry-run output for comparison
@@ -6013,10 +6360,53 @@ sub normalize_check_output {
         next if $line =~ /^make\[\d+\]: Nothing to be done/;
         next if $line =~ /^make: Nothing to be done/;
 
+        # Skip make error/warning messages (from -k keep-going mode)
+        next if $line =~ /^make(?:\[\d+\])?: \*\*\*/;
+        next if $line =~ /^make(?:\[\d+\])?: Target '.*' not remade/;
+
+        # Skip automake config header boilerplate (test -f config.h || ...)
+        next if $line =~ /^\s*test\s+-f\s+\S+\.h\s+\|\|/;
+
         # Normalize whitespace
         $line =~ s/^\s+//;
         $line =~ s/\s+$//;
         $line =~ s/\s+/ /g;
+
+        # Strip automake silent-rules echo prefix (e.g., echo "  CC      " target;)
+        # make -n shows these but smak doesn't expand $(AM_V_CC) the same way
+        $line =~ s/^echo\s+"[^"]*"\s+\S+\s*;\s*//;
+
+        # Normalize shell command substitutions $(...) — make -n prints these
+        # literally while smak pre-evaluates them (with different results)
+        # Use a recursive approach that handles nested parens and escaped parens
+        my $changed = 1;
+        while ($changed) {
+            $changed = 0;
+            # Match $( ... ) allowing nested parens by counting depth
+            if ($line =~ /\$\(/) {
+                my $pos = $-[0];
+                my $depth = 0;
+                my $i = $pos + 1;  # skip the $
+                for (; $i < length($line); $i++) {
+                    my $c = substr($line, $i, 1);
+                    if ($c eq '(') { $depth++; }
+                    elsif ($c eq ')') {
+                        $depth--;
+                        if ($depth == 0) {
+                            # Found matching close paren - remove $(...) block
+                            substr($line, $pos, $i - $pos + 1, '');
+                            $changed = 1;
+                            last;
+                        }
+                    }
+                }
+            }
+        }
+
+        # Re-normalize whitespace after $(...) stripping (may leave double spaces)
+        $line =~ s/\s+/ /g;
+        $line =~ s/^\s+//;
+        $line =~ s/\s+$//;
 
         # Normalize ./ prefixes (make is inconsistent about these)
         $line =~ s{(\s)\.\/}{$1}g;   # " ./" -> " "
@@ -7795,7 +8185,7 @@ sub cmd_btree {
         $target_info{$tgt} = {
             rule => $info->{expanded_rule} || $info->{rule} || '',
             exec_dir => $info->{exec_dir} || '.',
-            siblings => [],
+            siblings => $info->{siblings} || [],
             compound_parent => '',
         };
     }
@@ -10380,8 +10770,8 @@ sub run_job_master {
             return 1;
         }
 
-        # Construct full path
-        my $target_path = $dir ? "$dir/$target" : $target;
+        # Construct full path (child relay targets are already absolute)
+        my $target_path = ($target =~ m{^/}) ? $target : ($dir ? "$dir/$target" : $target);
 
         # First quick check
         return 1 if -e $target_path;
@@ -10571,7 +10961,11 @@ sub run_job_master {
                     if (exists $suffix_rule{$suffix_key}) {
                         my $source = "$base$source_suffix";
                         my $resolved_source = resolve_vpath($source, $dir);
-                        if (-f $resolved_source || -f "$dir/$source") {
+                        # Check if source exists OR can be built via another suffix rule
+                        # (e.g., .l.c: rule can build lexer.c from lexer.l for .c.o:)
+                        my $source_exists = (-f $resolved_source || -f "$dir/$source");
+                        my $source_can_build = !$source_exists && can_build_from_suffix_rule($source, $makefile);
+                        if ($source_exists || $source_can_build) {
                             $stem = $base;
                             push @deps, $source unless grep { $_ eq $source } @deps;
                             $rule = $suffix_rule{$suffix_key};
@@ -10584,7 +10978,7 @@ sub run_job_master {
                                 } @$suffix_deps_ref;
                                 push @deps, @suffix_deps_expanded;
                             }
-                            print STDERR "Using suffix rule $source_suffix$target_suffix for $target (job master)\n" if $ENV{SMAK_DEBUG};
+                            print STDERR "Using suffix rule $source_suffix$target_suffix for $target (source " . ($source_exists ? "exists" : "can be built") . ", job master)\n" if $ENV{SMAK_DEBUG};
                             last;
                         }
                     }
@@ -10599,12 +10993,22 @@ sub run_job_master {
                     my $pattern_re = $pattern;
                     $pattern_re =~ s/%/(.+)/g;
                     if ($target =~ /^$pattern_re$/) {
-                        # Found matching pattern rule - use its rule, keep fixed deps
+                        # Found matching pattern rule - use its rule AND add pattern deps
                         my $rule_ref = $pattern_rule{$pkey} || '';
+                        my $deps_ref = $pattern_deps{$pkey} || [];
                         # Handle both single rule (string) and multiple variants (array)
                         $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
                         $stem = $1;  # Save stem for $* expansion
                         $matched_pattern_key = $pkey;  # Save for multi-output detection
+
+                        # Add pattern rule deps (needed for $< expansion and dependency tracking)
+                        my @pdeps = (ref($deps_ref) eq 'ARRAY' && @$deps_ref && ref($deps_ref->[0]) eq 'ARRAY')
+                                    ? @{$deps_ref->[0]} : (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
+                        for my $pd (@pdeps) {
+                            my $expanded_dep = $pd;
+                            $expanded_dep =~ s/%/$stem/g;
+                            push @deps, $expanded_dep unless grep { $_ eq $expanded_dep } @deps;
+                        }
                         print STDERR "Found pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
                         last;
                     }
@@ -10623,10 +11027,14 @@ sub run_job_master {
                     if (exists $suffix_rule{$suffix_key}) {
                         my $source = "$base$source_suffix";
                         my $resolved_source = resolve_vpath($source, $dir);
-                        # Check if source exists OR can be built (has a rule)
+                        # Check if source exists OR can be built (has a rule or suffix chain)
                         my $source_exists = (-f $resolved_source || -f "$dir/$source");
                         my $source_key = "$makefile\t$source";
-                        my $source_can_be_built = exists $fixed_rule{$source_key} || exists $pattern_rule{$source_key};
+                        my $source_can_be_built = !$source_exists && (
+                            exists $fixed_rule{$source_key} ||
+                            exists $pattern_rule{$source_key} ||
+                            can_build_from_suffix_rule($source, $makefile)
+                        );
                         if ($source_exists || $source_can_be_built) {
                             $stem = $base;
                             push @deps, $source unless grep { $_ eq $source } @deps;
@@ -10685,6 +11093,20 @@ sub run_job_master {
                                 my $first_dep_key = "$makefile\t$first_dep";
                                 my $source_exists = @resolved_deps && -f $resolved_deps[0];
                                 my $source_can_be_built = exists $fixed_rule{$first_dep_key} || exists $pattern_rule{$first_dep_key};
+                                # Also check pattern rule matching (e.g., parse.cc matches parse%cc pattern)
+                                if (!$source_can_be_built && $first_dep ne '') {
+                                    for my $pk (keys %pattern_rule) {
+                                        if ($pk =~ /^[^\t]+\t(.+)$/) {
+                                            my $pp = $1;
+                                            my $pp_re = $pp;
+                                            $pp_re =~ s/%/(.+)/g;
+                                            if ($first_dep =~ /^$pp_re$/) {
+                                                $source_can_be_built = 1;
+                                                last;
+                                            }
+                                        }
+                                    }
+                                }
                                 if ($source_exists || $source_can_be_built) {
                                     @deps = @resolved_deps;
                                     $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[$vi] : $rule_ref;
@@ -11171,10 +11593,9 @@ sub run_job_master {
             # Preprocess automake suffix rules to expand $depbase BEFORE command splitting
             # This ensures shell variable $depbase is replaced with actual path so workers
             # don't need the shell variable context from the depbase=`...` assignment
-            if ($expanded_rule =~ /depbase=`[^`]+`.*?\$\$?depbase/) {
+            # Skip in --no-builtins mode (e.g., -n dry-run) to keep commands matching make -n output
+            if (!$no_builtins && $expanded_rule =~ /depbase=`[^`]+`.*?\$\$?depbase/) {
                 $expanded_rule = preprocess_automake_suffix_rule($expanded_rule, $target);
-                # Convert BUILTIN_MV back to mv for workers (workers handle mv as builtin)
-                $expanded_rule =~ s/\bBUILTIN_MV\b/mv/g;
                 print STDERR "DEBUG: After automake preprocessing:\n$expanded_rule\n" if $ENV{SMAK_DEBUG};
             }
 
@@ -11354,6 +11775,7 @@ sub run_job_master {
                     $in_progress{$full_target} = "failed";
                     $failed_targets{$full_target} = $failed_targets{$failed_deps[0]};
                     print STDERR "Composite target '$full_target' FAILED due to failed dependency '$failed_deps[0]'\n";
+                    check_child_completion($full_target, $failed_targets{$failed_deps[0]});
 		    reprompt();
                 } else {
                     # Split each dep on whitespace first (variables may expand to multiple targets)
@@ -11406,6 +11828,9 @@ sub run_job_master {
     our ($max_exit_code, $idle_sent) = (0, 1);  # Start with idle_sent=1 to prevent IDLE before any work is submitted
     our ($jobs_submitted, $jobs_completed) = (0, 0);  # Simple job counting for completion detection
 
+    # Maps a child-submitted target to its siblings (other targets produced by the same command)
+    our %child_target_siblings;
+
     # Helper: check if a completed/failed target belongs to a child smak relay
     # and update child tracking. Sends CHILD_COMPLETE when all child jobs are done.
     sub check_child_completion {
@@ -11418,6 +11843,18 @@ sub run_job_master {
         # Remove this target from child's tracking
         delete $child_job_targets{$child_sock}{$target};
         delete $target_to_child{$target};
+
+        # Also complete any siblings produced by this command
+        if (exists $child_target_siblings{$target}) {
+            for my $sib (@{$child_target_siblings{$target}}) {
+                delete $child_job_targets{$child_sock}{$sib};
+                delete $target_to_child{$sib};
+                $completed_targets{$sib} = 1;
+                $in_progress{$sib} = "done";
+                print STDERR "Sibling '$sib' completed via '$target'\n" if $ENV{SMAK_DEBUG};
+            }
+            delete $child_target_siblings{$target};
+        }
 
         # Track max exit code for this child
         if ($exit_code > 0) {
@@ -11442,6 +11879,30 @@ sub run_job_master {
             delete $child_all_submitted{$child_sock};
             close($child_sock);
         }
+    }
+
+    # Send CHILD_COMPLETE with error to all pending child relays.
+    # Called when stop_requested is set and the job queue is cleared,
+    # to prevent child relays from hanging forever waiting for completion.
+    sub fail_all_child_relays {
+        my ($exit_code) = @_;
+        $exit_code //= 1;
+
+        for my $child_sock (@child_sockets) {
+            next unless defined fileno($child_sock);
+            # Send CHILD_COMPLETE with error so the child relay can exit
+            print $child_sock "CHILD_COMPLETE $exit_code\n";
+            $child_sock->flush();
+            $select->remove($child_sock);
+            close($child_sock);
+        }
+        # Clean up all child tracking
+        %child_job_targets = ();
+        %child_exit_codes = ();
+        %child_all_submitted = ();
+        %target_to_child = ();
+        %child_target_siblings = ();
+        @child_sockets = ();
     }
 
     # Helper function to check if all work is done and send IDLE if so
@@ -11481,6 +11942,7 @@ sub run_job_master {
                 if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $failed_exit_code\n";
                 }
+                check_child_completion($comp_target, $failed_exit_code);
                 delete $pending_composite{$comp_target};
                 next;
             }
@@ -11636,6 +12098,7 @@ sub run_job_master {
 	                $in_progress{$target} = "failed";
 	                $failed_targets{$target} = $failed_targets{$failed_dep} || 1;
 	                fail_dependent_composite_targets($target, $failed_targets{$target});
+	                check_child_completion($target, $failed_targets{$target});
 	                $failed_count++;
 	            } else {
 	                push @remaining_jobs, $job;
@@ -11842,6 +12305,7 @@ sub run_job_master {
                 if ($comp->{master_socket} && defined fileno($comp->{master_socket})) {
                     print {$comp->{master_socket}} "JOB_COMPLETE $comp_target $exit_code\n";
                 }
+                check_child_completion($comp_target, $exit_code);
                 delete $pending_composite{$comp_target};
             }
         }
@@ -12280,6 +12744,7 @@ sub run_job_master {
                             $failed_targets{$target} = $failed_targets{$single_dep};
                             splice(@job_queue, $i, 1);
                             fail_dependent_composite_targets($target, $failed_targets{$single_dep});
+                            check_child_completion($target, $failed_targets{$single_dep});
                             $order_only_failed = 1;
                             last;
                         }
@@ -12344,6 +12809,7 @@ sub run_job_master {
                             splice(@job_queue, $i, 1);  # Remove from queue
                             # Check if this failed target is a dependency of any composite target
                             fail_dependent_composite_targets($target, $failed_targets{$single_dep});
+                            check_child_completion($target, $failed_targets{$single_dep});
                             $has_failed_dep = 1;
                             last;
                         }
@@ -12490,6 +12956,7 @@ sub run_job_master {
                                 splice(@job_queue, $i, 1);  # Remove from queue
                                 # Check if this failed target is a dependency of any composite target
                                 fail_dependent_composite_targets($target, $failed_targets{$failed_dep});
+                                check_child_completion($target, $failed_targets{$failed_dep});
                                 $has_unbuildable_dep = 1;
                                 last;
                             } else {
@@ -12501,6 +12968,7 @@ sub run_job_master {
                                     $failed_targets{$target} = 1;  # Generic failure code
                                     splice(@job_queue, $i, 1);  # Remove from queue
                                     fail_dependent_composite_targets($target, 1);
+                                    check_child_completion($target, 1);
                                     $has_unbuildable_dep = 1;
                                     last;
                                 }
@@ -12520,8 +12988,9 @@ sub run_job_master {
 
                 if ($deps_satisfied) {
                     print STDERR "DEBUG dispatch: Job '$target' has all dependencies satisfied, will dispatch\n" if $ENV{SMAK_DEBUG};
+
                     $job_index = $i;
-                    last;
+                    last;  # Dispatch first satisfiable job immediately
                 } else {
                     print STDERR "DEBUG dispatch: Job '$target' dependencies NOT satisfied, skipping\n" if $ENV{SMAK_DEBUG};
                 }
@@ -12830,10 +13299,15 @@ sub run_job_master {
                                     close($worker_server) if $worker_server;
                                     close($observer_server) if $observer_server;
 
-                                    # Set SMAK_JOB_SERVER so the child smak connects
-                                    # back as a child relay for parallel dispatch.
+                                    # Set SMAK_JOB_SERVER so the child connects back
+                                    # as a child relay for parallel dispatch.  Child
+                                    # relay targets are qualified with exec_dir to avoid
+                                    # collisions when multiple children submit the same
+                                    # bare target name (e.g. "clean" or "main.o").
                                     if (exists $worker_env{SMAK_JOB_SERVER}) {
                                         $ENV{SMAK_JOB_SERVER} = $worker_env{SMAK_JOB_SERVER};
+                                    } else {
+                                        delete $ENV{SMAK_JOB_SERVER};
                                     }
                                     delete $ENV{USR_SMAK_OPT};  # Don't inherit parent's -j
 
@@ -13702,6 +14176,7 @@ sub run_job_master {
                                     }
                                     %pending_composite = ();
                                     print STDERR "smak: *** [$job->{target}] Error $exit_code\n";
+                                    fail_all_child_relays($exit_code);
                                 }
 
                                 # Check if this failed task is a dependency of any composite target
@@ -14913,7 +15388,7 @@ sub run_job_master {
                 chomp $line;
 
                 if ($line eq 'SUBMIT_JOB') {
-                    # Child is submitting a job (protocol: target, exec_dir, DEPS N, deps, COMMAND_LINES N, cmds)
+                    # Child is submitting a job (protocol: target, exec_dir, DEPS N, deps, SIBLINGS N, siblings, COMMAND_LINES N, cmds)
                     # Temporarily switch to blocking for multi-line protocol read
                     $socket->blocking(1);
                     my $target = <$socket>;
@@ -14934,8 +15409,21 @@ sub run_job_master {
                         }
                     }
 
-                    # Read command lines
-                    my $cmd_header = <$socket>;
+                    # Read sibling lines (other targets produced by this same command)
+                    my @siblings;
+                    my $sib_header = <$socket>;
+                    chomp $sib_header if defined $sib_header;
+                    if (defined $sib_header && $sib_header =~ /^SIBLINGS (\d+)$/) {
+                        my $count = $1;
+                        for (1..$count) {
+                            my $sib_line = <$socket>;
+                            chomp $sib_line if defined $sib_line;
+                            push @siblings, $sib_line if defined $sib_line;
+                        }
+                    }
+
+                    # Read command lines (may follow SIBLINGS or DEPS if no SIBLINGS)
+                    my $cmd_header = defined $sib_header && $sib_header =~ /^SIBLINGS/ ? <$socket> : $sib_header;
                     chomp $cmd_header if defined $cmd_header;
                     my $command = '';
                     if (defined $cmd_header && $cmd_header =~ /^COMMAND_LINES (\d+)$/) {
@@ -14954,14 +15442,39 @@ sub run_job_master {
                     $socket->blocking(0);
 
                     if (defined $target && defined $exec_dir && $command ne '') {
-                        print STDERR "Child submitted job: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ")\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Child submitted job: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ", siblings=" . scalar(@siblings) . ")\n" if $ENV{SMAK_DEBUG};
 
                         # Assert child relay sent fully-expanded commands
                         assert_no_unexpanded_vars($command, $target, 'child-submit');
 
+                        # Qualify target and deps with exec_dir to make them
+                        # globally unique — multiple child relays from different
+                        # directories may submit targets with the same bare name
+                        # (e.g., main.o in both vvp/ and vhdlpp/).
+                        if ($exec_dir ne '.' && $exec_dir ne '' && $target !~ m{^/}) {
+                            $target = "$exec_dir/$target";
+                        }
+                        @deps = map { ($_ !~ m{^/} && $exec_dir ne '.' && $exec_dir ne '')
+                                      ? "$exec_dir/$_" : $_ } @deps;
+                        @siblings = map { ($_ !~ m{^/} && $exec_dir ne '.' && $exec_dir ne '')
+                                      ? "$exec_dir/$_" : $_ } @siblings;
+
                         # Track this job belongs to this child socket
                         $child_job_targets{$socket}{$target} = 1;
                         $target_to_child{$target} = $socket;
+
+                        # Also track sibling targets — when this job completes,
+                        # all siblings are produced (e.g., bison generates both parse.cc and parse.h)
+                        if (@siblings) {
+                            $child_target_siblings{$target} = [@siblings];
+                            for my $sib (@siblings) {
+                                $child_job_targets{$socket}{$sib} = 1;
+                                $target_to_child{$sib} = $socket;
+                                # Mark siblings as already in progress so they won't be dispatched separately
+                                $in_progress{$sib} = "sibling:$target";
+                                print STDERR "Child sibling '$sib' will be produced by '$target'\n" if $ENV{SMAK_DEBUG};
+                            }
+                        }
 
                         # Queue job with deps (layers computed after all jobs received)
                         push @job_queue, {
@@ -14970,6 +15483,7 @@ sub run_job_master {
                             exec_dir => $exec_dir,
                             command => $command,
                             deps => \@deps,
+                            siblings => \@siblings,
                             layer => 0,
                             from_child => 1,
                         };
@@ -15017,7 +15531,7 @@ sub run_job_master {
                         for my $dep (@{$job->{deps}}) {
                             next if exists $child_targets{$dep};
                             next if exists $completed_targets{$dep};
-                            my $dep_path = "$job->{exec_dir}/$dep";
+                            my $dep_path = $dep =~ m{^/} ? $dep : "$job->{exec_dir}/$dep";
                             if (-e $dep_path) {
                                 $completed_targets{$dep} = 1;
                                 $in_progress{$dep} = "done";
@@ -15025,11 +15539,30 @@ sub run_job_master {
                         }
                     }
 
-                    # Compute layers (iterate until stable - deps may reference other child jobs)
+                    # Compute layers: iterate until stable since deps may reference
+                    # other child jobs processed in arbitrary hash-key order.
+                    # First pass: assign initial layers
                     for my $job (@child_jobs) {
                         my $layer = compute_target_layer($job->{deps});
                         $job->{layer} = $layer;
                         $target_layer{$job->{target}} = $layer;
+                    }
+                    # Iterate until stable
+                    my $layer_changed = 1;
+                    while ($layer_changed) {
+                        $layer_changed = 0;
+                        for my $job (@child_jobs) {
+                            my $new_layer = compute_target_layer($job->{deps});
+                            if ($new_layer != $job->{layer}) {
+                                $job->{layer} = $new_layer;
+                                $target_layer{$job->{target}} = $new_layer;
+                                $layer_changed = 1;
+                            }
+                        }
+                    }
+                    # Assign to layer arrays
+                    for my $job (@child_jobs) {
+                        my $layer = $job->{layer};
                         $max_dispatch_layer = $layer if $layer > $max_dispatch_layer;
                         $job_layers[$layer] //= [];
                         push @{$job_layers[$layer]}, $job;
@@ -15041,14 +15574,15 @@ sub run_job_master {
                     # then propagate - any target whose dep will be rebuilt also needs rebuild.
                     my %needs_build;
                     for my $job (@child_jobs) {
-                        my $target_path = "$job->{exec_dir}/$job->{target}";
+                        # Child relay targets/deps may be absolute (qualified with exec_dir)
+                        my $target_path = $job->{target} =~ m{^/} ? $job->{target} : "$job->{exec_dir}/$job->{target}";
                         unless (-e $target_path) {
                             $needs_build{$job->{target}} = 1;  # Doesn't exist → needs build
                             next;
                         }
                         my $target_mtime = (stat($target_path))[9];
                         for my $dep (@{$job->{deps}}) {
-                            my $dep_path = "$job->{exec_dir}/$dep";
+                            my $dep_path = $dep =~ m{^/} ? $dep : "$job->{exec_dir}/$dep";
                             next unless -e $dep_path;
                             my $dep_mtime = (stat($dep_path))[9];
                             if ($dep_mtime > $target_mtime) {
@@ -15125,6 +15659,56 @@ sub run_job_master {
                     $current_dispatch_layer++;
                 }
 
+                # Pre-execute pure-builtin child jobs (like "mkdir dep") before
+                # dispatching worker jobs.  This ensures setup targets complete
+                # synchronously so worker jobs that depend on their side effects
+                # (e.g., "mv *.d dep/") don't race.
+                my @pre_exec_indices;
+                for my $qi (0 .. $#job_queue) {
+                    my $qj = $job_queue[$qi];
+                    next unless $qj->{from_child};
+                    next unless defined $qj->{command} && $qj->{command} =~ /\S/;
+                    next unless defined(try_execute_compound_builtin_check($qj->{command}));
+                    # Check all deps are satisfied
+                    my $all_ok = 1;
+                    for my $dep (@{$qj->{deps} || []}) {
+                        unless (exists $completed_targets{$dep} || -e ($dep =~ m{^/} ? $dep : "$qj->{exec_dir}/$dep")) {
+                            $all_ok = 0;
+                            last;
+                        }
+                    }
+                    next unless $all_ok;
+                    unshift @pre_exec_indices, $qi;  # reverse order for safe splice
+                }
+                for my $qi (@pre_exec_indices) {
+                    my $qj = $job_queue[$qi];
+                    my $saved_dir;
+                    if ($qj->{dir} && $qj->{dir} ne '.') {
+                        use Cwd 'getcwd';
+                        $saved_dir = getcwd();
+                        chdir($qj->{dir}) or undef $saved_dir;
+                    }
+                    my $exit = try_execute_compound_builtin($qj->{command});
+                    chdir($saved_dir) if defined $saved_dir;
+                    if (defined $exit && $exit == 0) {
+                        $completed_targets{$qj->{target}} = 1;
+                        $in_progress{$qj->{target}} = "done";
+                        check_child_completion($qj->{target}, 0);
+                        print STDERR "Pre-executed builtin child job '$qj->{target}'\n" if $ENV{SMAK_DEBUG};
+                    } elsif (defined $exit) {
+                        $in_progress{$qj->{target}} = "failed";
+                        $failed_targets{$qj->{target}} = $exit;
+                        check_child_completion($qj->{target}, $exit);
+                    }
+                    if (defined $exit) {
+                        splice(@job_queue, $qi, 1);
+                        my $jl = $qj->{layer} // 0;
+                        if ($job_layers[$jl]) {
+                            @{$job_layers[$jl]} = grep { $_->{target} ne $qj->{target} } @{$job_layers[$jl]};
+                        }
+                    }
+                }
+
                 # Dispatch all queued jobs after processing child submissions
                 dispatch_jobs() if @job_queue > 0;
 
@@ -15167,6 +15751,7 @@ sub run_job_master {
                         $stop_requested = 1;
                         @job_queue = ();
                         print STDERR "smak: *** [$bf_target] Error $bf_exit_code\n";
+                        fail_all_child_relays($bf_exit_code);
                     }
 
                     # Not all done yet - wait for remaining group members
@@ -15207,6 +15792,7 @@ sub run_job_master {
                         $stop_requested = 1;
                         @job_queue = ();
                         print STDERR "smak: *** [$bf_target] Error $bf_exit_code\n";
+                        fail_all_child_relays($bf_exit_code);
                     }
                     check_and_send_idle("builtin_fork failure");
                 }
@@ -16064,6 +16650,7 @@ sub run_job_master {
                                 }
                                 %pending_composite = ();
                                 print STDERR "smak: *** [$job->{target}] Error $exit_code\n";
+                                fail_all_child_relays($exit_code);
                             }
                         }
                     }

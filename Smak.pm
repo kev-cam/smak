@@ -265,7 +265,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track [mtime, size] of all parsed makefiles for cache validation
-our $CACHE_VERSION = 15;  # Increment to invalidate old caches (bumped: multi-output sibling detection)
+our $CACHE_VERSION = 16;  # Increment to invalidate old caches (bumped: cmd_vars in cache validation)
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -548,6 +548,25 @@ sub normalize_cd_make {
     return $cmd;
 }
 
+sub is_recursive_make {
+    my ($cmd) = @_;
+    return 0 unless defined $cmd;
+    my $clean_cmd = $cmd;
+    $clean_cmd =~ s/^[@-]+//;
+    $clean_cmd =~ s/^\s+|\s+$//g;
+    for my $line (split(/\n/, $clean_cmd)) {
+        $line =~ s/^\s*[@-]+//;
+        $line =~ s/^\s+|\s+$//g;
+        next unless $line =~ /\S/;
+        $line = normalize_cd_make($line);
+        if ($line =~ m{^(?:perl\s+)?(?:(?:\.\.?/|/)?[\w/.-]*(?:smak(?:\.pl)?|make)|\$\{[^\}]*(?:smak|make)[^\}]*\})\s.*(?:-C|-f)\s}) {
+            return 1;
+        }
+        last;
+    }
+    return 0;
+}
+
 sub is_builtin_command {
     my ($cmd) = @_;
     return 0 unless defined $cmd;
@@ -559,18 +578,7 @@ sub is_builtin_command {
 
     # Recursive make/smak calls are builtins - the job-server forks directly
     # to process them, avoiding worker slot + shell process overhead
-    for my $line (split(/\n/, $clean_cmd)) {
-        $line =~ s/^\s*[@-]+//;
-        $line =~ s/^\s+|\s+$//g;
-        next unless $line =~ /\S/;
-        # Normalize "cd dir && make/smak ..." to "make/smak -C dir ..."
-        $line = normalize_cd_make($line);
-        if ($line =~ m{^(?:perl\s+)?(?:(?:\.\.?/|/)?[\w/.-]*(?:smak(?:\.pl)?|make)|\$\{[^\}]*(?:smak|make)[^\}]*\})\s.*(?:-C|-f)\s}) {
-            return 1;
-        }
-        # Only check first substantive line for recursive make
-        last;
-    }
+    return 1 if is_recursive_make($cmd);
 
     # Check for simple built-in commands
     # But NOT if the command contains shell redirections (>, >>, <, |, etc.)
@@ -2322,9 +2330,10 @@ sub parse_makefile {
         # Expand $(VAR) prefix in variable names and target names
         # (CMake idiom: $(VERBOSE)MAKESILENT = -s → MAKESILENT = -s)
         # GNU make expands variable references in the LHS of assignments
+        # Check cmd_vars first (command-line overrides from recursive make) then MV
         if ($line =~ /^([ ]*)\$\((\w+)\)(.*)$/) {
             my ($ws, $prefix_var, $rest) = ($1, $2, $3);
-            my $prefix_val = $MV{$prefix_var} // '';
+            my $prefix_val = $cmd_vars{$prefix_var} // $MV{$prefix_var} // '';
             $line = "$ws$prefix_val$rest";
         }
 
@@ -2435,9 +2444,10 @@ sub parse_makefile {
 
             # Expand variables in target names immediately so rules are stored under expanded names
             # This ensures lookups work correctly (e.g., bin/nvc$(EXEEXT) -> bin/nvc when EXEEXT is empty)
+            # Check cmd_vars first (command-line overrides from recursive make) then MV
             while ($targets_str =~ /\$MV\{([^}]+)\}/) {
                 my $var = $1;
-                my $val = $MV{$var} // '';
+                my $val = $cmd_vars{$var} // $MV{$var} // '';
                 $targets_str =~ s/\$MV\{\Q$var\E\}/$val/;
             }
             # Fully expand any remaining function calls like $(shell ...)
@@ -3047,9 +3057,10 @@ sub parse_included_makefile {
             $deps_str = transform_make_vars($deps_str);
 
             # Expand variables in target names immediately so rules are stored under expanded names
+            # Check cmd_vars first (command-line overrides from recursive make) then MV
             while ($targets_str =~ /\$MV\{([^}]+)\}/) {
                 my $var = $1;
-                my $val = $MV{$var} // '';
+                my $val = $cmd_vars{$var} // $MV{$var} // '';
                 $targets_str =~ s/\$MV\{\Q$var\E\}/$val/;
             }
             # Fully expand any remaining function calls like $(shell ...)
@@ -3419,6 +3430,16 @@ sub save_state_cache {
     print $fh "# Cache version\n";
     print $fh "\$Smak::_cache_version = $CACHE_VERSION;\n\n";
 
+    # Save cmd_vars fingerprint for recursive make cache validation
+    # When a sub-makefile is parsed with command-line variable overrides,
+    # the cache is only valid if the same overrides are present
+    print $fh "# Command-line variable overrides at parse time\n";
+    print $fh "\%Smak::_cached_cmd_vars = (\n";
+    for my $var (sort keys %cmd_vars) {
+        print $fh "    " . _quote_string($var) . " => " . _quote_string($cmd_vars{$var}) . ",\n";
+    }
+    print $fh ");\n\n";
+
     # Save file mtimes and sizes for validation
     print $fh "# File mtimes and sizes for cache validation\n";
     print $fh "\%Smak::parsed_file_mtimes = (\n";
@@ -3512,6 +3533,26 @@ sub load_state_cache {
         warn "DEBUG: Cache invalid - version mismatch (cache=$_cache_version, current=$CACHE_VERSION)\n" if $ENV{SMAK_DEBUG};
         return 0;
     }
+
+    # Check that cmd_vars match (for recursive make sub-makefiles)
+    our %_cached_cmd_vars;
+    my $cmd_vars_match = 1;
+    if (keys %cmd_vars != keys %_cached_cmd_vars) {
+        $cmd_vars_match = 0;
+    } else {
+        for my $var (keys %cmd_vars) {
+            if (!exists $_cached_cmd_vars{$var} || $cmd_vars{$var} ne $_cached_cmd_vars{$var}) {
+                $cmd_vars_match = 0;
+                last;
+            }
+        }
+    }
+    unless ($cmd_vars_match) {
+        warn "DEBUG: Cache invalid - cmd_vars mismatch\n" if $ENV{SMAK_DEBUG};
+        %_cached_cmd_vars = ();
+        return 0;
+    }
+    %_cached_cmd_vars = ();
 
     # Check that the current Makefile is the one this cache was made for
     use Cwd 'abs_path';
@@ -5635,16 +5676,17 @@ sub build_target {
                         # blocked in waitpid and can't read completions
                         $job_server_socket = undef;
                         $makefile = $sub_makefile;
+                        # Apply command-line variable overrides BEFORE parsing
+                        # so $(VAR) references in targets/rules expand correctly
+                        if ($sub_vars_ref && %$sub_vars_ref) {
+                            for my $var (keys %$sub_vars_ref) {
+                                set_cmd_var($var, $sub_vars_ref->{$var});
+                            }
+                        }
                         eval { parse_makefile($makefile); };
                         if ($@) {
                             warn "Warning: Could not parse sub-makefile '$makefile': $@\n";
                             exit(2);
-                        }
-                        # Apply command-line variable overrides
-                        if ($sub_vars_ref && %$sub_vars_ref) {
-                            for my $var (keys %$sub_vars_ref) {
-                                $MV{$var} = $sub_vars_ref->{$var};
-                            }
                         }
                         if (@sub_targets) {
                             for my $sub_target (@sub_targets) {
@@ -13200,7 +13242,9 @@ sub run_job_master {
                 # Check if this command contains builtin commands that can be executed inline
                 # Recursive make/smak calls are handled as builtins: the job-server forks
                 # directly to process them (avoiding worker slot + shell process overhead)
-                if (!$no_builtins && is_builtin_command($peek_cmd)) {
+                # Note: recursive make is ALWAYS handled in-process (even with --no-builtins)
+                # because it's fundamental to make semantics, not an optimization
+                if (is_recursive_make($peek_cmd) || (!$no_builtins && is_builtin_command($peek_cmd))) {
                     print STDERR "DEBUG: is_builtin_command=1 for cmd: $peek_cmd\n" if $ENV{SMAK_DEBUG};
                     # Parse the command into parts, preserving separators (&& or ; or newline)
                     # First split on newlines, then handle && and ; within each line

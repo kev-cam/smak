@@ -257,6 +257,11 @@ our %stale_targets_cache;
 # Files to ignore for dependency checking
 our %ignored_files;
 
+# Target-specific variable assignments (e.g., "target: VAR += value")
+# Key: "$makefile\t$target" (expanded target name)
+# Value: arrayref of { var => 'VAR', op => '+=', value => 'transformed_value' }
+our %target_specific_vars;
+
 # Directories to ignore for dependency checking (from SMAK_IGNORE_DIRS env var)
 # These are system directories we know won't change during builds
 our @ignore_dirs;
@@ -265,7 +270,7 @@ our %ignore_dir_mtimes;  # Cache of directory mtimes for ignored dirs
 # State caching variables
 our $cache_dir;  # Directory for cached state (from SMAK_CACHE_DIR or default)
 our %parsed_file_mtimes;  # Track [mtime, size] of all parsed makefiles for cache validation
-our $CACHE_VERSION = 16;  # Increment to invalidate old caches (bumped: cmd_vars in cache validation)
+our $CACHE_VERSION = 17;  # Increment to invalidate old caches (bumped: target-specific variables)
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -1392,6 +1397,54 @@ sub classify_target {
     }
 }
 
+# Apply target-specific variables to %MV in an ephemeral context.
+# Returns a hashref of saved original values (pass to restore_target_specific_vars).
+# GNU make propagates target-specific variables to prerequisites, so this should
+# be called before building dependencies and restored after rule execution.
+sub apply_target_specific_vars {
+    my ($target) = @_;
+    my %saved;
+    my $key = "$makefile\t$target";
+    return \%saved unless exists $target_specific_vars{$key};
+    for my $mod (@{$target_specific_vars{$key}}) {
+        my ($var, $op, $value) = @{$mod}{qw(var op value)};
+        # Only save the original value once per variable (first modification wins)
+        $saved{$var} = exists $MV{$var} ? $MV{$var} : undef unless exists $saved{$var};
+        if ($op eq '+=') {
+            if (exists $MV{$var} && $MV{$var} ne '') {
+                $MV{$var} .= " $value";
+            } else {
+                $MV{$var} = $value;
+            }
+        } elsif ($op eq ':=') {
+            my $make_syntax = format_output($value);
+            my $expanded = expand_vars($make_syntax);
+            $MV{$var} = transform_make_vars($expanded);
+        } elsif ($op eq '?=') {
+            unless (exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '') {
+                $MV{$var} = $value;
+            }
+        } else {
+            # = operator (simple/lazy assignment)
+            $MV{$var} = $value;
+        }
+        warn "DEBUG: Applied target-specific var for '$target': $var $op (now: " . substr($MV{$var} // '', 0, 80) . ")\n" if $ENV{SMAK_DEBUG};
+    }
+    return \%saved;
+}
+
+# Restore %MV from saved values after target-specific variable context
+sub restore_target_specific_vars {
+    my ($saved) = @_;
+    for my $var (keys %$saved) {
+        if (defined $saved->{$var}) {
+            $MV{$var} = $saved->{$var};
+        } else {
+            delete $MV{$var};
+        }
+    }
+}
+
 sub expand_vars {
     my ($text, $depth) = @_;
     $depth ||= 0;
@@ -2456,6 +2509,26 @@ sub parse_makefile {
                 $targets_str = expand_vars($targets_str);
             }
 
+            # Check for target-specific variable assignment
+            # Syntax: target: VAR op value (where op is =, :=, +=, ?=)
+            # Distinguished from dependency lines by the assignment operator
+            # after a variable name. E.g., "ghdl_mcode: GRT_FLAGS+=-DWITH_GNAT_RUN_TIME"
+            if ($deps_str =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
+                my ($tsv_var, $tsv_op, $tsv_value) = ($1, $2, $3);
+                # Store for each target (expanded names)
+                my @targets = split /\s+/, $targets_str;
+                for my $target (grep { $_ ne '' } @targets) {
+                    my $tsv_key = "$makefile\t$target";
+                    push @{$target_specific_vars{$tsv_key}}, {
+                        var   => $tsv_var,
+                        op    => $tsv_op,
+                        value => $tsv_value,
+                    };
+                    warn "DEBUG: Target-specific variable: $target: $tsv_var $tsv_op $tsv_value\n" if $ENV{SMAK_DEBUG};
+                }
+                next;
+            }
+
             # Handle order-only prerequisites (after |)
             # Syntax: target: normal-prereqs | order-only-prereqs
             my @deps;
@@ -3069,6 +3142,23 @@ sub parse_included_makefile {
                 $targets_str = expand_vars($targets_str);
             }
 
+            # Check for target-specific variable assignment
+            # Syntax: target: VAR op value (where op is =, :=, +=, ?=)
+            if ($deps_str =~ /^([A-Za-z_][A-Za-z0-9_]*)\s*([:?+]?=)\s*(.*)$/) {
+                my ($tsv_var, $tsv_op, $tsv_value) = ($1, $2, $3);
+                my @targets = split /\s+/, $targets_str;
+                for my $target (grep { $_ ne '' } @targets) {
+                    my $tsv_key = "$saved_makefile\t$target";
+                    push @{$target_specific_vars{$tsv_key}}, {
+                        var   => $tsv_var,
+                        op    => $tsv_op,
+                        value => $tsv_value,
+                    };
+                    warn "DEBUG: Target-specific variable (include): $target: $tsv_var $tsv_op $tsv_value\n" if $ENV{SMAK_DEBUG};
+                }
+                next;
+            }
+
             # Handle order-only prerequisites (after |)
             my @deps;
             my @order_only_deps;
@@ -3495,6 +3585,21 @@ sub save_state_cache {
     print $fh "\%Smak::inactive_patterns = (\n";
     for my $pattern (sort keys %inactive_patterns) {
         print $fh "    " . _quote_string($pattern) . " => " . $inactive_patterns{$pattern} . ",\n";
+    }
+    print $fh ");\n\n";
+
+    # Save target-specific variables
+    print $fh "# Target-specific variables\n";
+    print $fh "\%Smak::target_specific_vars = (\n";
+    for my $key (sort keys %target_specific_vars) {
+        my $mods = $target_specific_vars{$key};
+        print $fh "    " . _quote_string($key) . " => [\n";
+        for my $mod (@$mods) {
+            print $fh "        { var => " . _quote_string($mod->{var})
+                     . ", op => " . _quote_string($mod->{op})
+                     . ", value => " . _quote_string($mod->{value}) . " },\n";
+        }
+        print $fh "    ],\n";
     }
     print $fh ");\n\n";
 
@@ -5275,6 +5380,10 @@ sub build_target {
         $stale_targets_cache{$target} = time();
     }
 
+    # Apply target-specific variables in ephemeral context.
+    # GNU make propagates these to the target's rule and all prerequisites.
+    my $tsv_saved = apply_target_specific_vars($target);
+
     # Recursively build order-only prerequisites first (they must exist before normal prerequisites)
     # Order-only prerequisites don't affect timestamp checking, but must be built before the target
     unless ($job_server_socket) {
@@ -5777,6 +5886,9 @@ sub build_target {
         warn "DEBUG: Submitting composite target '$target' to job-master\n" if $ENV{SMAK_DEBUG};
         submit_job($target, "true", $cwd);
     }
+
+    # Restore %MV after target-specific variable context
+    restore_target_specific_vars($tsv_saved);
 }
 
 # collect_target_graph: Walk cached rule tables to collect all targets and their
@@ -11365,6 +11477,10 @@ sub run_job_master {
             }
         }
 
+        # Apply target-specific variables in ephemeral context
+        # (propagates to prerequisites and rule expansion)
+        my $tsv_saved = apply_target_specific_vars($target);
+
         # Recursively queue each dependency first
         for my $dep (@deps) {
             next if $dep =~ /^\.PHONY$/;
@@ -11447,6 +11563,7 @@ sub run_job_master {
 		    while ($i < $#recurse_log) {
 			warn "\t ".$recurse_log[$i++]."\n";
 		    }
+		    restore_target_specific_vars($tsv_saved);
 		    return;
 		} else {
 		    queue_target_recursive($single_dep, $dir, $msocket, $depth+1, $prefix);
@@ -11522,6 +11639,7 @@ sub run_job_master {
 
                 if ($depth > $recurse_limit) {
                     warn "Recursion queuing order-only ${dir}:$single_dep\n";
+                    restore_target_specific_vars($tsv_saved);
                     return;
                 } else {
                     queue_target_recursive($single_dep, $dir, $msocket, $depth+1, $prefix);
@@ -11585,6 +11703,7 @@ sub run_job_master {
                             # If we queued missing intermediates, don't mark target as complete yet
                             if ($has_missing_intermediates) {
                                 $in_progress{$full_target} = "pending";
+                                restore_target_specific_vars($tsv_saved);
                                 return;
                             }
                         } else {
@@ -11610,6 +11729,7 @@ sub run_job_master {
                         $in_progress{$full_target} = "done";
                         warn "Target '$full_target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
                         delete $stale_targets_cache{$full_target} if exists $stale_targets_cache{$full_target};
+                        restore_target_specific_vars($tsv_saved);
                         return;
                     }
                 } else {
@@ -11692,11 +11812,13 @@ sub run_job_master {
                             $completed_targets{$full_target} = 1;
                             $in_progress{$full_target} = "done";
                             warn "DEBUG: Target '$full_target' already built via compound '$compound_target'\n" if $ENV{SMAK_DEBUG};
+                            restore_target_specific_vars($tsv_saved);
                             return;
                         } else {
                             # Compound is building - mark this target as depending on it
                             $in_progress{$full_target} = "compound:$compound_target";
                             warn "DEBUG: Target '$full_target' waiting for compound '$compound_target'\n" if $ENV{SMAK_DEBUG};
+                            restore_target_specific_vars($tsv_saved);
                             return;
                         }
                     }
@@ -11875,6 +11997,9 @@ sub run_job_master {
                 print STDERR "No rule for target '$full_target', assuming it exists\n" if $ENV{SMAK_DEBUG};
             }
         }
+
+        # Restore %MV after target-specific variable context
+        restore_target_specific_vars($tsv_saved);
     }
 
     our ($last_queued, $last_running, $last_ready) = (0, 0, 0);

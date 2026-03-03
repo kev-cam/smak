@@ -1397,6 +1397,27 @@ sub classify_target {
     }
 }
 
+# Find all pattern rules matching a target, sorted by stem length (shortest first).
+# GNU make uses shortest-stem as the tie-breaker when multiple pattern rules match.
+# Returns list of [$pkey, $stem] arrayrefs, or empty list if no match.
+sub find_matching_patterns {
+    my ($target) = @_;
+    my @matches;
+    for my $pkey (keys %pattern_rule) {
+        if ($pkey =~ /^[^\t]+\t(.+)$/) {
+            my $pattern = $1;
+            my $pattern_re = $pattern;
+            $pattern_re =~ s/%/(.+)/g;
+            if ($target =~ /^$pattern_re$/) {
+                push @matches, [$pkey, $1];
+            }
+        }
+    }
+    # Sort by stem length (shortest first) - GNU make tie-breaking rule
+    @matches = sort { length($a->[1]) <=> length($b->[1]) } @matches;
+    return @matches;
+}
+
 # Apply target-specific variables to %MV in an ephemeral context.
 # Returns a hashref of saved original values (pass to restore_target_specific_vars).
 # GNU make propagates target-specific variables to prerequisites, so this should
@@ -4899,13 +4920,10 @@ sub build_target {
             # If still no rule found, try pattern rules
             # This ensures built-in pattern rules are only used as a fallback
             if (!$rule || $rule !~ /\S/) {
-                PATTERN_SEARCH: for my $pkey (keys %pattern_rule) {
-                    if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                        my $pattern = $1;
-                        my $pattern_re = $pattern;
-                        $pattern_re =~ s/%/(.+)/g;
-                        if ($target =~ /^$pattern_re$/) {
-                            $stem = $1;  # Save stem for $* expansion
+                PATTERN_SEARCH: for my $match (find_matching_patterns($target)) {
+                    my ($pkey, $match_stem) = @$match;
+                    {
+                            $stem = $match_stem;  # Save stem for $* expansion
 
                             # Pattern rules can now have multiple variants
                             # Try each variant and use the first one whose prerequisites exist
@@ -4997,7 +5015,6 @@ sub build_target {
                             warn "DEBUG: Using pattern rule variant $best_variant for $target (deps: @expanded_deps)\n" if $ENV{SMAK_DEBUG};
                             last PATTERN_SEARCH;
                         }
-                    }
                 }
             }
         }
@@ -5129,13 +5146,10 @@ sub build_target {
 
         # If still no rule found, try to find pattern rule match
         if (!$rule || $rule !~ /\S/) {
-            PATTERN_MATCH_FALLBACK: for my $pkey (keys %pattern_rule) {
-            if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                my $pattern = $1;
-                my $pattern_re = $pattern;
-                $pattern_re =~ s/%/(.+)/g;
-                if ($target =~ /^$pattern_re$/) {
-                    $stem = $1;  # Save stem for $* expansion
+            PATTERN_MATCH_FALLBACK: for my $match (find_matching_patterns($target)) {
+                my ($pkey, $match_stem) = @$match;
+                {
+                    $stem = $match_stem;  # Save stem for $* expansion
 
                     # Pattern rules can have multiple variants
                     my $rules_ref = $pattern_rule{$pkey};
@@ -5189,7 +5203,6 @@ sub build_target {
                     @deps = map { resolve_vpath($_, $cwd) } @deps;
                     last PATTERN_MATCH_FALLBACK;
                 }
-            }
         }
         }
 
@@ -5922,13 +5935,10 @@ sub collect_target_graph {
 
         # Try pattern rules if no fixed rule
         if (!$rule || $rule !~ /\S/) {
-            for my $pkey (keys %pattern_rule) {
-                if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                    my $pattern = $1;
-                    my $pattern_re = $pattern;
-                    $pattern_re =~ s/%/(.+)/g;
-                    if ($tgt =~ /^$pattern_re$/) {
-                        $stem = $1;
+            for my $match (find_matching_patterns($tgt)) {
+                my ($pkey, $match_stem) = @$match;
+                {
+                        $stem = $match_stem;
                         my $deps_ref = $pattern_deps{$pkey} || [];
                         my $rule_ref = $pattern_rule{$pkey} || '';
 
@@ -5948,7 +5958,6 @@ sub collect_target_graph {
                             @siblings = map { my $s = $_; $s =~ s/%/$stem/g; $s } @{$multi_output_siblings{$target_key}};
                         }
                         last;
-                    }
                 }
             }
         }
@@ -11152,18 +11161,15 @@ sub run_job_master {
 
             # Fall back to pattern rules if no suffix rule found
             if (!($rule && $rule =~ /\S/)) {
-            for my $pkey (keys %pattern_rule) {
-                if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                    my $pattern = $1;
-                    my $pattern_re = $pattern;
-                    $pattern_re =~ s/%/(.+)/g;
-                    if ($target =~ /^$pattern_re$/) {
+            for my $match (find_matching_patterns($target)) {
+                my ($pkey, $match_stem) = @$match;
+                {
                         # Found matching pattern rule - use its rule AND add pattern deps
                         my $rule_ref = $pattern_rule{$pkey} || '';
                         my $deps_ref = $pattern_deps{$pkey} || [];
                         # Handle both single rule (string) and multiple variants (array)
                         $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
-                        $stem = $1;  # Save stem for $* expansion
+                        $stem = $match_stem;  # Save stem for $* expansion
                         $matched_pattern_key = $pkey;  # Save for multi-output detection
 
                         # Add pattern rule deps (needed for $< expansion and dependency tracking)
@@ -11174,9 +11180,8 @@ sub run_job_master {
                             $expanded_dep =~ s/%/$stem/g;
                             push @deps, $expanded_dep unless grep { $_ eq $expanded_dep } @deps;
                         }
-                        print STDERR "Found pattern rule '$pattern' for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "Found pattern rule for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
                         last;
-                    }
                 }
             }
             }  # End of pattern rule fallback block
@@ -11222,15 +11227,13 @@ sub run_job_master {
 
             # Fall back to pattern rules if no suffix rule found
             if (!($rule && $rule =~ /\S/)) {
-            PATTERN_LOOP: for my $pkey (keys %pattern_rule) {
-                if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                    my $pattern = $1;
-                    my $pattern_re = $pattern;
-                    $pattern_re =~ s/%/(.+)/g;
-                    if ($target =~ /^$pattern_re$/) {
+            PATTERN_LOOP: for my $match (find_matching_patterns($target)) {
+                my ($pkey, $match_stem) = @$match;
+                my $pattern = (split /\t/, $pkey, 2)[1];
+                {
                         my $deps_ref = $pattern_deps{$pkey} || [];
                         my $rule_ref = $pattern_rule{$pkey} || '';
-                        $stem = $1;  # Save stem for $* expansion
+                        $stem = $match_stem;  # Save stem for $* expansion
                         $matched_pattern_key = $pkey;  # Save for multi-output detection
 
                         # Check if we have multiple variants (array of arrays)
@@ -11260,17 +11263,7 @@ sub run_job_master {
                                 my $source_can_be_built = exists $fixed_rule{$first_dep_key} || exists $pattern_rule{$first_dep_key};
                                 # Also check pattern rule matching (e.g., parse.cc matches parse%cc pattern)
                                 if (!$source_can_be_built && $first_dep ne '') {
-                                    for my $pk (keys %pattern_rule) {
-                                        if ($pk =~ /^[^\t]+\t(.+)$/) {
-                                            my $pp = $1;
-                                            my $pp_re = $pp;
-                                            $pp_re =~ s/%/(.+)/g;
-                                            if ($first_dep =~ /^$pp_re$/) {
-                                                $source_can_be_built = 1;
-                                                last;
-                                            }
-                                        }
-                                    }
+                                    $source_can_be_built = 1 if find_matching_patterns($first_dep);
                                 }
                                 if ($source_exists || $source_can_be_built) {
                                     @deps = @resolved_deps;
@@ -11350,7 +11343,6 @@ sub run_job_master {
                             }
                         }
                     }
-                }
             }
             }  # End of pattern rule fallback block
         }
@@ -11518,19 +11510,9 @@ sub run_job_master {
                     }
 
                     # Check pattern rules if no suffix rule found
-                    if (!$has_implicit_rule) {
-                        for my $pkey (keys %pattern_rule) {
-                            if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                                my $pattern = $1;
-                                my $pattern_re = $pattern;
-                                $pattern_re =~ s/%/(.+)/g;
-                                if ($single_dep =~ /^$pattern_re$/) {
-                                    $has_implicit_rule = 1;
-                                    print STDERR "Dependency '$single_dep' has matching pattern rule '$pattern'\n" if $ENV{SMAK_DEBUG};
-                                    last;
-                                }
-                            }
-                        }
+                    if (!$has_implicit_rule && find_matching_patterns($single_dep)) {
+                        $has_implicit_rule = 1;
+                        print STDERR "Dependency '$single_dep' has matching pattern rule\n" if $ENV{SMAK_DEBUG};
                     }
 
                     # Only mark complete if no implicit rule - it's a pure source file
@@ -11604,18 +11586,8 @@ sub run_job_master {
                     }
 
                     # Check pattern rules
-                    if (!$has_implicit_rule) {
-                        for my $pkey (keys %pattern_rule) {
-                            if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                                my $pattern = $1;
-                                my $pattern_re = $pattern;
-                                $pattern_re =~ s/%/(.+)/g;
-                                if ($single_dep =~ /^$pattern_re$/) {
-                                    $has_implicit_rule = 1;
-                                    last;
-                                }
-                            }
-                        }
+                    if (!$has_implicit_rule && find_matching_patterns($single_dep)) {
+                        $has_implicit_rule = 1;
                     }
 
                     if (!$has_implicit_rule) {
@@ -12381,14 +12353,7 @@ sub run_job_master {
         return 1 if exists $pseudo_rule{$key};
 
         # Check if target matches any pattern rule
-        for my $pkey (keys %pattern_rule) {
-            if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                my $pattern = $1;
-                my $pattern_re = $pattern;
-                $pattern_re =~ s/%/(.+)/g;
-                return 1 if $target =~ /^$pattern_re$/;
-            }
-        }
+        return 1 if find_matching_patterns($target);
 
         return 0;  # Cannot build this target
     }
@@ -12424,23 +12389,19 @@ sub run_job_master {
 
         # If no deps found by exact match, try pattern matching (like dispatch_jobs does)
         if (!@deps) {
-            for my $pkey (keys %pattern_rule) {
-                if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                    my $pattern = $1;
-                    my $pattern_re = $pattern;
-                    $pattern_re =~ s/%/(.+)/g;
-                    if ($target =~ /^$pattern_re$/) {
+            for my $match (find_matching_patterns($target)) {
+                my ($pkey, $match_stem) = @$match;
+                {
                         my $deps_ref = $pattern_deps{$pkey} || [];
                         # Handle both single variant and multiple variants
                         @deps = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY') ?
                                 @{$deps_ref->[0]} :
                                 (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
                         # Expand % in dependencies using the stem
-                        $stem = $1;
+                        $stem = $match_stem;
                         @deps = map { my $d = $_; $d =~ s/%/$stem/g; $d } @deps;
-                        print STDERR "DEBUG has_failed_dependency: Matched pattern '$pattern' for '$target', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "DEBUG has_failed_dependency: Matched pattern for '$target', expanded deps: [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
                         last;
-                    }
                 }
             }
         }
@@ -12797,14 +12758,12 @@ sub run_job_master {
                 # Fall back to pattern rules if no deps found
                 if (!@deps) {
                     my $job_dir = $job->{dir} || '.';
-                    DISPATCH_PATTERN: for my $pkey (keys %pattern_rule) {
-                        if ($pkey =~ /^[^\t]+\t(.+)$/) {
-                            my $pattern = $1;
-                            my $pattern_re = $pattern;
-                            $pattern_re =~ s/%/(.+)/g;
-                            if ($target =~ /^$pattern_re$/) {
+                    DISPATCH_PATTERN: for my $match (find_matching_patterns($target)) {
+                        my ($pkey, $match_stem) = @$match;
+                        my $pattern = (split /\t/, $pkey, 2)[1];
+                        {
                                 my $deps_ref = $pattern_deps{$pkey} || [];
-                                $stem = $1;
+                                $stem = $match_stem;
 
                                 # Check if we have multiple variants (array of arrays)
                                 if (ref($deps_ref) eq 'ARRAY' && @$deps_ref && ref($deps_ref->[0]) eq 'ARRAY') {
@@ -12841,7 +12800,6 @@ sub run_job_master {
                                     last DISPATCH_PATTERN;
                                 }
                             }
-                        }
                     }
                 }
 

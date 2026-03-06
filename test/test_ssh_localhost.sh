@@ -7,7 +7,8 @@ echo "Testing SSH workers on localhost"
 echo ""
 
 # Check if SSH to localhost works without password
-if ! ssh -o BatchMode=yes -o ConnectTimeout=5 localhost true 2>/dev/null; then
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+if ! ssh $SSH_OPTS localhost true 2>/dev/null; then
     echo "SKIP: SSH to localhost not configured (requires passwordless SSH)"
     echo "To enable: ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa (if needed)"
     echo "           ssh-copy-id localhost"

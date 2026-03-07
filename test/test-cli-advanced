@@ -373,8 +373,9 @@ sub test_caching {
         return;
     }
 
-    # Check cache was created
-    if (!-f "$cache_dir/state.cache") {
+    # Check cache was created (filename is derived from makefile absolute path)
+    my @cache_files = glob("$cache_dir/*.cache");
+    if (!@cache_files) {
         fail("Caching test", "Cache file not created");
         return;
     }
@@ -386,7 +387,7 @@ sub test_caching {
         pass("State caching");
     } else {
         # Cache exists but message not found - still pass if build succeeds
-        if ($exit2 == 0 && -f "$cache_dir/state.cache") {
+        if ($exit2 == 0 && scalar(glob("$cache_dir/*.cache"))) {
             pass("State caching");
         } else {
             fail("State caching", "Cache not used on second run");

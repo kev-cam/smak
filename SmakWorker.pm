@@ -260,11 +260,41 @@ sub run_worker {
     print $socket "READY\n";
     $socket->flush();
 
+    # Use sysread + manual line buffer throughout to avoid Perl buffered
+    # I/O vs select() mismatch (see Gotcha #11/#24).  Buffered <$socket>
+    # can over-read into Perl's buffer, making select() blind to data.
+    my $sel = IO::Select->new($socket);
+    my $last_idle_sent = 0;
+    my $read_buf = '';
+
+    # Read one line from socket using sysread + manual buffer.
+    # Returns the line (without newline) or undef on EOF/error.
+    my $read_line = sub {
+        while ($read_buf !~ /\n/) {
+            my @ready = $sel->can_read(1.0);
+            if (!@ready) {
+                # Timeout - send periodic IDLE heartbeat
+                my $now = Time::HiRes::time();
+                if ($now - $last_idle_sent >= 1.0) {
+                    print $socket "IDLE $now\n";
+                    $socket->flush();
+                    $last_idle_sent = $now;
+                }
+                next;
+            }
+            my $n = sysread($socket, $read_buf, 65536, length($read_buf));
+            return undef if !$n;  # EOF or error
+        }
+        $read_buf =~ s/^([^\n]*)\n//;
+        return $1;
+    };
+
     # Receive environment from master
     my $env_done = 0;
-    while (my $line = <$socket>) {
-        chomp $line;
-        
+    while (1) {
+        my $line = $read_line->();
+        die "Connection closed before environment received\n" unless defined $line;
+
         if ($line eq 'ENV_START') {
             next;
         } elsif ($line eq 'ENV_END') {
@@ -276,30 +306,9 @@ sub run_worker {
         }
     }
 
-    die "Connection closed before environment received\n" unless $env_done;
-
-    # Main worker loop - use select for periodic IDLE heartbeats
-    my $sel = IO::Select->new($socket);
-    my $last_idle_sent = 0;
-
     while (1) {
-        # Wait up to 1 second for data from master
-        my @ready = $sel->can_read(1.0);
-
-        if (!@ready) {
-            # Timeout - send periodic IDLE heartbeat so job server knows we're alive
-            my $now = Time::HiRes::time();
-            if ($now - $last_idle_sent >= 1.0) {
-                print $socket "IDLE $now\n";
-                $socket->flush();
-                $last_idle_sent = $now;
-            }
-            next;
-        }
-
-        my $line = <$socket>;
+        my $line = $read_line->();
         last unless defined $line;  # Connection closed
-        chomp $line;
 
         # Check for shutdown signal
         if ($line eq 'SHUTDOWN') {
@@ -318,8 +327,8 @@ sub run_worker {
             my $task_id = $1;
 
             # Get directory
-            my $dir_line = <$socket>;
-            chomp $dir_line;
+            my $dir_line = $read_line->();
+            die "Connection closed reading DIR\n" unless defined $dir_line;
             die "Expected DIR line, got: $dir_line\n" unless $dir_line =~ /^DIR (.*)$/;
             my $dir = $1;
 
@@ -329,25 +338,23 @@ sub run_worker {
             my $command = '';  # For display
             my $is_dry_run = 0;
 
-            my $ext_line = <$socket>;
-            chomp $ext_line;
+            my $ext_line = $read_line->();
+            die "Connection closed reading EXTERNAL_CMDS\n" unless defined $ext_line;
             if ($ext_line =~ /^EXTERNAL_CMDS(_DRY)? (\d+)$/) {
                 $is_dry_run = 1 if $1;
                 my $count = $2;
                 for (1..$count) {
-                    my $cmd = <$socket>;
-                    chomp $cmd if defined $cmd;
+                    my $cmd = $read_line->();
                     push @external_commands, $cmd if defined $cmd && $cmd ne '';
                 }
 
                 # Get trailing builtins
-                my $builtin_line = <$socket>;
-                chomp $builtin_line;
+                my $builtin_line = $read_line->();
+                die "Connection closed reading TRAILING_BUILTINS\n" unless defined $builtin_line;
                 if ($builtin_line =~ /^TRAILING_BUILTINS (\d+)$/) {
                     my $count = $1;
                     for (1..$count) {
-                        my $cmd = <$socket>;
-                        chomp $cmd if defined $cmd;
+                        my $cmd = $read_line->();
                         push @trailing_builtins, $cmd if defined $cmd && $cmd ne '';
                     }
                 }

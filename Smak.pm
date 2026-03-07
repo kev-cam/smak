@@ -262,6 +262,12 @@ our %ignored_files;
 # Value: arrayref of { var => 'VAR', op => '+=', value => 'transformed_value' }
 our %target_specific_vars;
 
+# Automatic variable context for recipe expansion.
+# Set via local() before calling expand_vars so that functions like
+# $(notdir $@) see the actual target path during variable expansion.
+# Keys: '@' ($@), '<' ($<), '^' ($^), '*' ($*)
+our %auto_vars;
+
 # Directories to ignore for dependency checking (from SMAK_IGNORE_DIRS env var)
 # These are system directories we know won't change during builds
 our @ignore_dirs;
@@ -1475,6 +1481,17 @@ sub expand_vars {
     # This handles autoconf-generated Makefiles that use ${prefix}, ${exec_prefix}, etc.
     $text =~ s/\$\{(\w+)\}/\$($1)/g;
 
+    # Substitute automatic variables ($@, $<, $^, $*) if set via recipe context.
+    # This must happen before AND inside the expansion loop so that:
+    # - Direct $@ in the text gets resolved (before the loop)
+    # - $@ appearing from variable expansion gets resolved (inside the loop)
+    # - Recursive calls for function args also resolve $@ (before the loop)
+    if (%auto_vars) {
+        for my $var (keys %auto_vars) {
+            $text =~ s/\$\Q$var\E/$auto_vars{$var}/g;
+        }
+    }
+
     # Prevent infinite loops from unsupported functions
     # Note: Large Makefiles (like automake-generated ones) can have hundreds of
     # variable references in a single command line, so we need a high limit
@@ -1483,6 +1500,12 @@ sub expand_vars {
 
     # Expand $(function args) and $(VAR) references
     while ($text =~ /\$\(/) {
+        # Resolve any automatic variables that appeared from the previous expansion
+        if (%auto_vars) {
+            for my $var (keys %auto_vars) {
+                $text =~ s/\$\Q$var\E/$auto_vars{$var}/g;
+            }
+        }
         if (++$iterations > $max_iterations) {
             warn "Warning: expand_vars hit iteration limit ($max_iterations), stopping expansion\n";
             warn "         This may indicate circular variable references or an unsupported make function\n";
@@ -5466,47 +5489,46 @@ sub build_target {
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($rule);
         warn "DEBUG[" . __LINE__ . "]:   After format_output\n" if $ENV{SMAK_DEBUG};
-        # Expand variables
-        my $expanded = expand_vars($converted);
-        warn "DEBUG[" . __LINE__ . "]:   After expand_vars\n" if $ENV{SMAK_DEBUG};
 
-        # Detect automake-style suffix rule patterns
-        # These contain: depbase=`echo $@ | sed ...`; ... -MF $depbase.Tpo ... && mv ... $depbase.Tpo $depbase.Po
-        # Note: After variable expansion, $$depbase becomes $depbase (single $)
-        # Use non-greedy matching to avoid catastrophic backtracking
-        my $is_automake_suffix = ($expanded =~ /depbase=`[^`]+`.*?\$depbase\.Tpo.*?\$depbase\.Po/);
-
-        # For suffix rules, $< should be the source file, not .dirstamp or other deps
+        # Compute source prerequisite ($<) before variable expansion
+        # so automatic variables are available for functions like $(notdir $@)
         my $source_prereq = $deps[0] || '';
         if ($suffix_source) {
-            # Use the source file we identified when matching the suffix rule
             $source_prereq = $suffix_source;
             warn "DEBUG[" . __LINE__ . "]:   Using suffix_source='$suffix_source' for \$<\n" if $ENV{SMAK_DEBUG};
         } elsif ($stem && @deps > 0) {
-            # Fallback: in suffix rule context, find the actual source file (not .dirstamp)
             for my $dep (@deps) {
-                next if $dep =~ /dirstamp$/;  # Skip .dirstamp files
-                next if $dep =~ /\.deps\//;    # Skip .deps/ directory markers
+                next if $dep =~ /dirstamp$/;
+                next if $dep =~ /\.deps\//;
                 $source_prereq = $dep;
                 last;
             }
         }
 
-        # Resolve source prerequisite through VPATH only if $< is actually used in the command
-        # This avoids expensive getcwd() and resolve_vpath() calls for rules that don't need it
+        # Resolve source prerequisite through VPATH if $< appears in the recipe
         my $resolved_source_prereq = $source_prereq;
-        if ($expanded =~ /\$</ && $source_prereq) {
+        if ($converted =~ /\$</ && $source_prereq) {
             use Cwd 'getcwd';
             my $cwd = getcwd();
             $resolved_source_prereq = resolve_vpath($source_prereq, $cwd);
             warn "DEBUG[" . __LINE__ . "]:   source_prereq='$source_prereq', resolved='$resolved_source_prereq'\n" if $ENV{SMAK_DEBUG};
         }
 
-        # Expand automatic variables
-        $expanded =~ s/\$@/$target/g;                     # $@ = target name
-        $expanded =~ s/\$</$resolved_source_prereq/g;     # $< = VPATH-resolved source file
-        $expanded =~ s/\$\^/join(' ', @deps)/ge;          # $^ = all prerequisites
-        $expanded =~ s/\$\*/$stem/g;                      # $* = stem (part matching %)
+        # Set automatic variable context so expand_vars can resolve $@, $<, etc.
+        # inside function arguments (e.g., $(notdir $@) in recursively-expanded vars)
+        local %auto_vars = (
+            '@' => $target,
+            '<' => $resolved_source_prereq,
+            '^' => join(' ', @deps),
+            '*' => $stem // '',
+        );
+
+        # Expand variables (auto vars are resolved inside expand_vars)
+        my $expanded = expand_vars($converted);
+        warn "DEBUG[" . __LINE__ . "]:   After expand_vars\n" if $ENV{SMAK_DEBUG};
+
+        # Detect automake-style suffix rule patterns
+        my $is_automake_suffix = ($expanded =~ /depbase=`[^`]+`.*?\$depbase\.Tpo.*?\$depbase\.Po/);
 
         # Update capture with fully expanded command (for job server dispatch)
         if ($capture_targets && exists $capture_targets->{$target}) {
@@ -10741,25 +10763,27 @@ sub run_job_master {
 
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($cmd);
-        # Expand variables
-        my $expanded = expand_vars($converted);
 
-        # Determine first prerequisite ($<), filtering out .dirstamp and .deps/ files
-        # These are directory marker dependencies that should not be used as source files
-        # Also resolve through VPATH for out-of-tree builds
+        # Compute first prerequisite ($<) before variable expansion
+        # so automatic variables are available for functions like $(notdir $@)
         my $first_prereq = '';
         for my $dep (@deps) {
-            next if $dep =~ /dirstamp$/;   # Skip .dirstamp files
-            next if $dep =~ /\.deps\//;     # Skip .deps/ directory markers
-            # Resolve through VPATH - source files may be in a different directory
+            next if $dep =~ /dirstamp$/;
+            next if $dep =~ /\.deps\//;
             $first_prereq = resolve_vpath($dep, $dir);
             last;
         }
 
-        # Expand automatic variables
-        $expanded =~ s/\$@/$target/g;                     # $@ = target name
-        $expanded =~ s/\$</$first_prereq/g;               # $< = first prerequisite (VPATH-resolved)
-        $expanded =~ s/\$\^/join(' ', @deps)/ge;          # $^ = all prerequisites
+        # Set automatic variable context so expand_vars can resolve $@, $<, etc.
+        # inside function arguments (e.g., $(notdir $@) in recursively-expanded vars)
+        local %auto_vars = (
+            '@' => $target,
+            '<' => $first_prereq,
+            '^' => join(' ', @deps),
+        );
+
+        # Expand variables (auto vars are resolved inside expand_vars)
+        my $expanded = expand_vars($converted);
 
         # Debug: Show expanded command for compilation targets
         if ($ENV{SMAK_DEBUG} && $target =~ /\.o$/) {

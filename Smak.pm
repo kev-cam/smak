@@ -570,8 +570,19 @@ sub is_recursive_make {
         $line =~ s/^\s+|\s+$//g;
         next unless $line =~ /\S/;
         $line = normalize_cd_make($line);
-        if ($line =~ m{^(?:perl\s+)?(?:(?:\.\.?/|/)?[\w/.-]*(?:smak(?:\.pl)?|make)|\$\{[^\}]*(?:smak|make)[^\}]*\})\s.*(?:-C|-f)\s}) {
-            return 1;
+        # Match recursive make/smak invocations with -C or -f flags.
+        # Patterns matched:
+        #   make -f file target          (literal command)
+        #   /path/to/smak -C dir         (absolute/relative path)
+        #   $(MAKE) -f file target       (unexpanded make variable)
+        #   ${MAKE} -f file target       (brace-style make variable)
+        #   $(MAKE) $(MAKESILENT) -f ... (with interleaved variable refs)
+        if ($line =~ m{^(?:perl\s+)?(?:(?:\.\.?/|/)?[\w/.-]*(?:smak(?:\.pl)?|make)|\$[(\{][^)\}]*(?:smak|make|MAKE)[^)\}]*[)\}])\s}) {
+            # Command starts with a make/smak invocation — check for -C or -f
+            # anywhere in the line (may follow other flags/variables like $(MAKESILENT))
+            if ($line =~ /(?:\s|^)-[Cf]\s/) {
+                return 1;
+            }
         }
         last;
     }
@@ -10283,6 +10294,11 @@ sub run_job_master {
     my $master_port = $master_server->sockport();
     vprint "Job-master master server on port $master_port\n";
 
+    # Export SMAK_JOB_SERVER in the job-server's own environment so that ALL
+    # child processes (builtin forks, worker exec'd commands) automatically
+    # inherit it.  This replaces per-fork propagation via worker_env (Gotcha #7).
+    $ENV{SMAK_JOB_SERVER} = "127.0.0.1:$master_port";
+
     # Create socket server for workers
     our $worker_server = IO::Socket::INET->new(
         LocalAddr => '127.0.0.1',
@@ -13407,8 +13423,12 @@ sub run_job_master {
                         # Normalize "cd dir && make/smak" to "make/smak -C dir"
                         $cmd_part = normalize_cd_make($cmd_part);
 
+                        # Expand make variables ($(MAKE), $(MAKESILENT), etc.)
+                        # so the command can be exec'd directly
+                        $cmd_part = expand_vars($cmd_part);
+
                         # Check if it's a recursive smak/make call (with -C or -f)
-                        if ($cmd_part =~ m{^(?:perl\s+)?(?:(?:\.\.?/|/)?[\w/.-]*(?:smak(?:\.pl)?|make)|\$\{[^\}]*(?:smak|make)[^\}]*\})(?:\s+-\S+)*\s+(?:-C|-f)\s+(\S+)}) {
+                        if ($cmd_part =~ m{^(?:perl\s+)?(?:\.\.?/|/)?[\w/.-]*(?:smak(?:\.pl)?|make)(?:\s+-\S+)*\s+(?:-C|-f)\s+(\S+)}) {
                             # Recursive make - collect all remaining recursive make commands
                             # and fork each one separately for parallel execution
                             my @recursive_cmds;
@@ -13417,6 +13437,7 @@ sub run_job_master {
                                 $c =~ s/^\s+|\s+$//g;
                                 $c =~ s/^[@-]+//;
                                 $c = normalize_cd_make($c);
+                                $c = expand_vars($c);
                                 next if $c eq '' || $c eq 'true' || $c eq ':';
                                 push @recursive_cmds, $c;
                             }
@@ -13461,17 +13482,11 @@ sub run_job_master {
                                     close($worker_server) if $worker_server;
                                     close($observer_server) if $observer_server;
 
-                                    # Set SMAK_JOB_SERVER so the child connects back
-                                    # as a child relay for parallel dispatch.  Child
-                                    # relay targets are qualified with exec_dir to avoid
-                                    # collisions when multiple children submit the same
-                                    # bare target name (e.g. "clean" or "main.o").
-                                    if (exists $worker_env{SMAK_JOB_SERVER}) {
-                                        $ENV{SMAK_JOB_SERVER} = $worker_env{SMAK_JOB_SERVER};
-                                    } else {
-                                        delete $ENV{SMAK_JOB_SERVER};
-                                    }
-                                    delete $ENV{USR_SMAK_OPT};  # Don't inherit parent's -j
+                                    # SMAK_JOB_SERVER is already in the job-server's env
+                                    # (set at startup), so forked children inherit it
+                                    # automatically.  Just clear USR_SMAK_OPT so children
+                                    # don't inherit the parent's -j flag.
+                                    delete $ENV{USR_SMAK_OPT};
 
                                     # Change to exec_dir
                                     unless (chdir($exec_dir)) {

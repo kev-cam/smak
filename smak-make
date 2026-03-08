@@ -1,0 +1,18 @@
+#!/bin/bash
+# smak-make - Entry point for recursive $(MAKE) calls in CMake builds
+#
+# When CMake-generated Makefiles call $(MAKE), this script runs instead
+# of the full smak wrapper.  It sources smak for common setup (SCRIPT_DIR,
+# PERLLIB, etc.) then checks whether a parent job-server is already
+# running.  If so, smak.pl enters child-relay mode automatically.
+
+# Source the main smak wrapper for SCRIPT_DIR, PERLLIB, MAKE, etc.
+# SMAK_SOURCED makes smak return instead of exec'ing
+SMAK_SOURCED=1 source "$(dirname "$0")/smak" "$@"
+unset SMAK_SOURCED
+
+# Mark that we've been through the make entry point — smak.pl can use
+# this to know it's a recursive child even if SMAK_JOB_SERVER got lost
+export SMAK_RECURSIVE=1
+
+exec perl ${SMAK_PERL_DEBUG} "$SCRIPT_DIR/smak.pl" "${perl_args[@]}"

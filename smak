@@ -79,5 +79,14 @@ for arg in "$@"; do
     fi
 done
 
+# When sourced by smak-make, skip the exec — let the caller handle it
+[ -n "$SMAK_SOURCED" ] && return 0
+
+# Mark recursive invocations so smak.pl can detect child builds
+# even if SMAK_JOB_SERVER was lost through env propagation
+if [ -n "$SMAK_JOB_SERVER" ]; then
+    export SMAK_RECURSIVE=1
+fi
+
 # Execute the Perl script with translated arguments
 exec perl ${SMAK_PERL_DEBUG} "$SCRIPT_DIR/$script.pl" "${perl_args[@]}"

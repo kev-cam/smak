@@ -1,1 +1,1 @@
-smak
+smak-make

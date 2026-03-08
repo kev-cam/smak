@@ -468,6 +468,7 @@ our %in_progress;
 our @auto_retry_patterns;  # Patterns for automatic retry (e.g., "*.cc", "*.hh")
 our %retry_counts;         # Track retry attempts per target
 our %assumed_targets;      # Targets marked as already built (even if they don't exist)
+our %learned_dep_orderings;  # Sticky cross-job dep orderings (dep_file => producing_target)
 
 sub submit_job {
     my ($target, $command, $dir) = @_;
@@ -3551,6 +3552,54 @@ sub get_cache_file {
     (my $key = $abs) =~ s/[\/]/_/g;
     my $cache_file = "$dir/$key.cache";
     return $cache_file;
+}
+
+# Save learned dependency orderings to cache dir
+sub save_learned_orderings {
+    my $dir = get_cache_dir();
+    return unless $dir && -d $dir;
+    my $file = "$dir/dep_orderings.pl";
+
+    # Nothing to save
+    return unless %learned_dep_orderings;
+
+    open(my $fh, '>', $file) or do {
+        warn "WARNING: Cannot write learned orderings '$file': $!\n";
+        return;
+    };
+    print $fh "# Smak learned dependency orderings - " . localtime() . "\n";
+    print $fh "# Auto-generated: discovered cross-job dependencies\n";
+    print $fh "%Smak::learned_dep_orderings = (\n";
+    for my $dep (sort keys %learned_dep_orderings) {
+        my $producer = $learned_dep_orderings{$dep};
+        print $fh "    " . _quote_string($dep) . " => " . _quote_string($producer) . ",\n";
+    }
+    print $fh ");\n1;\n";
+    close($fh);
+    print STDERR "Saved " . scalar(keys %learned_dep_orderings) . " learned orderings to $file\n" if $ENV{SMAK_DEBUG};
+}
+
+# Load learned dependency orderings from cache dir
+sub load_learned_orderings {
+    my $dir = get_cache_dir();
+    return unless $dir;
+    my $file = "$dir/dep_orderings.pl";
+    return unless -f $file;
+
+    # Expire if older than 7 days
+    my $age = time() - (stat($file))[9];
+    if ($age > 7 * 86400) {
+        unlink $file;
+        return;
+    }
+
+    do $file;
+    if ($@) {
+        warn "WARNING: Error loading learned orderings '$file': $@\n";
+        %learned_dep_orderings = ();
+    } else {
+        print STDERR "Loaded " . scalar(keys %learned_dep_orderings) . " learned orderings from $file\n" if $ENV{SMAK_DEBUG};
+    }
 }
 
 # Save current state to cache file
@@ -10579,6 +10628,15 @@ sub run_job_master {
     our %currently_dispatched;  # target => task_id (防 duplicate dispatch tracking)
     our $next_task_id = 1;
     our $stop_requested = 0;  # Set to 1 when a job fails and keep_going is false
+
+    # Deferred dispatch: when a dep can't be resolved yet but might appear later
+    # (e.g., cross-child-relay deps in CMake builds), defer instead of failing.
+    our %deferred_deps;       # target => { dep => $dep_name, since => $epoch }
+    our $deferred_progress = 0;  # Incremented on each successful job completion
+
+    # Load sticky learned orderings from prior builds
+    load_learned_orderings();
+
     # Auto-rescan: Enable by default when FUSE is NOT detected
     # When FUSE is present, it provides file change notifications
     # When FUSE is absent, we need periodic polling to detect changes
@@ -12170,8 +12228,11 @@ sub run_job_master {
             print STDERR "IDLE-CHECK[$context]: workers=$total_workers busy=$busy_workers queued=$queued running=$running pending=$pending builtin_forks=$builtin_forks\n";
         }
 
-        # All done when: no busy workers, no jobs queued, no running jobs, no pending composites, no builtin forks
-        my $all_done = ($busy_workers == 0 && $queued == 0 && $running == 0 && $pending == 0 && $builtin_forks == 0);
+        # All done when: no busy workers, no jobs queued, no running jobs, no pending composites,
+        # no builtin forks, no active child relays
+        my $children = scalar(@child_sockets);
+        my $all_done = ($busy_workers == 0 && $queued == 0 && $running == 0 && $pending == 0
+                        && $builtin_forks == 0 && $children == 0);
 
         # Debug: if we have idle workers but work isn't done, show what's blocking
         # (Skip when builtin forks are running - that's expected wait time, not a stuck state)
@@ -12190,6 +12251,9 @@ sub run_job_master {
         }
 
         if ($all_done && !$idle_sent && $master_socket) {
+            # Persist learned orderings for next build
+            save_learned_orderings() if %learned_dep_orderings;
+
             my $final_exit = $max_exit_code;
             if (!$final_exit && keys(%failed_targets)) {
                 for my $t (keys %failed_targets) {
@@ -12276,7 +12340,8 @@ sub run_job_master {
 	# Skip in dry-run mode where missing files can cause false positives
 	# Skip if builtin fork children are running (they handle recursive makes asynchronously)
 	if ($label =~ /intermittent/ && !$dry_run_mode) {
-	    if (scalar(@job_queue) > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0 && scalar(keys %builtin_fork_pipes) == 0) {
+	    if (scalar(@job_queue) > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0
+	        && scalar(keys %builtin_fork_pipes) == 0 && scalar(@child_sockets) == 0) {
 	        # Potential deadlock - try to fail jobs whose dependencies have failed
 	        my $failed_count = 0;
 	        my @remaining_jobs;
@@ -12328,7 +12393,22 @@ sub run_job_master {
 	        }
 
 	        # If still stuck with jobs, that's a real deadlock
-	        if (@job_queue > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0 && scalar(keys %builtin_fork_pipes) == 0) {
+	        # But first: fail any deferred jobs whose deps will never appear
+	        if (%deferred_deps && scalar(keys %running_jobs) == 0
+	            && scalar(keys %builtin_fork_pipes) == 0 && scalar(@child_sockets) == 0) {
+	            for my $dt (keys %deferred_deps) {
+	                my $dep = $deferred_deps{$dt}{dep};
+	                print STDERR "Deferred job '$dt' FAILED: dependency '$dep' was never produced\n";
+	                $in_progress{$dt} = "failed";
+	                $failed_targets{$dt} = 1;
+	                fail_dependent_composite_targets($dt, 1);
+	                check_child_completion($dt, 1);
+	                @job_queue = grep { $_->{target} ne $dt } @job_queue;
+	            }
+	            %deferred_deps = ();
+	        }
+	        if (@job_queue > 0 && $ready_workers > 0 && scalar(keys %running_jobs) == 0
+	            && scalar(keys %builtin_fork_pipes) == 0 && scalar(@child_sockets) == 0) {
 	            # Before failing, dump diagnostic info
 	            warn "Deadlock diagnostic:\n";
 	            warn "  current_dispatch_layer=$current_dispatch_layer, max_dispatch_layer=$max_dispatch_layer\n";
@@ -12396,6 +12476,33 @@ sub run_job_master {
         return 1 if find_matching_patterns($target);
 
         return 0;  # Cannot build this target
+    }
+
+    # Check if a dependency might be produced by in-flight or queued work.
+    # Returns true if we should defer rather than fail.
+    sub might_be_produced {
+        my ($dep) = @_;
+
+        # 1. Active child relays still submitting — more jobs may arrive
+        for my $cs (@child_sockets) {
+            return 1 unless $child_all_submitted{$cs};
+        }
+
+        # 2. Builtin forks in flight — recursive make forks that will spawn child relays
+        return 1 if keys %builtin_fork_pipes;
+
+        # 3. Dep matches a queued or running job's target
+        for my $qj (@job_queue) {
+            return 1 if $qj->{target} eq $dep;
+        }
+        for my $task_id (keys %running_jobs) {
+            return 1 if $running_jobs{$task_id}{target} eq $dep;
+        }
+
+        # 4. Dep is in learned orderings (was produced in a prior build)
+        return 1 if exists $learned_dep_orderings{$dep};
+
+        return 0;
     }
 
     # Check if a target has any failed dependencies (recursively)
@@ -13138,7 +13245,15 @@ sub run_job_master {
                             } else {
                                 # Check if this dependency can actually be built
                                 if (!can_build_target($single_dep, $job->{dir})) {
-                                    # Dependency cannot be built - no rule exists and file doesn't exist
+                                    # Can't build it now — but might another job produce it?
+                                    if (might_be_produced($single_dep)) {
+                                        # Defer: skip this job, try again when more work completes
+                                        $deferred_deps{$target} = { dep => $single_dep, since => $deferred_progress };
+                                        $deps_satisfied = 0;
+                                        print STDERR "Deferring '$target': dep '$single_dep' might be produced later\n" if $ENV{SMAK_DEBUG};
+                                        last;
+                                    }
+                                    # Truly unbuildable — no rule, no source file, no hope
                                     print STDERR "Job '$target' FAILED: dependency '$single_dep' cannot be built (no rule or source file found)\n";
                                     $in_progress{$target} = "failed";
                                     $failed_targets{$target} = 1;  # Generic failure code
@@ -13164,6 +13279,15 @@ sub run_job_master {
 
                 if ($deps_satisfied) {
                     print STDERR "DEBUG dispatch: Job '$target' has all dependencies satisfied, will dispatch\n" if $ENV{SMAK_DEBUG};
+
+                    # Clear deferred state if this job was previously deferred
+                    if (exists $deferred_deps{$target}) {
+                        my $dep = $deferred_deps{$target}{dep};
+                        # Learn the ordering: this dep was produced by some other job
+                        $learned_dep_orderings{$dep} //= $target;
+                        print STDERR "Undeferred '$target': dep '$dep' now available\n" if $ENV{SMAK_DEBUG};
+                        delete $deferred_deps{$target};
+                    }
 
                     $job_index = $i;
                     last;  # Dispatch first satisfiable job immediately
@@ -13221,10 +13345,11 @@ sub run_job_master {
                 }
 
                 # Determine why we couldn't dispatch - waiting for layer vs truly stuck
-                if ($skipped_for_order_only > 0 || $skipped_for_layer > 0) {
-                    # Not stuck - just waiting for earlier layers to complete
+                if ($skipped_for_order_only > 0 || $skipped_for_layer > 0 || keys %deferred_deps) {
+                    # Not stuck - waiting for layers, order-only deps, or deferred deps to resolve
                     print STDERR "DEBUG: Waiting for layer $current_dispatch_layer to drain " .
-                                 "($skipped_for_layer higher-layer, $skipped_for_order_only order-only skipped)\n" if $ENV{SMAK_DEBUG};
+                                 "($skipped_for_layer higher-layer, $skipped_for_order_only order-only, " .
+                                 scalar(keys %deferred_deps) . " deferred)\n" if $ENV{SMAK_DEBUG};
                 } elsif ($ENV{SMAK_DEBUG}) {
                     print STDERR "No jobs with satisfied dependencies (stuck!)\n";
                     print STDERR "Current layer: $current_dispatch_layer, max layer: $max_dispatch_layer\n";
@@ -14377,6 +14502,23 @@ sub run_job_master {
 
                         print $master_socket "JOB_COMPLETE $job->{target} $exit_code\n" if $master_socket;
                         check_child_completion($job->{target}, $exit_code);
+
+                        # Track progress for deferral deadlock detection
+                        if ($exit_code == 0) {
+                            $deferred_progress++;
+
+                            # Learn: if this completed target unblocks any deferred jobs,
+                            # record the ordering so future builds don't defer
+                            my $completed = $job->{target};
+                            for my $dt (keys %deferred_deps) {
+                                my $dep = $deferred_deps{$dt}{dep};
+                                if ($dep eq $completed) {
+                                    $learned_dep_orderings{$dep} = $completed;
+                                    print STDERR "Learned ordering: '$dt' depends on '$dep' (produced by '$completed')\n" if $ENV{SMAK_DEBUG};
+                                    delete $deferred_deps{$dt};
+                                }
+                            }
+                        }
 
                         # Clean up dispatch tracking
                         delete $currently_dispatched{$job->{target}} if exists $currently_dispatched{$job->{target}};

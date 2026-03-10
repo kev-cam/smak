@@ -11007,34 +11007,67 @@ sub run_job_master {
         }
     }
 
+    # Look up the dispatch state of a target.  Builds index hashes on
+    # first call per STATUS request so repeated lookups are O(1).
+    sub target_dispatch_state {
+        my ($target, $queued_idx, $running_idx) = @_;
+        return "completed"                          if exists $completed_targets{$target};
+        return "failed"                             if exists $failed_targets{$target};
+        return "in_progress:$in_progress{$target}"  if exists $in_progress{$target};
+        return "queued"                             if exists $queued_idx->{$target};
+        return "running:task$running_idx->{$target}" if exists $running_idx->{$target};
+        return "unknown";
+    }
+
+    # Build lookup indexes for queued and running targets (avoids
+    # grep-in-loop O(n*m) when reporting per-target state).
+    sub build_status_indexes {
+        my %queued;
+        for my $qj (@job_queue) {
+            $queued{$qj->{target}} = 1;
+        }
+        my %running;
+        for my $tid (keys %running_jobs) {
+            $running{$running_jobs{$tid}{target}} = $tid;
+        }
+        return (\%queued, \%running);
+    }
+
+    # Print child-relay detail lines to $fh.  $max_detail controls how
+    # many per-target state lines to show (0 = summary only).
+    sub print_child_relay_status {
+        my ($fh, $max_detail, $queued_idx, $running_idx) = @_;
+        for my $cs (@child_sockets) {
+            my $submitted = $child_all_submitted{$cs} ? "yes" : "no";
+            my $job_count = exists $child_job_targets{$cs} ? scalar(keys %{$child_job_targets{$cs}}) : 0;
+            my $exit = $child_exit_codes{$cs} // '-';
+            print $fh "  CHILD all_submitted=$submitted pending=$job_count exit=$exit\n";
+            if ($job_count > 0 && $job_count <= $max_detail) {
+                for my $t (sort keys %{$child_job_targets{$cs}}) {
+                    my $state = target_dispatch_state($t, $queued_idx, $running_idx);
+                    print $fh "    $t ($state)\n";
+                }
+            } elsif ($job_count > $max_detail && $max_detail > 0) {
+                my @targets = sort keys %{$child_job_targets{$cs}};
+                my $show = $max_detail < 5 ? $max_detail : 5;
+                for my $t (@targets[0 .. $show - 1]) {
+                    print $fh "    $t\n";
+                }
+                print $fh "    ... and " . ($job_count - $show) . " more\n";
+            }
+        }
+    }
+
     sub send_status {
         my ($socket) = @_;
+        my ($qi, $ri) = build_status_indexes();
         print $socket "STATUS_START\n";
         print $socket "WORKERS " . scalar(@workers) . "\n";
         print $socket "QUEUED " . scalar(@job_queue) . "\n";
         print $socket "RUNNING " . scalar(keys %running_jobs) . "\n";
         print $socket "BUILTIN_FORKS " . scalar(keys %builtin_fork_pipes) . "\n";
         print $socket "CHILD_RELAYS " . scalar(@child_sockets) . "\n";
-        for my $cs (@child_sockets) {
-            my $submitted = $child_all_submitted{$cs} ? "yes" : "no";
-            my $job_count = exists $child_job_targets{$cs} ? scalar(keys %{$child_job_targets{$cs}}) : 0;
-            print $socket "  CHILD all_submitted=$submitted pending=$job_count\n";
-            if ($job_count > 0 && $job_count <= 20) {
-                for my $t (sort keys %{$child_job_targets{$cs}}) {
-                    my $state = "unknown";
-                    if (exists $completed_targets{$t}) { $state = "completed"; }
-                    elsif (exists $failed_targets{$t}) { $state = "failed"; }
-                    elsif (exists $in_progress{$t}) { $state = "in_progress:$in_progress{$t}"; }
-                    elsif (grep { $_->{target} eq $t } @job_queue) { $state = "queued"; }
-                    else {
-                        for my $tid (keys %running_jobs) {
-                            if ($running_jobs{$tid}{target} eq $t) { $state = "running:task$tid"; last; }
-                        }
-                    }
-                    print $socket "    $t ($state)\n";
-                }
-            }
-        }
+        print_child_relay_status($socket, 20, $qi, $ri);
         print $socket "DISPATCH_LAYER current=$current_dispatch_layer max=$max_dispatch_layer\n";
         for my $li (0 .. $max_dispatch_layer) {
             my $lr = $job_layers[$li];
@@ -11043,8 +11076,8 @@ sub run_job_master {
             print $socket "  layer $li: $count jobs\n";
         }
         # Show first few queue entries with their layer assignments
-        my $show_max = @job_queue < 10 ? $#job_queue : 9;
         if (@job_queue > 0) {
+            my $show_max = @job_queue < 10 ? $#job_queue : 9;
             print $socket "QUEUE_SAMPLE (first " . ($show_max + 1) . " of " . scalar(@job_queue) . "):\n";
             for my $qi (0 .. $show_max) {
                 my $qj = $job_queue[$qi];
@@ -14806,37 +14839,9 @@ sub run_job_master {
 
                     # Show child relay state
                     if (@child_sockets > 0) {
+                        my ($qi, $ri) = build_status_indexes();
                         print $master_socket "Child relays: " . scalar(@child_sockets) . "\n";
-                        for my $cs (@child_sockets) {
-                            my $submitted = $child_all_submitted{$cs} ? "yes" : "no";
-                            my $job_count = exists $child_job_targets{$cs} ? scalar(keys %{$child_job_targets{$cs}}) : 0;
-                            my $exit = $child_exit_codes{$cs} // '-';
-                            print $master_socket "  socket=$cs  all_submitted=$submitted  pending_jobs=$job_count  exit=$exit\n";
-                            if ($job_count > 0 && $job_count <= 10) {
-                                for my $t (sort keys %{$child_job_targets{$cs}}) {
-                                    my $in_q = (grep { $_->{target} eq $t } @job_queue) ? "queued" :
-                                               (exists $running_jobs{$_} ? "running" : "???");
-                                    # Check various states
-                                    my $state = "unknown";
-                                    if (exists $completed_targets{$t}) { $state = "completed"; }
-                                    elsif (exists $failed_targets{$t}) { $state = "failed"; }
-                                    elsif (exists $in_progress{$t}) { $state = "in_progress:$in_progress{$t}"; }
-                                    elsif (grep { $_->{target} eq $t } @job_queue) { $state = "queued"; }
-                                    else {
-                                        for my $tid (keys %running_jobs) {
-                                            if ($running_jobs{$tid}{target} eq $t) { $state = "running:task$tid"; last; }
-                                        }
-                                    }
-                                    print $master_socket "    $t  ($state)\n";
-                                }
-                            } elsif ($job_count > 10) {
-                                my @targets = sort keys %{$child_job_targets{$cs}};
-                                for my $t (@targets[0..4]) {
-                                    print $master_socket "    $t\n";
-                                }
-                                print $master_socket "    ... and " . ($job_count - 5) . " more\n";
-                            }
-                        }
+                        print_child_relay_status($master_socket, 10, $qi, $ri);
                     }
 
                     # Show builtin fork state

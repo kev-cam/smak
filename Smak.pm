@@ -5426,7 +5426,8 @@ sub build_target {
     }
 
     # If not .PHONY and target is up-to-date, handle based on rebuild_missing_intermediates setting
-    unless ($is_phony) {
+    # In relay_capture_mode, skip this check — capture everything and let the parent decide
+    unless ($is_phony || $relay_capture_mode) {
         warn "DEBUG[" . __LINE__ . "]:   Checking if target exists and is up-to-date...\n" if $ENV{SMAK_DEBUG};
         if (-e $target && !needs_rebuild($target)) {
             warn "DEBUG:   Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
@@ -11012,7 +11013,58 @@ sub run_job_master {
         print $socket "WORKERS " . scalar(@workers) . "\n";
         print $socket "QUEUED " . scalar(@job_queue) . "\n";
         print $socket "RUNNING " . scalar(keys %running_jobs) . "\n";
+        print $socket "BUILTIN_FORKS " . scalar(keys %builtin_fork_pipes) . "\n";
+        print $socket "CHILD_RELAYS " . scalar(@child_sockets) . "\n";
+        for my $cs (@child_sockets) {
+            my $submitted = $child_all_submitted{$cs} ? "yes" : "no";
+            my $job_count = exists $child_job_targets{$cs} ? scalar(keys %{$child_job_targets{$cs}}) : 0;
+            print $socket "  CHILD all_submitted=$submitted pending=$job_count\n";
+            if ($job_count > 0 && $job_count <= 20) {
+                for my $t (sort keys %{$child_job_targets{$cs}}) {
+                    my $state = "unknown";
+                    if (exists $completed_targets{$t}) { $state = "completed"; }
+                    elsif (exists $failed_targets{$t}) { $state = "failed"; }
+                    elsif (exists $in_progress{$t}) { $state = "in_progress:$in_progress{$t}"; }
+                    elsif (grep { $_->{target} eq $t } @job_queue) { $state = "queued"; }
+                    else {
+                        for my $tid (keys %running_jobs) {
+                            if ($running_jobs{$tid}{target} eq $t) { $state = "running:task$tid"; last; }
+                        }
+                    }
+                    print $socket "    $t ($state)\n";
+                }
+            }
+        }
+        print $socket "DISPATCH_LAYER current=$current_dispatch_layer max=$max_dispatch_layer\n";
+        for my $li (0 .. $max_dispatch_layer) {
+            my $lr = $job_layers[$li];
+            my $count = $lr ? scalar(@$lr) : 0;
+            next if $count == 0;
+            print $socket "  layer $li: $count jobs\n";
+        }
+        # Show first few queue entries with their layer assignments
+        my $show_max = @job_queue < 10 ? $#job_queue : 9;
+        if (@job_queue > 0) {
+            print $socket "QUEUE_SAMPLE (first " . ($show_max + 1) . " of " . scalar(@job_queue) . "):\n";
+            for my $qi (0 .. $show_max) {
+                my $qj = $job_queue[$qi];
+                my $layer = $qj->{layer} // '?';
+                my $fc = $qj->{from_child} ? 'child' : 'local';
+                my $cmd_preview = substr($qj->{command} // '', 0, 60);
+                $cmd_preview =~ s/\n/ /g;
+                print $socket "  [$qi] layer=$layer $fc $qj->{target}  cmd=$cmd_preview\n";
+            }
+        }
+        # Worker readiness
+        for my $wi (0 .. $#workers) {
+            my $w = $workers[$wi];
+            my $ready = $worker_status{$w}{ready} ? "ready" : "busy";
+            print $socket "  WORKER[$wi] $ready\n";
+        }
+        print $socket "COMPLETED " . scalar(keys %completed_targets) . "\n";
+        print $socket "FAILED " . scalar(keys %failed_targets) . "\n";
         print $socket "STATUS_END\n";
+        $socket->flush();
     }
 
     sub shutdown_workers {
@@ -12816,6 +12868,11 @@ sub run_job_master {
             my $job_index = -1;
             my $skipped_for_order_only = 0;  # Track jobs skipped due to order-only deps
             my $skipped_for_layer = 0;       # Track jobs skipped due to layer
+            # When builtin forks are running, multiple child relays contribute
+            # jobs at different layer depths to the same queue.  Disable the
+            # layer gate so the dep check alone controls dispatch ordering —
+            # this prevents cross-relay deadlocks (Gotcha #28).
+            my $bypass_layers = keys(%builtin_fork_pipes) > 0;
             for my $i (0 .. $#job_queue) {
                 my $job;
                 my $target;
@@ -12846,8 +12903,11 @@ sub run_job_master {
                 # LAYER CHECK: Skip jobs in layers higher than current dispatch layer
                 # Jobs in higher layers depend on jobs in lower layers - can't run until
                 # all lower layer jobs are complete (skip silently to avoid log spam)
+                # Exception: when $bypass_layers is set (second pass), skip layer gate
+                # to handle cross-relay deadlocks where child relays submit jobs at
+                # different layer depths into the same queue.
                 my $job_layer = $job->{layer} // 0;
-                if ($job_layer > $current_dispatch_layer) {
+                if ($job_layer > $current_dispatch_layer && !$bypass_layers) {
                     print STDERR "DEBUG dispatch: Skipping job '$target' (layer $job_layer > current $current_dispatch_layer)\n" if $ENV{SMAK_DEBUG} && $skipped_for_layer < 3;
                     $skipped_for_layer++;
                     next;
@@ -13218,6 +13278,11 @@ sub run_job_master {
                                 # Dependency is part of a composite target being built
                                 $deps_satisfied = 0;
                                 print STDERR "  Job '$target' waiting for dependency '$single_dep' (sibling in progress)\n" if $ENV{SMAK_DEBUG};
+                                last;
+                            } elsif ($dep_status eq 'builtin_fork') {
+                                # Dependency dispatched as builtin fork (recursive make) - wait for it
+                                $deps_satisfied = 0;
+                                print STDERR "  Job '$target' waiting for dependency '$single_dep' (builtin fork in progress)\n" if $ENV{SMAK_DEBUG};
                                 last;
                             } else {
                                 # Unknown status - be conservative and wait
@@ -14739,6 +14804,60 @@ sub run_job_master {
                         }
                     }
 
+                    # Show child relay state
+                    if (@child_sockets > 0) {
+                        print $master_socket "Child relays: " . scalar(@child_sockets) . "\n";
+                        for my $cs (@child_sockets) {
+                            my $submitted = $child_all_submitted{$cs} ? "yes" : "no";
+                            my $job_count = exists $child_job_targets{$cs} ? scalar(keys %{$child_job_targets{$cs}}) : 0;
+                            my $exit = $child_exit_codes{$cs} // '-';
+                            print $master_socket "  socket=$cs  all_submitted=$submitted  pending_jobs=$job_count  exit=$exit\n";
+                            if ($job_count > 0 && $job_count <= 10) {
+                                for my $t (sort keys %{$child_job_targets{$cs}}) {
+                                    my $in_q = (grep { $_->{target} eq $t } @job_queue) ? "queued" :
+                                               (exists $running_jobs{$_} ? "running" : "???");
+                                    # Check various states
+                                    my $state = "unknown";
+                                    if (exists $completed_targets{$t}) { $state = "completed"; }
+                                    elsif (exists $failed_targets{$t}) { $state = "failed"; }
+                                    elsif (exists $in_progress{$t}) { $state = "in_progress:$in_progress{$t}"; }
+                                    elsif (grep { $_->{target} eq $t } @job_queue) { $state = "queued"; }
+                                    else {
+                                        for my $tid (keys %running_jobs) {
+                                            if ($running_jobs{$tid}{target} eq $t) { $state = "running:task$tid"; last; }
+                                        }
+                                    }
+                                    print $master_socket "    $t  ($state)\n";
+                                }
+                            } elsif ($job_count > 10) {
+                                my @targets = sort keys %{$child_job_targets{$cs}};
+                                for my $t (@targets[0..4]) {
+                                    print $master_socket "    $t\n";
+                                }
+                                print $master_socket "    ... and " . ($job_count - 5) . " more\n";
+                            }
+                        }
+                    }
+
+                    # Show builtin fork state
+                    my $bf_count = scalar(keys %builtin_fork_pipes);
+                    if ($bf_count > 0) {
+                        print $master_socket "Builtin forks: $bf_count\n";
+                        for my $key (keys %builtin_fork_pipes) {
+                            my $info = $builtin_fork_pipes{$key};
+                            print $master_socket "  target=$info->{target}  pid=$info->{pid}\n";
+                        }
+                    }
+
+                    # Show dispatch layer info
+                    print $master_socket "Dispatch layers: current=$current_dispatch_layer max=$max_dispatch_layer\n";
+                    for my $li (0 .. $max_dispatch_layer) {
+                        my $lr = $job_layers[$li];
+                        my $count = $lr ? scalar(@$lr) : 0;
+                        next if $count == 0;
+                        print $master_socket "  layer $li: $count jobs\n";
+                    }
+
                     print $master_socket "=== End Status ===\n";
                     print $master_socket "STATUS_END\n";
                     $master_socket->flush();
@@ -15893,6 +16012,14 @@ sub run_job_master {
                     # then propagate - any target whose dep will be rebuilt also needs rebuild.
                     my %needs_build;
                     for my $job (@child_jobs) {
+                        # Targets whose command is a recursive make always need rebuild —
+                        # they are entry points (like CMake's .dir/all stamp files) that
+                        # trigger sub-builds.  Skipping them loses the entire sub-build.
+                        if (is_recursive_make($job->{command})) {
+                            $needs_build{$job->{target}} = 1;
+                            next;
+                        }
+
                         # Child relay targets/deps may be absolute (qualified with exec_dir)
                         my $target_path = $job->{target} =~ m{^/} ? $job->{target} : "$job->{exec_dir}/$job->{target}";
                         unless (-e $target_path) {
@@ -15934,9 +16061,13 @@ sub run_job_master {
                             push @to_remove, $job->{target};
                             $completed_targets{$job->{target}} = 1;
                             $in_progress{$job->{target}} = "done";
-                            # Also mark complete in child tracking
-                            if (exists $child_job_targets{$socket}) {
-                                delete $child_job_targets{$socket}{$job->{target}};
+                            # Also mark complete in child tracking — use the job's
+                            # owning socket, not the socket that triggered this
+                            # post-processing (multiple child relays may have
+                            # submitted jobs that are processed together).
+                            my $owning = $target_to_child{$job->{target}};
+                            if ($owning && exists $child_job_targets{$owning}) {
+                                delete $child_job_targets{$owning}{$job->{target}};
                             }
                             delete $target_to_child{$job->{target}};
                         }
@@ -15952,21 +16083,27 @@ sub run_job_master {
                         }
                         print STDERR "Removed " . scalar(@to_remove) . " up-to-date child jobs\n" if $ENV{SMAK_DEBUG};
 
-                        # Check if ALL child jobs were removed - send CHILD_COMPLETE directly
-                        if (grep { $_ == $socket } @child_sockets) {
-                            if ($child_all_submitted{$socket} &&
-                                (!exists $child_job_targets{$socket} || !keys %{$child_job_targets{$socket}})) {
-                                my $child_exit = $child_exit_codes{$socket} || 0;
-                                print STDERR "All child jobs up-to-date, sending CHILD_COMPLETE $child_exit\n" if $ENV{SMAK_DEBUG};
-                                print $socket "CHILD_COMPLETE $child_exit\n";
-                                $socket->flush();
-                                $select->remove($socket);
-                                @child_sockets = grep { $_ != $socket } @child_sockets;
-                                delete $child_job_targets{$socket};
-                                delete $child_exit_codes{$socket};
-                                delete $child_all_submitted{$socket};
-                                close($socket);
+                        # Check if up-to-date removal completed any child relay.
+                        # Must check ALL child sockets, not just the current one,
+                        # because post-processing handles jobs from all relays.
+                        my @completed_children;
+                        for my $cs (@child_sockets) {
+                            if ($child_all_submitted{$cs} &&
+                                (!exists $child_job_targets{$cs} || !keys %{$child_job_targets{$cs}})) {
+                                push @completed_children, $cs;
                             }
+                        }
+                        for my $cs (@completed_children) {
+                            my $child_exit = $child_exit_codes{$cs} || 0;
+                            print STDERR "All child jobs up-to-date, sending CHILD_COMPLETE $child_exit\n" if $ENV{SMAK_DEBUG};
+                            print $cs "CHILD_COMPLETE $child_exit\n";
+                            $cs->flush();
+                            $select->remove($cs);
+                            @child_sockets = grep { $_ != $cs } @child_sockets;
+                            delete $child_job_targets{$cs};
+                            delete $child_exit_codes{$cs};
+                            delete $child_all_submitted{$cs};
+                            close($cs);
                         }
                     }
                 }
@@ -15977,7 +16114,6 @@ sub run_job_master {
                     last if $layer_ref && @$layer_ref > 0;  # Found a layer with jobs
                     $current_dispatch_layer++;
                 }
-
                 # Pre-execute pure-builtin child jobs (like "mkdir dep") before
                 # dispatching worker jobs.  This ensures setup targets complete
                 # synchronously so worker jobs that depend on their side effects
@@ -16115,6 +16251,12 @@ sub run_job_master {
                     }
                     check_and_send_idle("builtin_fork failure");
                 }
+
+                # Builtin fork completion may unblock higher-layer jobs that were
+                # waiting for this target.  Workers are already IDLE (they never
+                # received these jobs), so no READY message will trigger dispatch.
+                # Must explicitly dispatch here.
+                dispatch_jobs() if @job_queue > 0;
 
             } elsif ($socket == $worker_server) {
                 # New worker connecting
@@ -16983,6 +17125,11 @@ sub run_job_master {
 
                     # Check if all work is done
                     check_and_send_idle("main TASK_END");
+
+                    # Job completion may unblock dependent jobs for other ready
+                    # workers.  Dispatch immediately rather than waiting for
+                    # the next READY message from this worker.
+                    dispatch_jobs() if @job_queue > 0;
                 }
                 } # end while loop for worker messages
                 $socket->blocking(1);

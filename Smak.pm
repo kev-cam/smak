@@ -303,7 +303,8 @@ our $rebuild_missing_intermediates = $ENV{SMAK_REBUILD_INTERMEDIATES} // 1;  # D
 # Job server state
 our $jobs = 1;  # Number of parallel jobs
 our $max_retries = 1;  # Maximum retry count for failed jobs
-our $ssh_host = '';  # SSH host for remote workers
+our $ssh_host = '';  # SSH host for remote workers (legacy single-host)
+our @ssh_hosts;      # [{host=>'vm1', count=>4, mount=>undef}, ...] for multi-host
 our $remote_cd = '';  # Remote directory for SSH workers
 our $job_server_socket;  # Socket to job-master
 our $in_job_server = 0;  # Set to 1 inside run_job_master
@@ -10275,7 +10276,8 @@ sub show_dependencies {
 # Job-master main loop - runs in forked child with full Makefile data
 # This allows intelligent dependency-aware parallelization
 sub run_job_master {
-    my ($num_workers, $bin_dir) = @_;
+    my ($num_workers, $arg_bin_dir) = @_;
+    our $bin_dir = $arg_bin_dir;
 
     use IO::Socket::INET;
     use IO::Select;
@@ -10313,7 +10315,8 @@ sub run_job_master {
     our $makefile;  # Current makefile path
     our %rules;  # All rules (for is_build_relevant and stale checking)
     our %targets;  # All targets
-    our $ssh_host;  # SSH host for remote workers
+    our $ssh_host;  # SSH host for remote workers (legacy single-host)
+    our @ssh_hosts;  # Multi-host: [{host, count, mount}, ...]
     our $remote_cd;  # Remote directory for SSH workers
 
     our @workers;
@@ -10325,9 +10328,13 @@ sub run_job_master {
     warn "DEBUG: dry_run_mode=$dry_run_mode, worker_script=$worker_script\n" if $ENV{SMAK_DEBUG};
     die "Worker script not found: $worker_script\n" unless -x $worker_script;
 
-    # Workers always connect to localhost (either directly or via SSH tunnel)
-    if ($ssh_host) {
-        vprint "SSH mode: workers will connect via reverse port forwarding\n";
+    if (@ssh_hosts) {
+        vprint "SSH mode: distributed remote workers\n";
+        for my $rh (@ssh_hosts) {
+            vprint "  $rh->{host}: $rh->{count} worker(s)\n";
+        }
+    } elsif ($ssh_host) {
+        vprint "SSH mode: all workers on $ssh_host via reverse port forwarding\n";
     }
 
     # Create socket server for master connections
@@ -10508,57 +10515,64 @@ sub run_job_master {
     my $server_pid = $$;
     chomp(my $hostname = `hostname -s 2>/dev/null` || 'localhost');
 
+    # Set up sshfs mounts on remote hosts (before spawning workers)
+    setup_remote_mounts($worker_port) if @ssh_hosts;
+
+    # Build worker assignment list: distribute across local and remote hosts
+    my @worker_assignments;
+    if (@ssh_hosts) {
+        # New multi-host mode: remote workers from --ssh host:N specs
+        for my $rh (@ssh_hosts) {
+            for (1 .. $rh->{count}) {
+                push @worker_assignments, {type => 'remote', host => $rh->{host}, mount => $rh->{mount}};
+            }
+        }
+        # Remaining workers are local
+        my $remote_total = scalar @worker_assignments;
+        for (1 .. ($num_workers - $remote_total)) {
+            push @worker_assignments, {type => 'local'};
+        }
+    } elsif ($ssh_host) {
+        # Legacy single-host mode: all workers on one remote host (no sshfs)
+        my $mount = $remote_cd ? "$remote_cd/" . (split('/', getcwd()))[-1] : undef;
+        for (1 .. $num_workers) {
+            push @worker_assignments, {type => 'remote', host => $ssh_host, mount => $mount};
+        }
+    } else {
+        # All local
+        @worker_assignments = map { {type => 'local'} } 1 .. $num_workers;
+    }
+
     # Spawn workers
-    for (my $i = 0; $i < $num_workers; $i++) {
+    for (my $i = 0; $i < @worker_assignments; $i++) {
+        my $wa = $worker_assignments[$i];
         my $pid = fork();
         die "Cannot fork worker: $!\n" unless defined $pid;
 
         if ($pid == 0) {
             # Child - run worker
-            set_process_name("smak-worker for $hostname:$server_pid");
+            my $label = $wa->{type} eq 'remote' ? "$wa->{host}" : "$hostname";
+            set_process_name("smak-worker for $label:$server_pid");
 
             # Close inherited sockets that worker doesn't use
-            # This ensures proper reference counting so job-server sees disconnects correctly
             close($master_socket) if $master_socket;
             close($master_server);
             close($observer_server);
-            close($worker_server);  # Worker connects as client, doesn't use listening socket
+            close($worker_server);
 
-            if ($ssh_host) {
-		my $local_path = getcwd();
-		$local_path =~ s=^$fuse_mountpoint/== if defined $fuse_mountpoint;
-                # SSH mode: launch worker on remote host with reverse port forwarding
-                # Use -R to tunnel remote port back to local worker_port
-                my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
-                my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
-                # Construct remote worker command
-                # Use PATH that includes smak directory, or absolute path if SMAK_REMOTE_PATH is set
-                my $remote_worker = 'smak-worker';
-                my $remote_cmd;
-                if ($ENV{SMAK_REMOTE_PATH}) {
-                    # Use explicit path from environment
-                    $remote_cmd = "$ENV{SMAK_REMOTE_PATH}/$remote_worker";
-                } else {
-                    # Try to find smak in PATH, or use worker from bin_dir
-                    $remote_cmd = "PATH=$bin_dir:\$PATH $remote_worker";
-                }
-                if ($remote_cd) {
-                    push @ssh_cmd, "$remote_cmd -cd $remote_cd/$local_path 127.0.0.1:$remote_port";
-                } else {
-                    push @ssh_cmd, "$remote_cmd 127.0.0.1:$remote_port";
-                }
-                exec(@ssh_cmd);
-                die "Failed to exec SSH worker: $!\n";
+            if ($wa->{type} eq 'remote') {
+                spawn_ssh_worker($wa->{host}, $worker_port, $wa->{mount});
+                # spawn_ssh_worker does not return
             } else {
                 # Local mode - call worker routine directly
-                # This avoids fork+exec overhead by calling the routine in the same process
                 use SmakWorker;
                 SmakWorker::run_worker('127.0.0.1', $worker_port);
-                # Should not reach here - run_worker() exits
                 exit 99;
             }
         }
-        vprint "Spawned worker $i (PID $pid)\n";
+        vprint "Spawned worker $i ($wa->{type}" .
+               ($wa->{type} eq 'remote' ? " on $wa->{host}" : "") .
+               ", PID $pid)\n";
     }
 
     # Set up IO::Select for multiplexing
@@ -10568,7 +10582,7 @@ sub run_job_master {
     our $select = IO::Select->new($worker_server, $observer_server, $master_socket, $master_server);
     $select->add($fuse_socket) if $fuse_socket;
     my $workers_connected = 0;
-    my $startup_timeout = 10;
+    my $startup_timeout = @ssh_hosts ? 30 : 10;  # SSH workers need more time
     my $start_time = time();
 
     # Wait for all workers to connect
@@ -11104,8 +11118,109 @@ sub run_job_master {
         for my $worker (@workers) {
             print $worker "SHUTDOWN\n";
         }
+        cleanup_remote_mounts();
     }
-    
+
+    # Set up sshfs mounts on remote hosts so workers can access build directory.
+    # For each unique host in @ssh_hosts, creates /tmp/smak-<port>/<dirname>/
+    # and mounts the local build directory via sshfs.
+    # Requires: sshfs on remote, SSH keys for bidirectional auth.
+    sub setup_remote_mounts {
+        my ($worker_port) = @_;
+        return unless @ssh_hosts;
+
+        my $local_dir = getcwd();
+        my $dir_name = (split('/', $local_dir))[-1];
+        my $local_user = $ENV{USER} || (getpwuid($<))[0];
+        my $mount_id = "smak-$worker_port";
+
+        # Deduplicate hosts (multiple entries for same host share one mount)
+        my %seen_hosts;
+        for my $rh (@ssh_hosts) {
+            next if $seen_hosts{$rh->{host}}++;
+
+            # Skip if --cd was specified (user knows the remote path)
+            if ($remote_cd) {
+                $rh->{mount} = "$remote_cd/$dir_name";
+                next;
+            }
+
+            my $host = $rh->{host};
+            my $mount_base = "/tmp/$mount_id";
+            my $mount_dir = "$mount_base/$dir_name";
+
+            # Set up sshfs on remote host.
+            # $SSH_CLIENT is set by sshd and contains the connecting IP.
+            my $setup_cmd = "mkdir -p $mount_dir && " .
+                "(mountpoint -q $mount_dir 2>/dev/null || " .
+                "sshfs ${local_user}\@\$(echo \$SSH_CLIENT | cut -d' ' -f1):${local_dir} $mount_dir " .
+                "-o reconnect,ServerAliveInterval=15)";
+
+            print STDERR "Setting up sshfs mount on $host: $mount_dir\n" if $ENV{SMAK_DEBUG};
+            my $rc = system('ssh', '-o', 'BatchMode=yes', $host, $setup_cmd);
+            if ($rc != 0) {
+                die "Failed to set up sshfs mount on $host (exit $rc).\n" .
+                    "Ensure: sshfs installed on $host, SSH keys allow $host to connect back.\n";
+            }
+            vprint "sshfs mount on $host: $mount_dir\n";
+            $rh->{mount} = $mount_dir;
+        }
+
+        # Propagate mount to all entries for same host
+        my %host_mount;
+        for my $rh (@ssh_hosts) {
+            $host_mount{$rh->{host}} = $rh->{mount} if $rh->{mount};
+        }
+        for my $rh (@ssh_hosts) {
+            $rh->{mount} //= $host_mount{$rh->{host}};
+        }
+    }
+
+    # Unmount sshfs and clean up on remote hosts
+    sub cleanup_remote_mounts {
+        return unless @ssh_hosts;
+        return if $remote_cd;  # No sshfs mounts if --cd was used
+
+        my %cleaned;
+        for my $rh (@ssh_hosts) {
+            next unless $rh->{mount};
+            next if $cleaned{$rh->{host}}++;
+            my $mount_dir = $rh->{mount};
+            my $mount_base = $mount_dir;
+            $mount_base =~ s=/[^/]+$==;  # parent dir
+            my $cleanup = "fusermount -u $mount_dir 2>/dev/null; " .
+                          "rmdir $mount_dir $mount_base 2>/dev/null; true";
+            system('ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+                   $rh->{host}, $cleanup);
+        }
+    }
+
+    # Spawn a single SSH worker process.  Caller must be in the forked child.
+    # Does not return (calls exec).
+    sub spawn_ssh_worker {
+        my ($host, $worker_port, $mount_dir) = @_;
+
+        my $remote_port = 30000 + int(rand(10000));
+        my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $host);
+
+        # Build remote command - try SMAK_REMOTE_PATH, then bin_dir (same path on remote)
+        my $remote_worker;
+        if ($ENV{SMAK_REMOTE_PATH}) {
+            $remote_worker = "$ENV{SMAK_REMOTE_PATH}/smak-worker";
+        } else {
+            # Assume same install path on remote (common for identical VM setups)
+            $remote_worker = "$bin_dir/smak-worker";
+        }
+
+        if ($mount_dir) {
+            push @ssh_cmd, "$remote_worker -cd $mount_dir 127.0.0.1:$remote_port";
+        } else {
+            push @ssh_cmd, "$remote_worker 127.0.0.1:$remote_port";
+        }
+        exec(@ssh_cmd);
+        die "Failed to exec SSH worker on $host: $!\n";
+    }
+
     sub wait_for_worker_done {
 	my ($ready_worker) = @_;
 	print STDERR "wait_for_worker_done: NIY\n";
@@ -12765,6 +12880,14 @@ sub run_job_master {
         print $worker "TASK $task_id\n";
         # Use exec_dir for worker chdir (falls back to dir for backwards compatibility)
         my $worker_dir = $job->{exec_dir} || $job->{dir};
+        # Make dir relative to project root so sshfs-based remote workers can resolve it
+        # Only for new multi-host mode; legacy SSH uses absolute paths
+        if (@ssh_hosts && $worker_dir =~ m{^/} && $project_root) {
+            my $rel = $worker_dir;
+            if ($rel =~ s{^\Q$project_root\E/?}{}) {
+                $worker_dir = $rel || '.';
+            }
+        }
         print $worker "DIR $worker_dir\n";
 
         # Send external commands (each executed directly without shell)
@@ -13917,6 +14040,13 @@ sub run_job_master {
 
             # Send task to worker (use exec_dir for chdir)
             my $worker_dir = $job->{exec_dir} || $job->{dir};
+            # Make dir relative to project root so sshfs-based remote workers can resolve it
+            if (@ssh_hosts && $worker_dir =~ m{^/} && $project_root) {
+                my $rel = $worker_dir;
+                if ($rel =~ s{^\Q$project_root\E/?}{}) {
+                    $worker_dir = $rel || '.';
+                }
+            }
             print $ready_worker "TASK $task_id\n";
             print $ready_worker "DIR $worker_dir\n";
 
@@ -15244,27 +15374,15 @@ sub run_job_master {
                     my $count = $1;
                     print STDERR "Adding $count worker(s)\n";
 
-                    # Spawn new workers
                     my $worker_port = $worker_server->sockport();
                     for (my $i = 0; $i < $count; $i++) {
                         my $worker_pid = fork();
                         if ($worker_pid == 0) {
-                            if ($ssh_host) {
-                                my $local_path = getcwd();
-                                $local_path =~ s=^$fuse_mountpoint/== if $fuse_mountpoint;
-                                # SSH mode: launch worker on remote host with reverse port forwarding
-                                # Use -R to tunnel remote port back to local worker_port
-                                my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
-                                my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
-                                if ($remote_cd) {
-                                    push @ssh_cmd, "smak-worker -cd $remote_cd/$local_path 127.0.0.1:$remote_port";
-                                } else {
-                                    push @ssh_cmd, "smak-worker 127.0.0.1:$remote_port";
-                                }
-                                exec(@ssh_cmd);
-                                die "Failed to exec SSH worker: $!\n";
+                            if (@ssh_hosts) {
+                                spawn_ssh_worker($ssh_hosts[0]{host}, $worker_port, $ssh_hosts[0]{mount});
+                            } elsif ($ssh_host) {
+                                spawn_ssh_worker($ssh_host, $worker_port, undef);
                             } else {
-                                # Local mode
                                 exec($worker_script, "127.0.0.1:$worker_port");
                                 die "Failed to exec worker: $!\n";
                             }
@@ -15302,7 +15420,6 @@ sub run_job_master {
 
                 } elsif ($line =~ /^RESTART_WORKERS (\d+)$/) {
                     my $new_count = $1;
-                    # Kill existing workers
                     print STDERR "Restarting workers ($new_count)\n";
                     for my $worker (@workers) {
                         print $worker "SHUTDOWN\n";
@@ -15313,27 +15430,16 @@ sub run_job_master {
                     %worker_status = ();
                     %running_jobs = ();
 
-                    # Spawn new workers
                     my $worker_port = $worker_server->sockport();
                     for (my $i = 0; $i < $new_count; $i++) {
                         my $worker_pid = fork();
                         if ($worker_pid == 0) {
-                            if ($ssh_host) {
-                                my $local_path = getcwd();
-                                $local_path =~ s=^$fuse_mountpoint/== if $fuse_mountpoint;
-                                # SSH mode: launch worker on remote host with reverse port forwarding
-                                # Use -R to tunnel remote port back to local worker_port
-                                my $remote_port = 30000 + int(rand(10000));  # Random port 30000-39999
-                                my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $ssh_host);
-                                if ($remote_cd) {
-                                    push @ssh_cmd, "smak-worker -cd $remote_cd/$local_path 127.0.0.1:$remote_port";
-                                } else {
-                                    push @ssh_cmd, "smak-worker 127.0.0.1:$remote_port";
-                                }
-                                exec(@ssh_cmd);
-                                die "Failed to exec SSH worker: $!\n";
+                            if (@ssh_hosts) {
+                                my $rh = $ssh_hosts[$i % scalar(@ssh_hosts)];
+                                spawn_ssh_worker($rh->{host}, $worker_port, $rh->{mount});
+                            } elsif ($ssh_host) {
+                                spawn_ssh_worker($ssh_host, $worker_port, undef);
                             } else {
-                                # Local mode
                                 exec($worker_script, "127.0.0.1:$worker_port");
                                 die "Failed to exec worker: $!\n";
                             }

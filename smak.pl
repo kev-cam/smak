@@ -37,6 +37,7 @@ my $verbose = 0;  # Verbose mode - show smak-specific messages
 my $directory = '';  # Directory to change to before running (-C option)
 my $ssh_host = '';  # SSH host for remote workers ('fuse' = auto-detect from df)
 my $remote_cd = '';  # Remote directory for SSH workers
+my $local_workers;   # Explicit local worker count (undef = auto)
 my $norc = 0;  # Skip reading .smak.rc files
 my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j)
 my $check = '';  # Check mode - validate smak -n matches make -n ('' = off, '1' = on, 'quiet' = quiet)
@@ -242,6 +243,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'v|verbose' => \$verbose,
         'ssh=s' => \$ssh_host,
         'cd=s' => \$remote_cd,
+        'local-workers=i' => \$local_workers,
         'norc' => \$norc,
         'retries=i' => \$retries,
         'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
@@ -270,6 +272,7 @@ GetOptions(
     'v|verbose' => \$verbose,
     'ssh=s' => \$ssh_host,
     'cd=s' => \$remote_cd,
+    'local-workers=i' => \$local_workers,
     'norc' => \$norc,
     'scanner=s' => \$scanner_paths,
     'retries=i' => \$retries,
@@ -833,8 +836,48 @@ if ($verbose || $ENV{SMAK_DEBUG}) {
 }
 
 # Set SSH options for remote workers (before forking job-master)
-$Smak::ssh_host = $ssh_host if $ssh_host;
 $Smak::remote_cd = $remote_cd if $remote_cd;
+if ($ssh_host) {
+    # Parse --ssh syntax:
+    #   --ssh host           (legacy: all workers on one host)
+    #   --ssh host1:N,host2:N  (distributed: N workers per host, rest local)
+    my @specs = split(/,/, $ssh_host);
+    my @hosts;
+    for my $spec (@specs) {
+        if ($spec =~ /^([^:]+):(\d+)$/) {
+            push @hosts, {host => $1, count => int($2), mount => undef};
+        } else {
+            # No count - legacy single-host mode (all workers on this host)
+            push @hosts, {host => $spec, count => 0, mount => undef};
+        }
+    }
+    # If any host has count=0 (no explicit count), use legacy single-host mode
+    # unless --local-workers is specified, which implies distributed mode
+    my $has_legacy = grep { $_->{count} == 0 } @hosts;
+    if ($has_legacy && !defined($local_workers)) {
+        # Legacy: single host gets all -j workers
+        $Smak::ssh_host = $hosts[0]{host};
+    } elsif ($has_legacy) {
+        # Legacy host with --local-workers: treat as distributed
+        # Assign remaining workers (total - local) to the remote host
+        my $local_count = $local_workers;
+        my $remote_count = ($jobs > $local_count) ? $jobs - $local_count : 1;
+        $hosts[0]{count} = $remote_count;
+        @Smak::ssh_hosts = @hosts;
+    } else {
+        # Multi-host: distribute workers
+        my $remote_total = 0;
+        $remote_total += $_->{count} for @hosts;
+        # --local-workers controls how many local workers to add (default: 0 with --ssh)
+        my $local_count = defined($local_workers) ? $local_workers : 0;
+        my $total = $remote_total + $local_count;
+        if (!$jobs_specified || $jobs < $total) {
+            $jobs = $total;
+            $jobs_specified = 1;
+        }
+        @Smak::ssh_hosts = @hosts;
+    }
+}
 
 # Detect FUSE filesystem early (before makefile parsing and Makefile.smak execution)
 # This allows Makefile.smak to make decisions based on FUSE status (e.g., auto-rescan)
@@ -1068,9 +1111,8 @@ if ($script_file) {
 
 # If CLI mode, enter interactive loop
 if ($cli) {
-    # Set SSH options for remote workers
-    $Smak::ssh_host = $ssh_host if $ssh_host;
-    $Smak::remote_cd = $remote_cd if $remote_cd;
+    # SSH options already set above (before makefile parsing)
+    # @Smak::ssh_hosts and $Smak::remote_cd are already configured
 
     print "Smak CLI mode - type 'help' for commands\n";
     print "Makefile: $makefile\n";

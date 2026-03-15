@@ -11236,19 +11236,43 @@ sub run_job_master {
         my $remote_port = 30000 + int(rand(10000));
         my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $host);
 
-        # Build remote command - try SMAK_REMOTE_PATH, then bin_dir (same path on remote)
+        # Build remote command - try SMAK_REMOTE_PATH, then ~/.cache/smak default
         my $remote_worker;
         if ($ENV{SMAK_REMOTE_PATH}) {
             $remote_worker = "$ENV{SMAK_REMOTE_PATH}/smak-worker";
         } else {
-            # Assume same install path on remote (common for identical VM setups)
-            $remote_worker = "$bin_dir/smak-worker";
+            $remote_worker = '~/.cache/smak/smak-worker';
         }
 
         if ($mount_dir) {
             push @ssh_cmd, "$remote_worker -cd $mount_dir 127.0.0.1:$remote_port";
         } else {
-            push @ssh_cmd, "$remote_worker 127.0.0.1:$remote_port";
+            # No mount specified — auto-mount via sshfs through forwarded SSH port.
+            # Mount the PARENT directory so the project dir name is preserved
+            # (scripts may look for their root directory by name).
+            use File::Basename;
+            my $project = $project_root || Cwd::getcwd();
+            my $parent_dir = dirname($project);
+            my $project_name = basename($project);
+            my $local_path = Cwd::getcwd();
+            chomp(my $local_user = `whoami`);
+            my $sshfs_port = 30000 + int(rand(10000));
+            splice(@ssh_cmd, 2, 0, '-R', "$sshfs_port:127.0.0.1:22");
+            # Try same absolute path first; if not writable, use ~/.cache/smak/mnt
+            # as a fallback so we don't require root-owned dirs to be writable.
+            my $sshfs_opts = "-p $sshfs_port -o StrictHostKeyChecking=no -o reconnect";
+            my $sshfs_src = "${local_user}\@127.0.0.1:${parent_dir}";
+            # The setup script determines the mount point and sets SMAK_PATH_REMAP
+            # so the worker can translate absolute paths from the job server.
+            my $setup = "if mkdir -p $parent_dir 2>/dev/null && test -w $parent_dir; then " .
+                "MNT=$parent_dir; " .
+                "else " .
+                "MNT=\$HOME/.cache/smak/mnt${parent_dir}; mkdir -p \$MNT; " .
+                "export SMAK_PATH_REMAP='${parent_dir}:'\$MNT; " .
+                "fi; " .
+                "mountpoint -q \$MNT 2>/dev/null || " .
+                "sshfs $sshfs_opts $sshfs_src \$MNT; ";
+            push @ssh_cmd, "${setup}$remote_worker -cd \$MNT/$project_name 127.0.0.1:$remote_port";
         }
         exec(@ssh_cmd);
         die "Failed to exec SSH worker on $host: $!\n";

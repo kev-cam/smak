@@ -363,6 +363,12 @@ sub run_worker {
                 die "Expected EXTERNAL_CMDS line, got: $ext_line\n";
             }
 
+            # Apply path remapping for remote workers (sshfs mount at different path)
+            if ($ENV{SMAK_PATH_REMAP} && $dir =~ m{^/}) {
+                my ($from, $to) = split(/:/, $ENV{SMAK_PATH_REMAP}, 2);
+                $dir =~ s/^\Q$from\E/$to/ if $from && $to;
+            }
+
             # Change to directory
             my $old_dir = getcwd();
             unless (chdir($dir)) {

@@ -438,7 +438,9 @@ sub start_job_server {
         # Just wait for acknowledgment that environment was received
         my $ack = <$job_server_socket>;
         chomp $ack if defined $ack;
-        if ($ack ne 'JOBSERVER_WORKERS_READY') {
+        if (!defined $ack) {
+            die "smak: Job-master connection lost during worker startup\n";
+        } elsif ($ack ne 'JOBSERVER_WORKERS_READY') {
             # Put it back for later processing if it wasn't the ready message
             # This shouldn't happen, but handle gracefully
         }
@@ -10618,11 +10620,22 @@ sub run_job_master {
     my $startup_timeout = @ssh_hosts ? 30 : 10;  # SSH workers need more time
     my $start_time = time();
 
-    # Wait for all workers to connect
+    # Wait for workers to connect — proceed with partial set if some fail
     while ($workers_connected < $num_workers) {
         if (time() - $start_time > $startup_timeout) {
-            die "Timeout waiting for workers to connect\n";
+            if ($workers_connected > 0) {
+                warn "smak: Warning: Only $workers_connected of $num_workers workers connected, proceeding\n";
+                last;
+            }
+            die "Timeout waiting for workers to connect (0 of $num_workers succeeded)\n";
         }
+        # Check if any worker children have already exited (SSH failure, etc.)
+        while ((my $dead = waitpid(-1, WNOHANG)) > 0) {
+            my $exit = $? >> 8;
+            warn "smak: Worker process $dead exited early (status $exit)\n" if $exit != 0;
+            $num_workers-- if $num_workers > $workers_connected;
+        }
+        last if $num_workers <= $workers_connected && $workers_connected > 0;
 
         my @ready = $select->can_read(0.1);
         for my $socket (@ready) {

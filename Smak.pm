@@ -1425,8 +1425,8 @@ sub find_matching_patterns {
     for my $pkey (keys %pattern_rule) {
         if ($pkey =~ /^[^\t]+\t(.+)$/) {
             my $pattern = $1;
-            my $pattern_re = $pattern;
-            $pattern_re =~ s/%/(.+)/g;
+            my $pattern_re = quotemeta($pattern);
+            $pattern_re =~ s/\\%/(.*)/g;
             if ($target =~ /^$pattern_re$/) {
                 push @matches, [$pkey, $1];
             }
@@ -1608,13 +1608,19 @@ sub expand_vars {
                 if (@args >= 3) {
                     my ($pattern, $repl, $text) = @args;
                     # Convert gmake pattern to regex
-                    my $regex = $pattern;
-                    $regex =~ s/%/(.+)/g;
+                    my $regex = quotemeta($pattern);
+                    $regex =~ s/\\%/(.*)/g;
                     $regex = "^$regex\$";
-                    # Convert replacement pattern
-                    $repl =~ s/%/\$1/g;
                     my @words = split /\s+/, $text;
-                    @words = map { s/$regex/$repl/r } @words;
+                    @words = map {
+                        if (/^$regex/) {
+                            my $stem = $1;
+                            (my $r = $repl) =~ s/%/$stem/g;
+                            $r;
+                        } else {
+                            $_;
+                        }
+                    } @words;
                     $replacement = join(' ', @words);
                 }
             } elsif ($func eq 'subst') {
@@ -1647,8 +1653,8 @@ sub expand_vars {
                     my @result;
                     for my $word (@words) {
                         for my $pat (@patterns) {
-                            my $regex = $pat;
-                            $regex =~ s/%/.*?/g;
+                            my $regex = quotemeta($pat);
+                            $regex =~ s/\\%/.*?/g;
                             if ($word =~ /^$regex$/) {
                                 push @result, $word;
                                 last;
@@ -1668,8 +1674,8 @@ sub expand_vars {
                     for my $word (@words) {
                         my $matched = 0;
                         for my $pat (@patterns) {
-                            my $regex = $pat;
-                            $regex =~ s/%/.*?/g;
+                            my $regex = quotemeta($pat);
+                            $regex =~ s/\\%/.*?/g;
                             if ($word =~ /^$regex$/) {
                                 $matched = 1;
                                 last;
@@ -1853,6 +1859,33 @@ sub expand_vars {
                 # Unknown function, leave as-is
                 $replacement = "\$($content)";
             }
+        } elsif ($content =~ /^(\w+):([^=]*)=(.*)$/) {
+            # Substitution reference: $(VAR:pattern=replacement)
+            # $(VAR:.c=.o) is shorthand for $(patsubst %.c,%.o,$(VAR))
+            my ($var, $from, $to) = ($1, $2, $3);
+            my $val = $cmd_vars{$var} // $MV{$var} // '';
+            $val = format_output($val);
+            $val = expand_vars($val, $depth + 1);
+            # If pattern doesn't contain %, it's a suffix substitution:
+            # $(VAR:.c=.o) → $(patsubst %.c,%.o,$(VAR))
+            if ($from !~ /%/) {
+                $from = "%$from";
+                $to = "%$to";
+            }
+            my $regex = quotemeta($from);
+            $regex =~ s/\\%/(.*)/g;
+            $regex = "^$regex\$";
+            my @words = split /\s+/, $val;
+            @words = map {
+                if (/^$regex/) {
+                    my $stem = $1;
+                    (my $r = $to) =~ s/%/$stem/g;
+                    $r;
+                } else {
+                    $_;
+                }
+            } @words;
+            $replacement = join(' ', @words);
         } else {
             # Simple variable reference
             # Check command-line variables first, then Makefile variables
@@ -3887,8 +3920,8 @@ sub resolve_vpath {
     # Try vpath patterns
     for my $pattern (keys %vpath) {
         # Convert pattern to regex (% matches anything)
-        my $pattern_re = $pattern;
-        $pattern_re =~ s/%/.*?/g;
+        my $pattern_re = quotemeta($pattern);
+        $pattern_re =~ s/\\%/.*?/g;
 
         if ($file =~ /^$pattern_re$/) {
             print STDERR "DEBUG vpath: '$file' matches pattern '$pattern'\n" if $ENV{SMAK_DEBUG};
@@ -4775,8 +4808,8 @@ sub prereq_can_be_built {
     for my $pk (keys %pattern_rule) {
         if ($pk =~ /^([^\t]+)\t(.+)$/) {
             my $pp = $2;
-            my $pp_re = $pp;
-            $pp_re =~ s/%/(.+)/g;
+            my $pp_re = quotemeta($pp);
+            $pp_re =~ s/\\%/(.*)/g;
             if ($prereq =~ /^$pp_re$/) {
                 my $stem = $1;
                 my $deps_ref = $pattern_deps{$pk};
@@ -9522,8 +9555,8 @@ HELP
                 for my $key (keys %pattern_rule) {
                     if ($key =~ /^([^\t]+)\t(.+)$/) {
                         my ($mf, $pattern) = ($1, $2);
-                        my $pattern_re = $pattern;
-                        $pattern_re =~ s/%/(.*)/;
+                        my $pattern_re = quotemeta($pattern);
+                        $pattern_re =~ s/\\%/(.*)/;
                         $pattern_re = "^$pattern_re\$";
 
                         if ($target =~ /$pattern_re/) {

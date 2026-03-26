@@ -4539,7 +4539,7 @@ sub needs_rebuild {
     my $target_mtime = (stat($target))[9];
     return 1 unless defined $target_mtime;
 
-    # Find target's dependencies
+    # Find target's dependencies and rule
     my $key = "$makefile\t$target";
     my @deps;
 
@@ -4549,6 +4549,31 @@ sub needs_rebuild {
         @deps = @{$pattern_deps{$key} || []};
     } elsif (exists $pseudo_deps{$key}) {
         @deps = @{$pseudo_deps{$key} || []};
+    }
+
+    # GNU make: a target with deps but no recipe is never out-of-date.
+    # The dep line only establishes ordering, not a rebuild trigger.
+    my $has_rule = (exists $fixed_rule{$key} && defined $fixed_rule{$key} && $fixed_rule{$key} =~ /\S/);
+    unless ($has_rule) {
+        # Check pattern/suffix rules too
+        $has_rule = (exists $pattern_rule{$key} && defined $pattern_rule{$key} && $pattern_rule{$key} =~ /\S/);
+    }
+    unless ($has_rule) {
+        # Try suffix rules
+        if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+            my ($base, $target_suffix) = ($1, $2);
+            for my $source_suffix (@suffixes) {
+                my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
+                if (exists $suffix_rule{$suffix_key} && -e "$base$source_suffix") {
+                    $has_rule = 1;
+                    last;
+                }
+            }
+        }
+    }
+    if (!$has_rule && @deps) {
+        # Has deps but no recipe — can't be out-of-date
+        return 0;
     }
 
     # Expand variables in dependencies
@@ -5465,7 +5490,11 @@ sub build_target {
     # In relay_capture_mode, skip this check — capture everything and let the parent decide
     unless ($is_phony || $relay_capture_mode) {
         warn "DEBUG[" . __LINE__ . "]:   Checking if target exists and is up-to-date...\n" if $ENV{SMAK_DEBUG};
-        if (-e $target && !needs_rebuild($target)) {
+        # GNU make: a target with deps but no recipe is never out-of-date —
+        # the dep line is just for ordering, not rebuilding.  If it exists
+        # on disk, treat it as up-to-date regardless of dep timestamps.
+        my $no_recipe = !defined $rule || $rule !~ /\S/;
+        if (-e $target && ($no_recipe || !needs_rebuild($target))) {
             warn "DEBUG:   Target '$target' is up-to-date, skipping\n" if $ENV{SMAK_DEBUG};
 
             # Check for missing intermediate dependencies
@@ -16249,6 +16278,16 @@ sub run_job_master {
                             my $owning = $target_to_child{$job->{target}};
                             if ($owning && exists $child_job_targets{$owning}) {
                                 delete $child_job_targets{$owning}{$job->{target}};
+                                # Also clean up sibling targets produced by this job
+                                if (exists $child_target_siblings{$job->{target}}) {
+                                    for my $sib (@{$child_target_siblings{$job->{target}}}) {
+                                        delete $child_job_targets{$owning}{$sib};
+                                        $completed_targets{$sib} = 1;
+                                        $in_progress{$sib} = "done";
+                                        delete $target_to_child{$sib};
+                                    }
+                                    delete $child_target_siblings{$job->{target}};
+                                }
                             }
                             delete $target_to_child{$job->{target}};
                         }

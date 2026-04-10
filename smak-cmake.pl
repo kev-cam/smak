@@ -21,15 +21,17 @@ if (-x $cmake_bin) {
     exec($cmake_bin, @ARGV) or die "Failed to exec $cmake_bin: $!\n";
 }
 
-# cmake not found, prompt to download
+# cmake not found — auto-download, or prompt if interactive
 print "CMake not found at $cmake_bin\n";
-print "Download cmake $cmake_version? [Y/n] ";
-my $answer = <STDIN>;
-chomp($answer);
-
-if ($answer =~ /^n/i) {
-    print "Aborted.\n";
-    exit 1;
+my $auto = !-t STDIN;  # non-interactive (piped / script) → auto-yes
+if (!$auto) {
+    print "Download cmake $cmake_version? [Y/n] ";
+    my $answer = <STDIN>;
+    chomp($answer);
+    if ($answer =~ /^n/i) {
+        print "Aborted.\n";
+        exit 1;
+    }
 }
 
 # Download and extract
@@ -57,13 +59,18 @@ if (-e $cmake_link || -l $cmake_link) {
 symlink($cmake_dirname, $cmake_link)
     or die "Failed to create symlink: $!\n";
 
-print "Delete archive $cmake_archive? [Y/n] ";
-$answer = <STDIN>;
-chomp($answer);
-
-if ($answer !~ /^n/i) {
+# Clean up archive (auto-delete in non-interactive mode)
+if ($auto) {
     unlink($archive_path);
     print "Archive deleted.\n";
+} else {
+    print "Delete archive $cmake_archive? [Y/n] ";
+    my $answer = <STDIN>;
+    chomp($answer);
+    if ($answer !~ /^n/i) {
+        unlink($archive_path);
+        print "Archive deleted.\n";
+    }
 }
 
 if (-x $cmake_bin) {

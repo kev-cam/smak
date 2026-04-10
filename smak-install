@@ -28,5 +28,7 @@ mkdir -p "$prefix/bin" "$prefix/share"
 rm -rf "$prefix/share/smak"
 cp -a "$src_dir" "$prefix/share/smak"
 ln -sf "../share/smak/smak" "$prefix/bin/smak"
+ln -sf "../share/smak/cmake" "$prefix/bin/cmake"
 
 echo "smak installed: $prefix/bin/smak -> ../share/smak/smak"
+echo "cmake wrapper:  $prefix/bin/cmake -> ../share/smak/cmake"

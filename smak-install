@@ -1,16 +1,32 @@
 #!/bin/bash
 # Smak Installer
+#
+# Usage: smak-install <prefix>
+#
+# Copies the smak source tree into <prefix>/share/smak/ and creates a
+# symlink <prefix>/bin/smak → ../share/smak/smak. The smak bash wrapper
+# follows its own symlink back to SCRIPT_DIR to locate Smak.pm and the
+# sibling perl helpers, so the target of the symlink must be the real
+# source tree — a plain copy of the wrapper into bin/ won't work.
+
+set -e
 
 installer=$0
-
 case $installer in
-    /*) ;; #ok
+    /*) ;; # already absolute
     *)  installer=$PWD/$installer ;;
 esac
+src_dir=$(dirname "$installer")
 
-if [ -d ${1:-/none} ] ; then
-    cd $1
-    ln -s $(dirname $installer/smak) .
-else
-    echo Usage $(basename $installer) "<directory>"
+prefix=${1:-}
+if [ -z "$prefix" ]; then
+    echo "Usage: $(basename "$installer") <prefix>" >&2
+    exit 1
 fi
+
+mkdir -p "$prefix/bin" "$prefix/share"
+rm -rf "$prefix/share/smak"
+cp -a "$src_dir" "$prefix/share/smak"
+ln -sf "../share/smak/smak" "$prefix/bin/smak"
+
+echo "smak installed: $prefix/bin/smak -> ../share/smak/smak"

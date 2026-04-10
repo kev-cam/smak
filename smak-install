@@ -23,12 +23,20 @@ if [ -z "$prefix" ]; then
     echo "Usage: $(basename "$installer") <prefix>" >&2
     exit 1
 fi
+# Absolutize prefix so symlinks work regardless of CWD.
+# smak's bash wrapper follows readlink to find SCRIPT_DIR, and its loop
+# uses dirname on the raw link target — a relative target resolves against
+# CWD, not the symlink's directory. Absolute symlinks avoid the problem.
+case $prefix in
+    /*) ;; # already absolute
+    *)  prefix=$PWD/$prefix ;;
+esac
 
 mkdir -p "$prefix/bin" "$prefix/share"
 rm -rf "$prefix/share/smak"
 cp -a "$src_dir" "$prefix/share/smak"
-ln -sf "../share/smak/smak" "$prefix/bin/smak"
-ln -sf "../share/smak/cmake" "$prefix/bin/cmake"
+ln -sf "$prefix/share/smak/smak" "$prefix/bin/smak"
+ln -sf "$prefix/share/smak/cmake" "$prefix/bin/cmake"
 
-echo "smak installed: $prefix/bin/smak -> ../share/smak/smak"
-echo "cmake wrapper:  $prefix/bin/cmake -> ../share/smak/cmake"
+echo "smak installed: $prefix/bin/smak -> $prefix/share/smak/smak"
+echo "cmake wrapper:  $prefix/bin/cmake -> $prefix/share/smak/cmake"

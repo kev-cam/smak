@@ -10,6 +10,7 @@ use POSIX qw(strftime);
 use Time::HiRes qw(time);
 use lib $RealBin;
 use Smak qw(:all);
+use SmakCMake;
 
 # Check for -cmake option early (passthrough to cmake)
 if (@ARGV && $ARGV[0] eq '-cmake') {
@@ -900,7 +901,19 @@ if (defined $scanner_paths) {
 
 # Parse the makefile FIRST (before forking job-master)
 # This ensures %rules is populated when job-master inherits it
-parse_makefile($makefile);
+#
+# For CMake build directories, read the CMake metadata directly instead
+# of interpreting the generated Makefiles (which use cmake -E commands
+# that cause quoting/substitution issues).
+if (SmakCMake::is_cmake_build_dir('.')) {
+    print "SmakCMake: detected CMake build directory\n" unless $silent;
+    $Smak::makefile = $makefile;
+    SmakCMake::try_cmake_project('.', \%Smak::fixed_deps, \%Smak::fixed_rule,
+        \%Smak::MV, $makefile);
+    $Smak::default_target //= 'all';
+} else {
+    parse_makefile($makefile);
+}
 
 # Auto-load <makefile>.smak if it exists
 my $auto_script = "$makefile.smak";

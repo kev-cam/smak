@@ -368,9 +368,6 @@ sub eval_commands {
         my $cmd = $commands->[$i];
         my $name = $cmd->{name};
 
-        # Block constructs: if/foreach/while/function/macro consume a range
-        # of commands.  Find the matching end-keyword, then either evaluate
-        # or skip the enclosed block.
         if ($name eq 'if') {
             $i = _eval_if($commands, $i, $state, $scope);
         } elsif ($name eq 'foreach') {
@@ -383,7 +380,19 @@ sub eval_commands {
             eval_command($cmd, $state, $scope);
             $i++;
         }
+        # Flow control: return/break/continue propagate up through eval_commands
+        last if _flow_control_set($scope);
     }
+}
+
+sub _flow_control_set {
+    my $scope = shift;
+    my $s = $scope;
+    while ($s) {
+        return 1 if $s->{_return} || $s->{_break} || $s->{_continue};
+        $s = $s->{parent};
+    }
+    return 0;
 }
 
 # Find the matching end-keyword for a block starter, honoring nesting.
@@ -556,8 +565,9 @@ sub _version_cmp {
     my $len = @ap > @bp ? @ap : @bp;
     my $cmp = 0;
     for (my $i = 0; $i < $len; $i++) {
-        my $av = $ap[$i] // 0;
-        my $bv = $bp[$i] // 0;
+        # Extract leading integer from each part (cmake allows "1.2.3rc1" etc.)
+        my $av = ($ap[$i] // '') =~ /^(\d+)/ ? $1 : 0;
+        my $bv = ($bp[$i] // '') =~ /^(\d+)/ ? $1 : 0;
         if ($av != $bv) { $cmp = $av <=> $bv; last; }
     }
     return { 'VERSION_LESS' => $cmp < 0,
@@ -608,6 +618,9 @@ sub _eval_foreach {
     for my $item (@items) {
         $scope->{vars}{$var} = $item;
         eval_commands(\@body, $state, $scope);
+        if ($scope->{_break}) { delete $scope->{_break}; last; }
+        if ($scope->{_continue}) { delete $scope->{_continue}; next; }
+        last if $scope->{_return};
     }
     return $end + 1;
 }
@@ -617,11 +630,14 @@ sub _eval_while {
     my $end = _find_block_end($commands, $i, 'while', 'endwhile');
     my $cmd = $commands->[$i];
     my @body = @{$commands}[$i+1 .. $end-1];
-    my $max = 100000;  # safety: avoid runaway
+    my $max = 100000;
     while ($max-- > 0) {
         my @args = expand_args($cmd->{args}, $scope);
         last unless _if_test(\@args, $scope);
         eval_commands(\@body, $state, $scope);
+        if ($scope->{_break}) { delete $scope->{_break}; last; }
+        if ($scope->{_continue}) { delete $scope->{_continue}; next; }
+        last if $scope->{_return};
     }
     return $end + 1;
 }
@@ -684,6 +700,8 @@ sub _call_function {
     $call_scope->{vars}{ARGN} = join(';', @$args[$nparams..$#$args]) if @$args > $nparams;
 
     eval_commands($fn->{body}, $state, $call_scope);
+    # Clear return flag — it only unwinds to the function boundary
+    delete $call_scope->{_return};
 }
 
 # ─── Built-in commands (minimal) ────────────────────────────────────
@@ -1156,6 +1174,113 @@ $builtins{'configure_file'} = sub {
     close $ofh;
 };
 
+$builtins{'return'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # Signal return by setting a flag in the scope chain — eval_commands
+    # checks this after each command and exits the loop if set.
+    $scope->{_return} = 1;
+};
+
+$builtins{'break'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    $scope->{_break} = 1;
+};
+
+$builtins{'continue'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    $scope->{_continue} = 1;
+};
+
+$builtins{'get_target_property'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($out, $target, $prop) = @$args;
+    my $t = $state->{targets}{$target};
+    my $val;
+    if ($t) {
+        if ($prop eq 'INCLUDE_DIRECTORIES') {
+            $val = join(';', @{$t->{include_directories} // []});
+        } elsif ($prop eq 'COMPILE_DEFINITIONS') {
+            $val = join(';', @{$t->{defines_list} // []});
+        } elsif ($prop eq 'SOURCES') {
+            $val = join(';', @{$t->{sources} // []});
+        } elsif ($prop eq 'LINK_LIBRARIES') {
+            $val = join(';', @{$t->{link_libraries} // []});
+        } else {
+            $val = $t->{properties}{$prop};
+        }
+    }
+    $scope->{vars}{$out} = defined $val ? $val : "$out-NOTFOUND";
+};
+
+$builtins{'get_property'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # Minimal: get_property(<var> <GLOBAL|DIRECTORY|TARGET|SOURCE|CACHE> PROPERTY <prop>)
+    my $out = shift @$args;
+    shift @$args;  # scope keyword
+    # skip to PROPERTY
+    while (@$args && $args->[0] ne 'PROPERTY') { shift @$args; }
+    shift @$args if @$args && $args->[0] eq 'PROPERTY';
+    my $prop = shift @$args;
+    $scope->{vars}{$out} = '';
+};
+
+$builtins{'set_property'} = sub { };  # stub
+
+$builtins{'find_program'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $out = shift @$args;
+    my $prog = shift @$args;
+    # Shift past NAMES, PATHS, HINTS, DOC, REQUIRED, etc.
+    my @candidates = ($prog);
+    while (@$args) {
+        my $kw = shift @$args;
+        if ($kw eq 'NAMES') {
+            while (@$args && $args->[0] !~ /^(PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES)$/) {
+                push @candidates, shift @$args;
+            }
+        } else {
+            last if $kw =~ /^(REQUIRED|NO_DEFAULT_PATH)$/;
+            # eat arg
+        }
+    }
+    for my $cand (@candidates) {
+        for my $dir (split /:/, $ENV{PATH} // '/usr/bin:/usr/local/bin') {
+            if (-x "$dir/$cand") {
+                $scope->{vars}{$out} = "$dir/$cand";
+                return;
+            }
+        }
+    }
+    $scope->{vars}{$out} = "$out-NOTFOUND";
+};
+
+$builtins{'find_library'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $out = shift @$args;
+    $scope->{vars}{$out} = "$out-NOTFOUND";
+};
+
+$builtins{'find_path'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $out = shift @$args;
+    $scope->{vars}{$out} = "$out-NOTFOUND";
+};
+
+$builtins{'install'} = sub { };          # stub — we don't install
+$builtins{'export'} = sub { };           # stub
+$builtins{'enable_testing'} = sub { };   # stub
+$builtins{'add_test'} = sub { };         # stub (we can add later)
+$builtins{'cmake_language'} = sub { };   # stub — complex meta-programming
+$builtins{'include_guard'} = sub { };
+
+# mark_as_advanced, get_cmake_property, etc.
+$builtins{'mark_as_advanced'} = sub { };
+$builtins{'get_cmake_property'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $out = shift @$args;
+    $scope->{vars}{$out} = '';
+};
+
 $builtins{'find_package'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     # Stub — record the request, set _FOUND=FALSE by default.
@@ -1180,6 +1305,7 @@ $builtins{'add_subdirectory'} = sub {
     $state->{current_source_dir} = $source_subdir;
     $state->{current_binary_dir} = $binary_subdir;
     eval_commands($sub_commands, $state, $sub_scope);
+    delete $sub_scope->{_return};  # return() at subdir scope unwinds here
     $state->{current_source_dir} = $saved_src;
     $state->{current_binary_dir} = $saved_bin;
 };
@@ -1350,6 +1476,23 @@ sub interpret_project {
     $root_scope->{vars}{CMAKE_BINARY_DIR} = $build_dir;
     $root_scope->{vars}{CMAKE_CURRENT_SOURCE_DIR} = $source_dir;
     $root_scope->{vars}{CMAKE_CURRENT_BINARY_DIR} = $build_dir;
+    # Version string of our pretend cmake
+    $root_scope->{vars}{CMAKE_VERSION} = '3.31.4';
+    $root_scope->{vars}{CMAKE_MAJOR_VERSION} = 3;
+    $root_scope->{vars}{CMAKE_MINOR_VERSION} = 31;
+    $root_scope->{vars}{CMAKE_PATCH_VERSION} = 4;
+    # Platform
+    $root_scope->{vars}{CMAKE_HOST_SYSTEM_NAME} = 'Linux';
+    $root_scope->{vars}{CMAKE_SYSTEM_NAME} = 'Linux';
+    $root_scope->{vars}{UNIX} = 1;
+    $root_scope->{vars}{LINUX} = 1;
+    $root_scope->{vars}{CMAKE_HOST_UNIX} = 1;
+    # Compilers (match typical CMake output)
+    $root_scope->{vars}{CMAKE_C_COMPILER} = '/usr/bin/cc';
+    $root_scope->{vars}{CMAKE_CXX_COMPILER} = '/usr/bin/c++';
+    $root_scope->{vars}{CMAKE_C_COMPILER_ID} = 'GNU';
+    $root_scope->{vars}{CMAKE_CXX_COMPILER_ID} = 'GNU';
+    $root_scope->{vars}{CMAKE_SIZEOF_VOID_P} = 8;
 
     my $commands = parse_file("$source_dir/CMakeLists.txt");
     eval_commands($commands, $state, $root_scope);

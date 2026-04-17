@@ -331,15 +331,128 @@ sub expand_arg {
         return ($arg->{text});
     }
     my $expanded = expand($arg->{text}, $scope);
+    # Evaluate generator expressions $<...> — we treat build-time always
+    $expanded = _eval_genex($expanded, $scope);
     if ($arg->{type} eq 'quoted') {
         return ($expanded);
     }
-    # Unquoted — if it contains quoted substrings (embedded "), treat whole
-    # thing as one token (don't split on ;).  Otherwise list-expand.
     if ($arg->{text} =~ /"/) {
         return ($expanded);
     }
     return grep { $_ ne '' } split(/;/, $expanded);
+}
+
+# Evaluate generator expressions in a string.  Handle the common forms:
+#   $<BUILD_INTERFACE:content>   → content (we're at build time)
+#   $<INSTALL_INTERFACE:content> → '' (not installing)
+#   $<CONFIG>                    → 'Release'
+#   $<CONFIG:Release>            → 1
+#   $<CXX_COMPILER_ID:GNU>       → 1 (we pretend to be GNU)
+#   $<IF:cond,then,else>         → then or else
+#   $<$<CXX_COMPILER_ID:GNU>:x>  → x  (conditional)
+#   $<TARGET_FILE:name>          → build-time path
+# Recursively process innermost first.
+sub _eval_genex {
+    my ($s, $scope) = @_;
+    # Repeatedly resolve innermost $<...>
+    while (1) {
+        # Find an innermost $<...> with no nested $<
+        if ($s =~ /\$<([^<>]*?)>/) {
+            my $expr = $1;
+            my $full = "\$<$expr>";
+            my $val = _resolve_genex($expr, $scope);
+            $val = '' unless defined $val;
+            my $q = quotemeta($full);
+            $s =~ s/$q/$val/;
+        } else {
+            last;
+        }
+    }
+    return $s;
+}
+
+sub _resolve_genex {
+    my ($expr, $scope) = @_;
+
+    # $<CONFIG>  (no colon)
+    return 'Release' if $expr eq 'CONFIG';
+
+    # $<keyword:args>
+    if ($expr =~ /^([A-Z_][A-Z_0-9]*):(.*)$/s) {
+        my ($kw, $rest) = ($1, $2);
+        if ($kw eq 'BUILD_INTERFACE')   { return $rest; }
+        if ($kw eq 'INSTALL_INTERFACE') { return ''; }
+        if ($kw eq 'BUILD_LOCAL_INTERFACE') { return $rest; }
+        if ($kw eq 'CONFIG') {
+            return (uc($rest) eq 'RELEASE') ? 1 : 0;
+        }
+        if ($kw eq 'CXX_COMPILER_ID') {
+            return ($rest eq 'GNU') ? 1 : 0;
+        }
+        if ($kw eq 'C_COMPILER_ID') {
+            return ($rest eq 'GNU') ? 1 : 0;
+        }
+        if ($kw eq 'COMPILE_LANGUAGE') {
+            # Can't know per-file here; assume CXX (most common)
+            return ($rest eq 'CXX') ? 1 : 0;
+        }
+        if ($kw eq 'PLATFORM_ID') {
+            return ($rest eq 'Linux') ? 1 : 0;
+        }
+        if ($kw eq 'TARGET_FILE') {
+            return $rest;  # target name; placeholder
+        }
+        if ($kw eq 'TARGET_EXISTS') {
+            return 0;  # conservative
+        }
+        if ($kw eq 'IF') {
+            # $<IF:cond,then,else>
+            my @parts = _split_genex_args($rest, 3);
+            return $parts[0] ? $parts[1] : $parts[2];
+        }
+        if ($kw eq 'NOT') {
+            return $rest ? 0 : 1;
+        }
+        if ($kw eq 'AND') {
+            my @p = _split_genex_args($rest);
+            for my $x (@p) { return 0 unless $x; }
+            return 1;
+        }
+        if ($kw eq 'OR') {
+            my @p = _split_genex_args($rest);
+            for my $x (@p) { return 1 if $x; }
+            return 0;
+        }
+        if ($kw eq 'STREQUAL' || $kw eq 'EQUAL') {
+            my @p = _split_genex_args($rest, 2);
+            return ($p[0] eq $p[1]) ? 1 : 0;
+        }
+    }
+    # Boolean-as-condition:cond:result form becomes $<cond:result>
+    # where cond is the numeric value (0 or 1)
+    if ($expr =~ /^(\d+):(.*)$/s) {
+        return $1 ? $2 : '';
+    }
+
+    # Unknown — drop
+    return '';
+}
+
+sub _split_genex_args {
+    my ($s, $maxparts) = @_;
+    my @parts;
+    my $depth = 0;
+    my $cur = '';
+    for my $c (split //, $s) {
+        if ($c eq ',' && $depth == 0 && (!$maxparts || @parts < $maxparts - 1)) {
+            push @parts, $cur; $cur = ''; next;
+        }
+        $depth++ if $c eq '<';
+        $depth-- if $c eq '>';
+        $cur .= $c;
+    }
+    push @parts, $cur;
+    return @parts;
 }
 
 sub expand_args {
@@ -685,19 +798,24 @@ sub _call_function {
     my ($name, $args, $state, $scope) = @_;
     my $fn = $state->{functions}{$name};
     my $call_scope = $fn->{is_macro} ? $scope : new_scope($scope);
-    # Set ARGC, ARGN, ARGV, ARGV0..
+    $args = [] unless ref($args) eq 'ARRAY';
+    my $params = (ref($fn->{params}) eq 'ARRAY') ? $fn->{params} : [];
     $call_scope->{vars}{ARGC} = scalar @$args;
-    $call_scope->{vars}{ARGV} = join(';', @$args);
+    $call_scope->{vars}{ARGV} = join(';', map { ref($_) ? '' : ($_ // '') } @$args);
     for my $k (0 .. $#$args) {
-        $call_scope->{vars}["ARGV$k"] = $args->[$k];
+        my $v = $args->[$k];
+        $call_scope->{vars}{"ARGV$k"} = ref($v) ? '' : (defined $v ? "$v" : '');
     }
-    # Bind named parameters
-    for my $k (0 .. $#{$fn->{params}}) {
-        $call_scope->{vars}{$fn->{params}[$k]} = $args->[$k] // '';
+    for my $k (0 .. $#$params) {
+        my $v = $args->[$k];
+        $call_scope->{vars}{$params->[$k]} = ref($v) ? '' : ($v // '');
     }
     # ARGN = extra args beyond named params
-    my $nparams = scalar @{$fn->{params}};
-    $call_scope->{vars}{ARGN} = join(';', @$args[$nparams..$#$args]) if @$args > $nparams;
+    my $nparams = scalar @$params;
+    if (@$args > $nparams) {
+        my @extra = @$args[$nparams..$#$args];
+        $call_scope->{vars}{ARGN} = join(';', map { ref($_) ? '' : ($_ // '') } @extra);
+    }
 
     eval_commands($fn->{body}, $state, $call_scope);
     # Clear return flag — it only unwinds to the function boundary
@@ -892,27 +1010,43 @@ $builtins{'include'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $file = $args->[0] or return;
     return if $file eq 'OPTIONAL' || $file eq 'NO_POLICY_SCOPE';
-    # Module name or file path
-    my $path = $file;
-    unless (-f $path) {
-        # Try .cmake suffix
-        $path = "$file.cmake" if -f "$file.cmake";
+
+    my $path;
+    # 1. Absolute path
+    if ($file =~ m{^/} && -f $file) { $path = $file; }
+    # 2. Relative to current source dir
+    elsif (!defined $path) {
+        my $candidate = File::Spec->catfile($state->{current_source_dir}, $file);
+        $path = $candidate if -f $candidate;
+        $path //= "$candidate.cmake" if -f "$candidate.cmake";
     }
-    unless (-f $path) {
-        # Search CMAKE_MODULE_PATH
+    # 3. Search CMAKE_MODULE_PATH
+    unless ($path) {
         my $module_path = _lookup('CMAKE_MODULE_PATH', $scope) // '';
         for my $dir (split /;/, $module_path) {
-            if (-f "$dir/$file.cmake") { $path = "$dir/$file.cmake"; last; }
-            if (-f "$dir/$file")       { $path = "$dir/$file";       last; }
+            for my $try ("$dir/$file", "$dir/$file.cmake") {
+                if (-f $try) { $path = $try; last; }
+            }
+            last if $path;
         }
     }
-    unless (-f $path) {
+    # 4. Built-in modules (we have cmake's install available)
+    unless ($path) {
+        for my $try ("/usr/local/src/smak/cmake-install/share/cmake-3.31/Modules/$file",
+                     "/usr/local/src/smak/cmake-install/share/cmake-3.31/Modules/$file.cmake") {
+            if (-f $try) { $path = $try; last; }
+        }
+    }
+
+    unless ($path) {
         warn "SmakCMake: include(): cannot find '$file' at $cmd->{source}:$cmd->{line}\n"
             if $ENV{SMAK_CMAKE_DEBUG};
         return;
     }
+    warn "SmakCMake: include: $path\n" if $ENV{SMAK_CMAKE_DEBUG};
     my $sub = parse_file($path);
     eval_commands($sub, $state, $scope);
+    delete $scope->{_return};  # return() in included file unwinds to here
 };
 
 $builtins{'list'} = sub {
@@ -1283,12 +1417,149 @@ $builtins{'get_cmake_property'} = sub {
 
 $builtins{'find_package'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
-    # Stub — record the request, set _FOUND=FALSE by default.
-    # Real implementation needs to search Find<Pkg>.cmake / <Pkg>Config.cmake
     my $name = shift @$args;
     push @{$state->{find_package_requests}}, $name;
+
+    # Parse remaining args (version, REQUIRED, QUIET, CONFIG/MODULE, COMPONENTS...)
+    my $required = grep { $_ eq 'REQUIRED' } @$args;
+    my $config_mode = grep { $_ eq 'CONFIG' || $_ eq 'NO_MODULE' } @$args;
+    my $module_mode = grep { $_ eq 'MODULE' } @$args;
+
+    # Try config-mode: <Pkg>Config.cmake or <pkg>-config.cmake
+    my @search_paths = _find_package_search_paths($name, $scope);
+    my $config_file;
+    for my $dir (@search_paths) {
+        for my $suffix ("${name}Config.cmake", lc($name) . "-config.cmake") {
+            if (-f "$dir/$suffix") {
+                $config_file = "$dir/$suffix";
+                last;
+            }
+        }
+        last if $config_file;
+    }
+
+    if ($config_file) {
+        $scope->{vars}{"${name}_FOUND"} = 'TRUE';
+        $scope->{vars}{"${name}_DIR"} = dirname($config_file);
+        warn "SmakCMake: find_package($name) → $config_file\n"
+            if $ENV{SMAK_CMAKE_DEBUG};
+        my $sub = parse_file($config_file);
+        eval_commands($sub, $state, $scope);
+        return;
+    }
+
+    # Try module-mode: Find<Name>.cmake in CMAKE_MODULE_PATH + our own modules dir
+    unless ($config_mode) {
+        my @mod_paths = split /;/, (_lookup('CMAKE_MODULE_PATH', $scope) // '');
+        push @mod_paths, "/usr/local/src/smak/cmake-modules";
+        for my $dir (@mod_paths) {
+            my $mod = "$dir/Find$name.cmake";
+            if (-f $mod) {
+                warn "SmakCMake: find_package($name) module → $mod\n"
+                    if $ENV{SMAK_CMAKE_DEBUG};
+                my $sub = parse_file($mod);
+                eval_commands($sub, $state, $scope);
+                return;
+            }
+        }
+        # Built-in FindXxx handlers for common packages
+        if (_find_package_builtin($name, $state, $scope)) {
+            return;
+        }
+    }
+
     $scope->{vars}{"${name}_FOUND"} = 'FALSE';
+    if ($required) {
+        warn "SmakCMake: find_package($name) REQUIRED but not found\n";
+    }
 };
+
+sub _find_package_search_paths {
+    my ($name, $scope) = @_;
+    my @paths;
+    # <Pkg>_DIR (if set)
+    my $dir_var = _lookup("${name}_DIR", $scope);
+    push @paths, $dir_var if $dir_var && -d $dir_var;
+    # ROOT env var
+    my $root = $ENV{"${name}_ROOT"} || _lookup("${name}_ROOT", $scope);
+    if ($root) {
+        push @paths, "$root/lib/cmake/$name",
+                     "$root/cmake/$name",
+                     "$root/share/$name/cmake",
+                     $root;
+    }
+    # Common install locations
+    push @paths, (
+        "/usr/local/$name/lib/cmake/$name",
+        "/usr/local/lib/cmake/$name",
+        "/usr/lib/cmake/$name",
+        "/usr/lib/x86_64-linux-gnu/cmake/$name",
+    );
+    # Trilinos-specific convenience: we maintain a local install
+    if ($name eq 'Trilinos') {
+        push @paths, '/usr/local/trilinos/lib/cmake/Trilinos',
+                     '/usr/local/trilinos/include',
+                     '/usr/local/src/Trilinos-Build';
+    }
+    return @paths;
+}
+
+sub _find_package_builtin {
+    my ($name, $state, $scope) = @_;
+    my %builtins = (
+        Threads => sub {
+            $scope->{vars}{Threads_FOUND} = 'TRUE';
+            $scope->{vars}{CMAKE_THREAD_LIBS_INIT} = '-lpthread';
+        },
+        MPI => sub {
+            $scope->{vars}{MPI_FOUND} = 'FALSE';  # no MPI in this sandbox
+        },
+        PythonInterp => sub {
+            if (-x '/usr/bin/python3') {
+                $scope->{vars}{PYTHONINTERP_FOUND} = 'TRUE';
+                $scope->{vars}{PYTHON_EXECUTABLE} = '/usr/bin/python3';
+            }
+        },
+        Python => sub {
+            if (-x '/usr/bin/python3') {
+                $scope->{vars}{Python_FOUND} = 'TRUE';
+                $scope->{vars}{Python_EXECUTABLE} = '/usr/bin/python3';
+            }
+        },
+        Python3 => sub {
+            if (-x '/usr/bin/python3') {
+                $scope->{vars}{Python3_FOUND} = 'TRUE';
+                $scope->{vars}{Python3_EXECUTABLE} = '/usr/bin/python3';
+            }
+        },
+        BISON => sub {
+            if (-x '/usr/bin/bison') {
+                $scope->{vars}{BISON_FOUND} = 'TRUE';
+                $scope->{vars}{BISON_EXECUTABLE} = '/usr/bin/bison';
+                $scope->{vars}{BISON_VERSION} = '3.8.2';
+            }
+        },
+        FLEX => sub {
+            if (-x '/usr/bin/flex') {
+                $scope->{vars}{FLEX_FOUND} = 'TRUE';
+                $scope->{vars}{FLEX_EXECUTABLE} = '/usr/bin/flex';
+            }
+        },
+        GTest => sub {
+            if (-f '/usr/include/gtest/gtest.h') {
+                $scope->{vars}{GTest_FOUND} = 'TRUE';
+                $scope->{vars}{GTEST_FOUND} = 'TRUE';
+                $scope->{vars}{GTEST_INCLUDE_DIRS} = '/usr/include';
+                $scope->{vars}{GTEST_LIBRARIES} = '-lgtest';
+            }
+        },
+    );
+    if ($builtins{$name}) {
+        $builtins{$name}->();
+        return 1;
+    }
+    return 0;
+}
 
 $builtins{'add_subdirectory'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
@@ -1334,16 +1605,115 @@ sub generate_makefiles {
     use File::Path qw(make_path);
     make_path("$build_dir/CMakeFiles");
 
-    # Generate per-target files
+    # Per-target metadata
     for my $name (sort keys %{$state->{targets}}) {
         my $t = $state->{targets}{$name};
+        # Skip interface/imported/alias libraries (no build rules)
+        next if $t->{libtype} && $t->{libtype} =~ /^(interface|imported|alias)$/;
+
         my $tdir = "$build_dir/CMakeFiles/$name.dir";
         make_path($tdir);
 
-        _write_flags_make($t, $tdir, $state);
+        _write_flags_make($t, $tdir, $state, $name);
         _write_depend_info($t, $tdir, $state, $name);
         _write_link_txt($t, $tdir, $state, $name);
     }
+
+    # Inter-target dependency graph
+    _write_makefile2($state);
+
+    # CMakeCache.txt (minimal - just what SmakCMake reads)
+    _write_cmake_cache($state);
+
+    # Top-level Makefile (for `make` compatibility — not strictly needed
+    # for smak since SmakCMake reads CMakeFiles/ directly)
+    _write_top_makefile($state);
+}
+
+sub _write_makefile2 {
+    my ($state) = @_;
+    my $build_dir = $state->{build_dir};
+    open(my $fh, '>', "$build_dir/CMakeFiles/Makefile2") or die "write Makefile2: $!";
+    print $fh "# CMAKE generated file: DO NOT EDIT!\n";
+    print $fh "# Generated by SmakCMakeInterp\n\n";
+    print $fh "default_target: all\n.PHONY: default_target\n\n";
+
+    # Collect real build targets (with sources)
+    my @real = grep {
+        my $t = $state->{targets}{$_};
+        @{$t->{sources}} > 0 && $t->{type} ne 'custom'
+    } sort keys %{$state->{targets}};
+
+    # all: depends on all real targets
+    print $fh "all:";
+    for my $n (@real) {
+        my $t = $state->{targets}{$n};
+        print $fh " ", _target_all_key($t, $n, $build_dir);
+    }
+    print $fh "\n.PHONY: all\n\n";
+
+    # Per-target "all" rules (with inter-target deps from link_libraries)
+    for my $n (@real) {
+        my $t = $state->{targets}{$n};
+        my $all_key = _target_all_key($t, $n, $build_dir);
+
+        # Dependencies: each link_libraries target's own /all
+        my @deps;
+        for my $lib (@{$t->{link_libraries} // []}) {
+            if ($state->{targets}{$lib}) {
+                push @deps, _target_all_key($state->{targets}{$lib}, $lib, $build_dir);
+            }
+        }
+        if (@deps) {
+            for my $d (@deps) {
+                print $fh "$all_key: $d\n";
+            }
+        }
+        print $fh "$all_key:\n\n";
+    }
+
+    close($fh);
+}
+
+sub _target_rel_dir {
+    my ($t, $build_dir) = @_;
+    my $dir = $t->{binary_dir} // $build_dir;
+    my $rel = File::Spec->abs2rel($dir, $build_dir);
+    return '.' if $rel eq '' || $rel eq '.';
+    return $rel;
+}
+
+sub _target_all_key {
+    my ($t, $name, $build_dir) = @_;
+    my $rel = _target_rel_dir($t, $build_dir);
+    return $rel eq '.' ? "CMakeFiles/$name.dir/all" : "$rel/CMakeFiles/$name.dir/all";
+}
+
+sub _write_cmake_cache {
+    my ($state) = @_;
+    my $build_dir = $state->{build_dir};
+    open(my $fh, '>', "$build_dir/CMakeCache.txt") or die "write CMakeCache.txt: $!";
+    print $fh "# Generated by SmakCMakeInterp\n";
+    print $fh "CMAKE_HOME_DIRECTORY:INTERNAL=$state->{source_dir}\n";
+    print $fh "CMAKE_COMMAND:INTERNAL=/usr/local/src/smak/cmake-install/bin/cmake\n";
+    print $fh "CMAKE_C_COMPILER:FILEPATH=/usr/bin/cc\n";
+    print $fh "CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++\n";
+    print $fh "CMAKE_Fortran_COMPILER:FILEPATH=/usr/bin/gfortran\n";
+    print $fh "CMAKE_AR:FILEPATH=/usr/bin/ar\n";
+    print $fh "CMAKE_RANLIB:FILEPATH=/usr/bin/ranlib\n";
+    close($fh);
+}
+
+sub _write_top_makefile {
+    my ($state) = @_;
+    my $build_dir = $state->{build_dir};
+    open(my $fh, '>', "$build_dir/Makefile") or die "write Makefile: $!";
+    print $fh "# Generated by SmakCMakeInterp — minimal stub.\n";
+    print $fh "# smak reads CMakeFiles/ directly; this file is for `make` compatibility.\n\n";
+    print $fh "all:\n\t\@echo 'Use smak to build this project (or run cmake).'\n";
+    print $fh ".PHONY: all clean\n";
+    print $fh "clean:\n\t\@echo 'clean not implemented by SmakCMakeInterp yet'\n";
+    close($fh);
 }
 
 sub _target_sources_with_paths {
@@ -1367,16 +1737,30 @@ sub _target_name_from_dir {
 }
 
 sub _write_flags_make {
-    my ($t, $tdir, $state) = @_;
-    my $lang = _primary_lang($t);
+    my ($t, $tdir, $state, $name) = @_;
     open(my $fh, '>', "$tdir/flags.make") or die "write $tdir/flags.make: $!";
     print $fh "# CMAKE generated file: DO NOT EDIT!\n";
     print $fh "# Generated by SmakCMakeInterp\n\n";
-    print $fh "# compile $lang with ", _compiler_for_lang($lang), "\n";
-    print $fh "${lang}_DEFINES = ", ($t->{compile_definitions} // ''), "\n";
-    print $fh "${lang}_INCLUDES = ", _include_flags($t), "\n";
-    print $fh "${lang}_FLAGS = ", ($t->{compile_options} // ''), "\n";
+
+    # Emit flags for each language the target uses
+    my %langs;
+    for my $src (@{$t->{sources}}) {
+        $langs{ _src_lang($src) }++;
+    }
+    for my $lang (sort keys %langs) {
+        print $fh "# compile $lang with ", _compiler_for_lang($lang), "\n";
+        print $fh "${lang}_DEFINES = ", ($t->{compile_definitions} // ''), "\n";
+        print $fh "${lang}_INCLUDES = ", _include_flags($t), "\n";
+        print $fh "${lang}_FLAGS = ", ($t->{compile_options} // ''), "\n\n";
+    }
     close($fh);
+}
+
+sub _src_lang {
+    my $src = shift;
+    return 'Fortran' if $src =~ /\.f(\d+)?$/i;
+    return 'C'       if $src =~ /\.c$/;
+    return 'CXX';    # default for .cc/.cpp/.cxx/.C
 }
 
 sub _write_depend_info {

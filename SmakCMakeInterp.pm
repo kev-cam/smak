@@ -144,12 +144,31 @@ sub _read_unquoted {
     my $paren_depth = 0;
     while (!_at_eof($lex)) {
         my $c = _peek_char($lex);
-        # End of argument
-        last if $c =~ /[\s\"]/;
+        # End of argument — but a " inside an unquoted arg starts a quoted
+        # substring that becomes part of the argument (CMake semantics).
+        last if $c =~ /\s/;
         last if $c eq '(' && $paren_depth == 0;
         last if $c eq ')' && $paren_depth == 0;
         last if $c eq '#' && $text eq '';
-        # Track nested parens inside unquoted args (rare but valid in some command args)
+        # Quoted substring embedded in unquoted arg — treat as literal,
+        # preserve the quotes, handle escapes inside.
+        if ($c eq '"') {
+            _advance($lex);
+            $text .= '"';
+            while (!_at_eof($lex) && _peek_char($lex) ne '"') {
+                my $cc = _advance($lex);
+                if ($cc eq '\\') {
+                    my $nc = _advance($lex);
+                    $text .= "\\$nc";
+                } else {
+                    $text .= $cc;
+                }
+            }
+            _advance($lex) if !_at_eof($lex);  # closing "
+            $text .= '"';
+            next;
+        }
+        # Track nested parens inside unquoted args
         $paren_depth++ if $c eq '(';
         $paren_depth-- if $c eq ')';
         # Handle backslash escape
@@ -315,7 +334,11 @@ sub expand_arg {
     if ($arg->{type} eq 'quoted') {
         return ($expanded);
     }
-    # Unquoted — split on unescaped ;
+    # Unquoted — if it contains quoted substrings (embedded "), treat whole
+    # thing as one token (don't split on ;).  Otherwise list-expand.
+    if ($arg->{text} =~ /"/) {
+        return ($expanded);
+    }
     return grep { $_ ne '' } split(/;/, $expanded);
 }
 
@@ -340,9 +363,287 @@ our %builtins;
 
 sub eval_commands {
     my ($commands, $state, $scope) = @_;
-    for my $cmd (@$commands) {
-        eval_command($cmd, $state, $scope);
+    my $i = 0;
+    while ($i < @$commands) {
+        my $cmd = $commands->[$i];
+        my $name = $cmd->{name};
+
+        # Block constructs: if/foreach/while/function/macro consume a range
+        # of commands.  Find the matching end-keyword, then either evaluate
+        # or skip the enclosed block.
+        if ($name eq 'if') {
+            $i = _eval_if($commands, $i, $state, $scope);
+        } elsif ($name eq 'foreach') {
+            $i = _eval_foreach($commands, $i, $state, $scope);
+        } elsif ($name eq 'while') {
+            $i = _eval_while($commands, $i, $state, $scope);
+        } elsif ($name eq 'function' || $name eq 'macro') {
+            $i = _eval_function_def($commands, $i, $state, $scope);
+        } else {
+            eval_command($cmd, $state, $scope);
+            $i++;
+        }
     }
+}
+
+# Find the matching end-keyword for a block starter, honoring nesting.
+# Returns the index of the end-keyword command.
+sub _find_block_end {
+    my ($commands, $start, $opener, $closer) = @_;
+    my $depth = 1;
+    for (my $j = $start + 1; $j < @$commands; $j++) {
+        my $n = $commands->[$j]{name};
+        $depth++ if $n eq $opener;
+        $depth-- if $n eq $closer;
+        return $j if $depth == 0;
+    }
+    die "Unterminated $opener block (started at line $commands->[$start]{line})\n";
+}
+
+# Scan a block for top-level elseif/else branches (honoring nesting).
+# Returns a list of { name => 'if'|'elseif'|'else', args => [...], start => idx }
+# where start is the index of the branch's opener.
+sub _if_branches {
+    my ($commands, $start, $end) = @_;
+    my @branches = ({ name => 'if', args => $commands->[$start]{args}, start => $start });
+    my $depth = 0;
+    for (my $j = $start + 1; $j < $end; $j++) {
+        my $n = $commands->[$j]{name};
+        if ($n eq 'if') { $depth++ }
+        elsif ($n eq 'endif') { $depth-- }
+        elsif ($depth == 0 && ($n eq 'elseif' || $n eq 'else')) {
+            push @branches, { name => $n, args => $commands->[$j]{args}, start => $j };
+        }
+    }
+    return @branches;
+}
+
+sub _eval_if {
+    my ($commands, $i, $state, $scope) = @_;
+    my $end = _find_block_end($commands, $i, 'if', 'endif');
+    my @branches = _if_branches($commands, $i, $end);
+
+    # Compute body ranges for each branch: [start+1, next_branch_start-1]
+    for my $b (0 .. $#branches) {
+        my $body_start = $branches[$b]{start} + 1;
+        my $body_end   = ($b < $#branches) ? $branches[$b+1]{start} - 1 : $end - 1;
+        my $truthy;
+        if ($branches[$b]{name} eq 'else') {
+            $truthy = 1;
+        } else {
+            my @args = expand_args($branches[$b]{args}, $scope);
+            $truthy = _if_test(\@args, $scope);
+        }
+        if ($truthy) {
+            my @body = @{$commands}[$body_start .. $body_end];
+            eval_commands(\@body, $state, $scope);
+            last;
+        }
+    }
+    return $end + 1;
+}
+
+# Evaluate if() condition per CMake semantics.
+# Handles: TRUE/FALSE/ON/OFF/YES/NO/1/0/non-empty-string-that-is-a-var
+# Operators: NOT, AND, OR, STREQUAL, EQUAL, LESS, GREATER, MATCHES,
+#            DEFINED, EXISTS, IS_DIRECTORY, VERSION_LESS, etc.
+# Simplified — good enough for common cases.
+sub _if_test {
+    my ($args, $scope) = @_;
+    # Shunting-yard-ish: handle NOT, AND, OR by recursion
+    return _if_expr($args, $scope);
+}
+
+sub _if_expr {
+    my ($args, $scope) = @_;
+    # Handle parens (rare; we pass tokens through)
+    # Handle OR (lowest precedence)
+    for (my $i = 0; $i < @$args; $i++) {
+        if (uc($args->[$i]) eq 'OR') {
+            my @l = @$args[0..$i-1];
+            my @r = @$args[$i+1..$#$args];
+            return _if_expr(\@l, $scope) || _if_expr(\@r, $scope);
+        }
+    }
+    for (my $i = 0; $i < @$args; $i++) {
+        if (uc($args->[$i]) eq 'AND') {
+            my @l = @$args[0..$i-1];
+            my @r = @$args[$i+1..$#$args];
+            return _if_expr(\@l, $scope) && _if_expr(\@r, $scope);
+        }
+    }
+    # NOT
+    if (@$args >= 1 && uc($args->[0]) eq 'NOT') {
+        my @r = @$args[1..$#$args];
+        return !_if_expr(\@r, $scope);
+    }
+    # Binary predicates
+    if (@$args == 3) {
+        my ($l, $op, $r) = @$args;
+        my $uop = uc($op);
+        return _deref($l, $scope) eq _deref($r, $scope) if $uop eq 'STREQUAL';
+        return _deref($l, $scope) ne _deref($r, $scope) if $uop eq 'STRNOTEQUAL';
+        return _deref($l, $scope) == _deref($r, $scope) if $uop eq 'EQUAL';
+        return _deref($l, $scope) <  _deref($r, $scope) if $uop eq 'LESS';
+        return _deref($l, $scope) <= _deref($r, $scope) if $uop eq 'LESS_EQUAL';
+        return _deref($l, $scope) >  _deref($r, $scope) if $uop eq 'GREATER';
+        return _deref($l, $scope) >= _deref($r, $scope) if $uop eq 'GREATER_EQUAL';
+        if ($uop eq 'MATCHES') {
+            my $s = _deref($l, $scope);
+            return $s =~ /$r/;
+        }
+        # Version comparison — compare parts
+        if ($uop =~ /^VERSION_/) {
+            return _version_cmp(_deref($l, $scope), $uop, _deref($r, $scope));
+        }
+    }
+    # Unary predicates
+    if (@$args == 2) {
+        my ($op, $arg) = @$args;
+        my $uop = uc($op);
+        return exists _find_var($arg, $scope)->{$arg} if $uop eq 'DEFINED';
+        return -e $arg ? 1 : 0 if $uop eq 'EXISTS';
+        return -d $arg ? 1 : 0 if $uop eq 'IS_DIRECTORY';
+        return -f $arg && !(-l $arg) ? 1 : 0 if $uop eq 'IS_SYMLINK';
+        return -e $arg ? 1 : 0 if $uop eq 'IS_ABSOLUTE';
+        return (defined $scope->{vars}{$arg} && $scope->{vars}{$arg}) ? 1 : 0 if $uop eq 'TARGET' || $uop eq 'COMMAND';
+    }
+    # Single value — truthy test
+    if (@$args == 1) {
+        my $v = $args->[0];
+        return _truthy($v, $scope);
+    }
+    # Empty
+    return 0;
+}
+
+# Is a bare value "truthy" in cmake if() context?
+sub _truthy {
+    my ($v, $scope) = @_;
+    # Constants
+    return 1 if $v =~ /^(1|ON|YES|TRUE|Y)$/i;
+    return 0 if $v =~ /^(0|OFF|NO|FALSE|N|IGNORE|NOTFOUND|)$/i;
+    return 0 if $v =~ /-NOTFOUND$/;
+    # Otherwise, treat as variable name — look it up recursively
+    my $lookup = _lookup($v, $scope);
+    if (defined $lookup && $lookup ne '') {
+        return _truthy($lookup, $scope);
+    }
+    return 0;
+}
+
+sub _find_var {
+    my ($name, $scope) = @_;
+    while ($scope) {
+        return $scope->{vars} if exists $scope->{vars}{$name};
+        $scope = $scope->{parent};
+    }
+    return {};
+}
+
+# Dereference: if arg is a defined variable name, return its value;
+# otherwise return arg as-is.
+sub _deref {
+    my ($v, $scope) = @_;
+    my $lookup = _lookup($v, $scope);
+    return defined $lookup ? $lookup : $v;
+}
+
+sub _version_cmp {
+    my ($a, $op, $b) = @_;
+    my @ap = split /\./, $a;
+    my @bp = split /\./, $b;
+    my $len = @ap > @bp ? @ap : @bp;
+    my $cmp = 0;
+    for (my $i = 0; $i < $len; $i++) {
+        my $av = $ap[$i] // 0;
+        my $bv = $bp[$i] // 0;
+        if ($av != $bv) { $cmp = $av <=> $bv; last; }
+    }
+    return { 'VERSION_LESS' => $cmp < 0,
+             'VERSION_LESS_EQUAL' => $cmp <= 0,
+             'VERSION_GREATER' => $cmp > 0,
+             'VERSION_GREATER_EQUAL' => $cmp >= 0,
+             'VERSION_EQUAL' => $cmp == 0,
+           }->{$op} ? 1 : 0;
+}
+
+sub _eval_foreach {
+    my ($commands, $i, $state, $scope) = @_;
+    my $end = _find_block_end($commands, $i, 'foreach', 'endforeach');
+    my $cmd = $commands->[$i];
+    my @args = expand_args($cmd->{args}, $scope);
+    my $var = shift @args;
+
+    # Determine iteration list
+    my @items;
+    if (@args >= 2 && $args[0] eq 'RANGE') {
+        shift @args;
+        if (@args == 1) { @items = (0 .. $args[0]); }
+        elsif (@args == 2) { @items = ($args[0] .. $args[1]); }
+        elsif (@args == 3) {
+            my ($start, $stop, $step) = @args;
+            for (my $v = $start; $v <= $stop; $v += $step) { push @items, $v; }
+        }
+    } elsif (@args >= 1 && $args[0] eq 'IN') {
+        shift @args;
+        # IN LISTS <var> or IN ITEMS <items>
+        if (@args >= 1 && $args[0] eq 'LISTS') {
+            shift @args;
+            for my $listvar (@args) {
+                my $val = _lookup($listvar, $scope) // '';
+                push @items, split /;/, $val;
+            }
+        } elsif (@args >= 1 && $args[0] eq 'ITEMS') {
+            shift @args;
+            @items = @args;
+        } else {
+            @items = @args;
+        }
+    } else {
+        @items = @args;
+    }
+
+    my @body = @{$commands}[$i+1 .. $end-1];
+    for my $item (@items) {
+        $scope->{vars}{$var} = $item;
+        eval_commands(\@body, $state, $scope);
+    }
+    return $end + 1;
+}
+
+sub _eval_while {
+    my ($commands, $i, $state, $scope) = @_;
+    my $end = _find_block_end($commands, $i, 'while', 'endwhile');
+    my $cmd = $commands->[$i];
+    my @body = @{$commands}[$i+1 .. $end-1];
+    my $max = 100000;  # safety: avoid runaway
+    while ($max-- > 0) {
+        my @args = expand_args($cmd->{args}, $scope);
+        last unless _if_test(\@args, $scope);
+        eval_commands(\@body, $state, $scope);
+    }
+    return $end + 1;
+}
+
+sub _eval_function_def {
+    my ($commands, $i, $state, $scope) = @_;
+    my $opener = $commands->[$i]{name};   # 'function' or 'macro'
+    my $closer = "end$opener";
+    my $end = _find_block_end($commands, $i, $opener, $closer);
+    my $cmd = $commands->[$i];
+    my @args = expand_args($cmd->{args}, $scope);
+    my $name = lc(shift @args);
+    my @params = @args;
+    my @body = @{$commands}[$i+1 .. $end-1];
+    # Store function definition — functions get a new scope, macros do not
+    my $is_macro = ($opener eq 'macro');
+    $state->{functions}{$name} = {
+        params => \@params,
+        body   => \@body,
+        is_macro => $is_macro,
+    };
+    return $end + 1;
 }
 
 sub eval_command {
@@ -351,12 +652,38 @@ sub eval_command {
     my $handler = $builtins{$cmd->{name}};
     if ($handler) {
         $handler->($state, \@expanded, $cmd, $scope);
-    } else {
-        # Unknown command — record it but don't fail (yet)
-        push @{$state->{unknown_commands}}, $cmd->{name};
-        warn "SmakCMake: unknown command '$cmd->{name}' at $cmd->{source}:$cmd->{line}\n"
-            if $ENV{SMAK_CMAKE_DEBUG};
+        return;
     }
+    # User-defined function/macro
+    if ($state->{functions} && $state->{functions}{$cmd->{name}}) {
+        _call_function($cmd->{name}, \@expanded, $state, $scope);
+        return;
+    }
+    # Unknown command — record it but don't fail (yet)
+    push @{$state->{unknown_commands}}, $cmd->{name};
+    warn "SmakCMake: unknown command '$cmd->{name}' at $cmd->{source}:$cmd->{line}\n"
+        if $ENV{SMAK_CMAKE_DEBUG};
+}
+
+sub _call_function {
+    my ($name, $args, $state, $scope) = @_;
+    my $fn = $state->{functions}{$name};
+    my $call_scope = $fn->{is_macro} ? $scope : new_scope($scope);
+    # Set ARGC, ARGN, ARGV, ARGV0..
+    $call_scope->{vars}{ARGC} = scalar @$args;
+    $call_scope->{vars}{ARGV} = join(';', @$args);
+    for my $k (0 .. $#$args) {
+        $call_scope->{vars}["ARGV$k"] = $args->[$k];
+    }
+    # Bind named parameters
+    for my $k (0 .. $#{$fn->{params}}) {
+        $call_scope->{vars}{$fn->{params}[$k]} = $args->[$k] // '';
+    }
+    # ARGN = extra args beyond named params
+    my $nparams = scalar @{$fn->{params}};
+    $call_scope->{vars}{ARGN} = join(';', @$args[$nparams..$#$args]) if @$args > $nparams;
+
+    eval_commands($fn->{body}, $state, $call_scope);
 }
 
 # ─── Built-in commands (minimal) ────────────────────────────────────
@@ -421,31 +748,421 @@ $builtins{'project'} = sub {
 $builtins{'add_executable'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
-    # Strip IMPORTED/ALIAS keywords
     my @sources = grep { !/^(IMPORTED|ALIAS|GLOBAL|EXCLUDE_FROM_ALL|WIN32|MACOSX_BUNDLE)$/ } @$args;
-    $state->{targets}{$name} = {
-        type => 'executable',
-        sources => \@sources,
-        source_dir => $state->{current_source_dir},
-        binary_dir => $state->{current_binary_dir},
-    };
+    $state->{targets}{$name} = _new_target($state, 'executable', \@sources);
 };
 
 $builtins{'add_library'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
-    my $libtype = 'static';  # default
+    my $libtype = 'static';
     if (@$args && $args->[0] =~ /^(STATIC|SHARED|MODULE|INTERFACE|OBJECT)$/) {
         $libtype = lc(shift @$args);
     }
     my @sources = grep { !/^(IMPORTED|ALIAS|GLOBAL|EXCLUDE_FROM_ALL)$/ } @$args;
-    $state->{targets}{$name} = {
-        type => 'library',
-        libtype => $libtype,
-        sources => \@sources,
+    my $t = _new_target($state, 'library', \@sources);
+    $t->{libtype} = $libtype;
+    $state->{targets}{$name} = $t;
+};
+
+# Build a new target, inheriting directory-level include_directories
+# and definitions that were in effect at the point of definition.
+sub _new_target {
+    my ($state, $type, $sources) = @_;
+    my $t = {
+        type       => $type,
+        sources    => [@$sources],
         source_dir => $state->{current_source_dir},
         binary_dir => $state->{current_binary_dir},
+        include_directories => [@{$state->{include_directories} // []}],
+        defines_list        => [@{$state->{definitions} // []}],
+        options_list        => [@{$state->{compile_options} // []}],
     };
+    $t->{compile_definitions} = join(' ', @{$t->{defines_list}});
+    $t->{compile_options}     = join(' ', @{$t->{options_list}});
+    return $t;
+}
+
+$builtins{'target_include_directories'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $t = $state->{targets}{$name} or return;
+    # Skip PUBLIC/PRIVATE/INTERFACE/SYSTEM/BEFORE keywords
+    for my $a (@$args) {
+        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|SYSTEM|BEFORE|AFTER)$/;
+        push @{$t->{include_directories}}, $a;
+    }
+};
+
+$builtins{'target_compile_definitions'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $t = $state->{targets}{$name} or return;
+    for my $a (@$args) {
+        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE)$/;
+        # Accept both "FOO" and "FOO=bar"; add -D prefix
+        my $d = $a =~ /^-D/ ? $a : "-D$a";
+        push @{$t->{defines_list}}, $d;
+    }
+    $t->{compile_definitions} = join(' ', @{$t->{defines_list} // []});
+};
+
+$builtins{'target_compile_options'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $t = $state->{targets}{$name} or return;
+    for my $a (@$args) {
+        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|BEFORE)$/;
+        push @{$t->{options_list}}, $a;
+    }
+    $t->{compile_options} = join(' ', @{$t->{options_list} // []});
+};
+
+$builtins{'target_link_libraries'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $t = $state->{targets}{$name} or return;
+    for my $a (@$args) {
+        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|LINK_PUBLIC|LINK_PRIVATE|LINK_INTERFACE_LIBRARIES)$/;
+        push @{$t->{link_libraries}}, $a;
+    }
+};
+
+$builtins{'target_sources'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $t = $state->{targets}{$name} or return;
+    for my $a (@$args) {
+        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE)$/;
+        push @{$t->{sources}}, $a;
+    }
+};
+
+$builtins{'set_target_properties'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # set_target_properties(name1 name2 PROPERTIES prop1 val1 prop2 val2)
+    my @names;
+    while (@$args && $args->[0] ne 'PROPERTIES') {
+        push @names, shift @$args;
+    }
+    shift @$args if @$args && $args->[0] eq 'PROPERTIES';
+    while (@$args >= 2) {
+        my ($prop, $val) = (shift @$args, shift @$args);
+        for my $n (@names) {
+            next unless $state->{targets}{$n};
+            $state->{targets}{$n}{properties}{$prop} = $val;
+        }
+    }
+};
+
+$builtins{'include_directories'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    push @{$state->{include_directories}}, grep { !/^(SYSTEM|BEFORE|AFTER)$/ } @$args;
+};
+
+$builtins{'add_definitions'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    push @{$state->{definitions}}, @$args;
+};
+
+$builtins{'add_compile_options'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    push @{$state->{compile_options}}, @$args;
+};
+
+$builtins{'include'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $file = $args->[0] or return;
+    return if $file eq 'OPTIONAL' || $file eq 'NO_POLICY_SCOPE';
+    # Module name or file path
+    my $path = $file;
+    unless (-f $path) {
+        # Try .cmake suffix
+        $path = "$file.cmake" if -f "$file.cmake";
+    }
+    unless (-f $path) {
+        # Search CMAKE_MODULE_PATH
+        my $module_path = _lookup('CMAKE_MODULE_PATH', $scope) // '';
+        for my $dir (split /;/, $module_path) {
+            if (-f "$dir/$file.cmake") { $path = "$dir/$file.cmake"; last; }
+            if (-f "$dir/$file")       { $path = "$dir/$file";       last; }
+        }
+    }
+    unless (-f $path) {
+        warn "SmakCMake: include(): cannot find '$file' at $cmd->{source}:$cmd->{line}\n"
+            if $ENV{SMAK_CMAKE_DEBUG};
+        return;
+    }
+    my $sub = parse_file($path);
+    eval_commands($sub, $state, $scope);
+};
+
+$builtins{'list'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $op = shift @$args;
+    my $name = shift @$args;
+    my @list = split /;/, (_lookup($name, $scope) // '');
+
+    if ($op eq 'APPEND') {
+        push @list, @$args;
+    } elsif ($op eq 'PREPEND') {
+        unshift @list, @$args;
+    } elsif ($op eq 'REMOVE_ITEM') {
+        my %rm = map { $_ => 1 } @$args;
+        @list = grep { !$rm{$_} } @list;
+    } elsif ($op eq 'REMOVE_DUPLICATES') {
+        my %seen;
+        @list = grep { !$seen{$_}++ } @list;
+    } elsif ($op eq 'LENGTH') {
+        my $out = shift @$args;
+        $scope->{vars}{$out} = scalar @list;
+        return;
+    } elsif ($op eq 'GET') {
+        my $out = pop @$args;
+        my @idx = @$args;
+        my @vals = map { $list[$_] // '' } @idx;
+        $scope->{vars}{$out} = join(';', @vals);
+        return;
+    } elsif ($op eq 'JOIN') {
+        my $sep = shift @$args;
+        my $out = shift @$args;
+        $scope->{vars}{$out} = join($sep, @list);
+        return;
+    } elsif ($op eq 'SORT') {
+        @list = sort @list;
+    } elsif ($op eq 'REVERSE') {
+        @list = reverse @list;
+    } elsif ($op eq 'INSERT') {
+        my $idx = shift @$args;
+        splice(@list, $idx, 0, @$args);
+    } elsif ($op eq 'FIND') {
+        my $item = shift @$args;
+        my $out = shift @$args;
+        my $found = -1;
+        for my $i (0..$#list) { if ($list[$i] eq $item) { $found = $i; last; } }
+        $scope->{vars}{$out} = $found;
+        return;
+    } elsif ($op eq 'FILTER') {
+        # list(FILTER <var> <INCLUDE|EXCLUDE> REGEX <regex>)
+        my $mode = shift @$args;
+        shift @$args if @$args && $args->[0] eq 'REGEX';
+        my $rx = shift @$args;
+        if ($mode eq 'INCLUDE') {
+            @list = grep { /$rx/ } @list;
+        } else {
+            @list = grep { !/$rx/ } @list;
+        }
+    }
+    $scope->{vars}{$name} = join(';', @list);
+};
+
+$builtins{'string'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $op = shift @$args;
+    if ($op eq 'REPLACE') {
+        my ($from, $to, $out, @inputs) = @$args;
+        my $s = join('', @inputs);
+        $s =~ s/\Q$from\E/$to/g;
+        $scope->{vars}{$out} = $s;
+    } elsif ($op eq 'REGEX') {
+        my $mode = shift @$args;
+        if ($mode eq 'REPLACE') {
+            my ($rx, $repl, $out, @inputs) = @$args;
+            my $s = join('', @inputs);
+            # Convert cmake \1 backrefs — Perl uses $1; simplest: replace only
+            $s =~ s/$rx/_cmake_regex_expand($repl)/ge;
+            $scope->{vars}{$out} = $s;
+        } elsif ($mode eq 'MATCH' || $mode eq 'MATCHALL') {
+            my ($rx, $out, @inputs) = @$args;
+            my $s = join('', @inputs);
+            if ($mode eq 'MATCH') {
+                $scope->{vars}{$out} = ($s =~ /($rx)/) ? $1 : '';
+            } else {
+                my @m;
+                while ($s =~ /($rx)/g) { push @m, $1; }
+                $scope->{vars}{$out} = join(';', @m);
+            }
+        }
+    } elsif ($op eq 'APPEND') {
+        my $name = shift @$args;
+        $scope->{vars}{$name} = ($scope->{vars}{$name} // '') . join('', @$args);
+    } elsif ($op eq 'PREPEND') {
+        my $name = shift @$args;
+        $scope->{vars}{$name} = join('', @$args) . ($scope->{vars}{$name} // '');
+    } elsif ($op eq 'CONCAT') {
+        my $out = shift @$args;
+        $scope->{vars}{$out} = join('', @$args);
+    } elsif ($op eq 'TOUPPER') {
+        my ($in, $out) = @$args;
+        $scope->{vars}{$out} = uc $in;
+    } elsif ($op eq 'TOLOWER') {
+        my ($in, $out) = @$args;
+        $scope->{vars}{$out} = lc $in;
+    } elsif ($op eq 'LENGTH') {
+        my ($in, $out) = @$args;
+        $scope->{vars}{$out} = length $in;
+    } elsif ($op eq 'SUBSTRING') {
+        my ($in, $start, $len, $out) = @$args;
+        $scope->{vars}{$out} = $len < 0 ? substr($in, $start) : substr($in, $start, $len);
+    } elsif ($op eq 'STRIP') {
+        my ($in, $out) = @$args;
+        $in =~ s/^\s+|\s+$//g;
+        $scope->{vars}{$out} = $in;
+    } elsif ($op eq 'COMPARE') {
+        my $mode = shift @$args;
+        my ($l, $r, $out) = @$args;
+        my $res = 0;
+        if    ($mode eq 'EQUAL')    { $res = ($l eq $r) ? 1 : 0 }
+        elsif ($mode eq 'NOTEQUAL') { $res = ($l ne $r) ? 1 : 0 }
+        elsif ($mode eq 'LESS')     { $res = ($l lt $r) ? 1 : 0 }
+        elsif ($mode eq 'GREATER')  { $res = ($l gt $r) ? 1 : 0 }
+        $scope->{vars}{$out} = $res;
+    }
+};
+
+sub _cmake_regex_expand {
+    my $repl = shift;
+    # Stub: don't expand backrefs; assume $1..$9 used by caller
+    return $repl;
+}
+
+$builtins{'math'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # math(EXPR <var> <expression> [OUTPUT_FORMAT ...])
+    shift @$args if $args->[0] eq 'EXPR';
+    my $out = shift @$args;
+    my $expr = shift @$args;
+    # Very limited: evaluate as Perl arithmetic
+    my $val = eval { no strict; no warnings; eval $expr };
+    $scope->{vars}{$out} = defined $val ? $val : 0;
+};
+
+$builtins{'option'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($name, $desc, $default) = @$args;
+    $default //= 'OFF';
+    return if exists $scope->{vars}{$name};
+    $scope->{vars}{$name} = $default;
+    # Root scope cache
+    my $s = $scope; while ($s->{parent}) { $s = $s->{parent}; }
+    $s->{cache}{$name} //= $default;
+};
+
+$builtins{'file'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $op = shift @$args;
+    if ($op eq 'GLOB' || $op eq 'GLOB_RECURSE') {
+        my $out = shift @$args;
+        # Skip RELATIVE <dir>, LIST_DIRECTORIES, CONFIGURE_DEPENDS
+        my $relative;
+        while (@$args && $args->[0] =~ /^(RELATIVE|LIST_DIRECTORIES|CONFIGURE_DEPENDS|FOLLOW_SYMLINKS)$/) {
+            my $kw = shift @$args;
+            $relative = shift @$args if $kw eq 'RELATIVE';
+            shift @$args if $kw eq 'LIST_DIRECTORIES';  # TRUE/FALSE
+        }
+        my @matches;
+        for my $pattern (@$args) {
+            # If pattern is relative, make absolute against current source dir
+            my $abs_pattern = $pattern =~ m{^/} ? $pattern
+                : File::Spec->catfile($state->{current_source_dir}, $pattern);
+            if ($op eq 'GLOB_RECURSE') {
+                # Simple recursive glob: convert pattern → regex
+                my $base = $abs_pattern;
+                $base =~ s{/[^/]*$}{};
+                my $fpat = $abs_pattern;
+                $fpat =~ s{^.*/}{};
+                $fpat = quotemeta($fpat);
+                $fpat =~ s/\\\*/[^\/]*/g;
+                $fpat =~ s/\\\?/./g;
+                use File::Find;
+                File::Find::find({ wanted => sub {
+                    if (-f $_ && /^$fpat$/) {
+                        my $p = $File::Find::name;
+                        $p = File::Spec->abs2rel($p, $relative) if $relative;
+                        push @matches, $p;
+                    }
+                }, no_chdir => 1 }, $base) if -d $base;
+            } else {
+                for my $m (glob($abs_pattern)) {
+                    $m = File::Spec->abs2rel($m, $relative) if $relative;
+                    push @matches, $m;
+                }
+            }
+        }
+        $scope->{vars}{$out} = join(';', @matches);
+    } elsif ($op eq 'READ') {
+        my ($path, $out) = @$args;
+        if (open(my $fh, '<', $path)) {
+            local $/;
+            $scope->{vars}{$out} = <$fh>;
+            close $fh;
+        }
+    } elsif ($op eq 'WRITE' || $op eq 'APPEND') {
+        my $path = shift @$args;
+        if (open(my $fh, $op eq 'APPEND' ? '>>' : '>', $path)) {
+            print $fh join('', @$args);
+            close $fh;
+        }
+    } elsif ($op eq 'MAKE_DIRECTORY') {
+        use File::Path qw(make_path);
+        for my $d (@$args) { make_path($d); }
+    }
+};
+
+$builtins{'configure_file'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($in, $out) = @$args[0, 1];
+    # Resolve paths
+    $in = File::Spec->catfile($state->{current_source_dir}, $in)
+        unless $in =~ m{^/};
+    $out = File::Spec->catfile($state->{current_binary_dir}, $out)
+        unless $out =~ m{^/};
+    open(my $ifh, '<', $in) or do {
+        warn "configure_file: cannot read $in\n" if $ENV{SMAK_CMAKE_DEBUG};
+        return;
+    };
+    local $/;
+    my $text = <$ifh>;
+    close $ifh;
+
+    # Substitute @VAR@
+    $text =~ s/\@([A-Za-z_][A-Za-z0-9_]*)\@/_lookup($1, $scope) \/\/ ''/ge;
+    # Substitute ${VAR}
+    $text =~ s/\$\{([^\{\}\$]+?)\}/_lookup($1, $scope) \/\/ ''/ge;
+    # #cmakedefine VAR → #define VAR val, or /* #undef VAR */
+    $text =~ s{^(\s*)#cmakedefine\s+(\w+)(.*)$}{
+        my ($ws, $var, $rest) = ($1, $2, $3);
+        my $val = _lookup($var, $scope);
+        if (defined $val && $val ne '' && $val !~ /^(0|OFF|NO|FALSE|IGNORE|NOTFOUND)$/i) {
+            "${ws}#define $var$rest";
+        } else {
+            "${ws}/* #undef $var */";
+        }
+    }gem;
+    # #cmakedefine01 VAR → #define VAR 0 or 1
+    $text =~ s{^(\s*)#cmakedefine01\s+(\w+)}{
+        my ($ws, $var) = ($1, $2);
+        my $val = _lookup($var, $scope);
+        my $n = (defined $val && $val ne '' && $val !~ /^(0|OFF|NO|FALSE)$/i) ? 1 : 0;
+        "${ws}#define $var $n";
+    }gem;
+
+    # Create output directory
+    use File::Path qw(make_path);
+    use File::Basename qw(dirname);
+    make_path(dirname($out));
+    open(my $ofh, '>', $out) or return;
+    print $ofh $text;
+    close $ofh;
+};
+
+$builtins{'find_package'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # Stub — record the request, set _FOUND=FALSE by default.
+    # Real implementation needs to search Find<Pkg>.cmake / <Pkg>Config.cmake
+    my $name = shift @$args;
+    push @{$state->{find_package_requests}}, $name;
+    $scope->{vars}{"${name}_FOUND"} = 'FALSE';
 };
 
 $builtins{'add_subdirectory'} = sub {

@@ -129,6 +129,8 @@ sub find_target_dirs {
             if (/\/CMakeFiles\/(\w+)\.dir$/ && -d $_) {
                 my $name = $1;
                 my $dir = $_;
+                # Skip CMake internal test/probe directories
+                next if $dir =~ m{/CMakeFiles/(?:CMakeTmp|FortranCInterface|CheckTypeSize)/};
                 # Must have DependInfo.cmake to be a real build target
                 if (-f "$dir/DependInfo.cmake") {
                     push @target_dirs, { name => $name, dir => $dir };

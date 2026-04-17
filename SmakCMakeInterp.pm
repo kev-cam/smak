@@ -892,12 +892,26 @@ $builtins{'add_library'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
     my $libtype = 'static';
-    if (@$args && $args->[0] =~ /^(STATIC|SHARED|MODULE|INTERFACE|OBJECT)$/) {
-        $libtype = lc(shift @$args);
+    my $imported = 0;
+    my $global = 0;
+    # Peel off keywords
+    while (@$args && $args->[0] =~ /^(STATIC|SHARED|MODULE|INTERFACE|OBJECT|IMPORTED|GLOBAL|ALIAS|EXCLUDE_FROM_ALL)$/) {
+        my $kw = shift @$args;
+        if ($kw =~ /^(STATIC|SHARED|MODULE|INTERFACE|OBJECT)$/) {
+            $libtype = lc($kw);
+        } elsif ($kw eq 'IMPORTED') {
+            $imported = 1;
+        } elsif ($kw eq 'GLOBAL') {
+            $global = 1;
+        }
     }
-    my @sources = grep { !/^(IMPORTED|ALIAS|GLOBAL|EXCLUDE_FROM_ALL)$/ } @$args;
+    my @sources = @$args;
+    # ALIAS: add_library(alias ALIAS real) — just point to real
+    # (handled above by the while loop eating ALIAS and leaving the target name)
     my $t = _new_target($state, 'library', \@sources);
     $t->{libtype} = $libtype;
+    $t->{imported} = $imported;
+    $t->{global} = $global;
     $state->{targets}{$name} = $t;
 };
 
@@ -958,19 +972,69 @@ $builtins{'target_link_libraries'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
     my $t = $state->{targets}{$name} or return;
+    my $mode = 'PRIVATE';  # default when no keyword given
     for my $a (@$args) {
-        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|LINK_PUBLIC|LINK_PRIVATE|LINK_INTERFACE_LIBRARIES)$/;
+        if ($a =~ /^(PUBLIC|PRIVATE|INTERFACE|LINK_PUBLIC|LINK_PRIVATE)$/) {
+            $mode = $1;
+            $mode =~ s/^LINK_//;
+            next;
+        }
+        next if $a eq 'LINK_INTERFACE_LIBRARIES';
         push @{$t->{link_libraries}}, $a;
+        # Transitive propagation: if the library is a known target with
+        # interface/public include dirs or defines, propagate them to
+        # the consumer (unless we're in PRIVATE mode).
+        if ($mode ne 'PRIVATE' || 1) {  # PRIVATE still gets INTERFACE from deps
+            _propagate_interface($state, $t, $a);
+        }
     }
 };
+
+# When target $t links against $lib, pull $lib's interface properties
+# (INTERFACE_INCLUDE_DIRECTORIES, INTERFACE_COMPILE_DEFINITIONS,
+#  INTERFACE_COMPILE_OPTIONS, INTERFACE_LINK_LIBRARIES) into $t.
+sub _propagate_interface {
+    my ($state, $t, $lib) = @_;
+    my $lt = $state->{targets}{$lib};
+    return unless $lt;
+
+    # Add interface include dirs
+    for my $inc (@{$lt->{interface_include_directories} // []}) {
+        push @{$t->{include_directories}}, $inc
+            unless grep { $_ eq $inc } @{$t->{include_directories}};
+    }
+    # Public include dirs (INTERFACE + source dir) — for regular targets,
+    # their include_directories IS the public view
+    for my $inc (@{$lt->{include_directories} // []}) {
+        push @{$t->{include_directories}}, $inc
+            unless grep { $_ eq $inc } @{$t->{include_directories}};
+    }
+    # Defines
+    for my $d (@{$lt->{interface_defines_list} // []}) {
+        push @{$t->{defines_list}}, $d
+            unless grep { $_ eq $d } @{$t->{defines_list}};
+    }
+    $t->{compile_definitions} = join(' ', @{$t->{defines_list} // []});
+    $t->{compile_options}     = join(' ', @{$t->{options_list} // []});
+
+    # Transitive link libraries (interface deps of deps)
+    for my $sublib (@{$lt->{interface_link_libraries} // []}, @{$lt->{link_libraries} // []}) {
+        next if grep { $_ eq $sublib } @{$t->{link_libraries}};
+        push @{$t->{link_libraries}}, $sublib;
+        _propagate_interface($state, $t, $sublib);
+    }
+}
 
 $builtins{'target_sources'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
     my $t = $state->{targets}{$name} or return;
+    my $curdir = $state->{current_source_dir};
     for my $a (@$args) {
-        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE)$/;
-        push @{$t->{sources}}, $a;
+        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|FILE_SET|BASE_DIRS|TYPE|HEADERS|FILES)$/;
+        # If the source is relative and we're in a subdir, qualify it
+        my $src = $a =~ m{^/} ? $a : File::Spec->catfile($curdir, $a);
+        push @{$t->{sources}}, $src;
     }
 };
 
@@ -985,8 +1049,21 @@ $builtins{'set_target_properties'} = sub {
     while (@$args >= 2) {
         my ($prop, $val) = (shift @$args, shift @$args);
         for my $n (@names) {
-            next unless $state->{targets}{$n};
-            $state->{targets}{$n}{properties}{$prop} = $val;
+            my $t = $state->{targets}{$n};
+            next unless $t;
+            $t->{properties}{$prop} = $val;
+            # Well-known properties map to target fields
+            if ($prop eq 'INTERFACE_INCLUDE_DIRECTORIES') {
+                $t->{interface_include_directories} = [grep { $_ ne '' } split /;/, $val];
+            } elsif ($prop eq 'INCLUDE_DIRECTORIES') {
+                $t->{include_directories} = [grep { $_ ne '' } split /;/, $val];
+            } elsif ($prop eq 'INTERFACE_LINK_LIBRARIES') {
+                $t->{interface_link_libraries} = [grep { $_ ne '' } split /;/, $val];
+            } elsif ($prop eq 'INTERFACE_COMPILE_DEFINITIONS') {
+                $t->{interface_defines_list} = [map { /^-D/ ? $_ : "-D$_" } grep { $_ ne '' } split /;/, $val];
+            } elsif ($prop eq 'IMPORTED_LOCATION' || $prop =~ /^IMPORTED_LOCATION_/) {
+                $t->{imported_location} = $val;
+            }
         }
     }
 };
@@ -1400,6 +1477,181 @@ $builtins{'find_path'} = sub {
     $scope->{vars}{$out} = "$out-NOTFOUND";
 };
 
+# add_custom_command(OUTPUT <files> COMMAND <cmd> [ARGS <a>...] [DEPENDS <d>...] ...)
+# add_custom_command(TARGET <tgt> PRE_BUILD|PRE_LINK|POST_BUILD COMMAND <cmd> ...)
+$builtins{'add_custom_command'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my %custom;
+    my $i = 0;
+    while ($i < @$args) {
+        my $kw = $args->[$i];
+        if ($kw eq 'OUTPUT') {
+            $i++;
+            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+                push @{$custom{output}}, $args->[$i++];
+            }
+        } elsif ($kw eq 'TARGET') {
+            $custom{target} = $args->[++$i];
+            $i++;
+        } elsif ($kw eq 'COMMAND') {
+            $i++;
+            my @parts;
+            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|ARGS|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+                push @parts, $args->[$i++];
+            }
+            push @{$custom{commands}}, join(' ', @parts);
+            # ARGS is deprecated but legal
+            if ($i < @$args && $args->[$i] eq 'ARGS') {
+                $i++;
+                my @extra;
+                while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+                    push @extra, $args->[$i++];
+                }
+                $custom{commands}[-1] .= ' ' . join(' ', @extra) if @extra;
+            }
+        } elsif ($kw eq 'DEPENDS' || $kw eq 'MAIN_DEPENDENCY') {
+            $i++;
+            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+                push @{$custom{depends}}, $args->[$i++];
+            }
+        } elsif ($kw eq 'WORKING_DIRECTORY') {
+            $custom{working_dir} = $args->[++$i];
+            $i++;
+        } elsif ($kw eq 'COMMENT') {
+            $custom{comment} = $args->[++$i];
+            $i++;
+        } elsif ($kw =~ /^(VERBATIM|APPEND|USES_TERMINAL)$/) {
+            $i++;
+        } else {
+            $i++;  # skip unknown
+        }
+    }
+    $custom{source_dir} = $state->{current_source_dir};
+    $custom{binary_dir} = $state->{current_binary_dir};
+    push @{$state->{custom_commands}}, \%custom;
+};
+
+# add_custom_target(name [ALL] [command] [DEPENDS ...] ...)
+$builtins{'add_custom_target'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $all = 0;
+    if (@$args && $args->[0] eq 'ALL') { $all = 1; shift @$args; }
+    my %t = (
+        type => 'custom',
+        name => $name,
+        all => $all,
+        source_dir => $state->{current_source_dir},
+        binary_dir => $state->{current_binary_dir},
+        sources => [],
+        commands => [],
+        depends => [],
+    );
+    my $i = 0;
+    while ($i < @$args) {
+        my $kw = $args->[$i];
+        if ($kw eq 'COMMAND') {
+            $i++;
+            my @parts;
+            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|USES_TERMINAL|SOURCES|JOB_POOL)$/) {
+                push @parts, $args->[$i++];
+            }
+            push @{$t{commands}}, join(' ', @parts);
+        } elsif ($kw eq 'DEPENDS') {
+            $i++;
+            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|USES_TERMINAL|SOURCES|JOB_POOL)$/) {
+                push @{$t{depends}}, $args->[$i++];
+            }
+        } elsif ($kw eq 'SOURCES') {
+            $i++;
+            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|USES_TERMINAL|SOURCES|JOB_POOL)$/) {
+                push @{$t{sources}}, $args->[$i++];
+            }
+        } elsif ($kw eq 'WORKING_DIRECTORY') {
+            $t{working_dir} = $args->[++$i]; $i++;
+        } elsif ($kw eq 'COMMENT') {
+            $t{comment} = $args->[++$i]; $i++;
+        } else {
+            $i++;
+        }
+    }
+    $state->{targets}{$name} = \%t;
+};
+
+# add_dependencies(<target> <dep> ...)
+$builtins{'add_dependencies'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $t = $state->{targets}{$name} or return;
+    for my $dep (@$args) {
+        push @{$t->{dependencies}}, $dep
+            unless grep { $_ eq $dep } @{$t->{dependencies} // []};
+    }
+};
+
+# bison_target(NAME input output [COMPILE_FLAGS <f>] [DEFINES_FILE <h>])
+$builtins{'bison_target'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $input = shift @$args;
+    my $output = shift @$args;
+    # Resolve paths
+    $input = File::Spec->catfile($state->{current_source_dir}, $input)
+        unless $input =~ m{^/};
+    $output = File::Spec->catfile($state->{current_binary_dir}, $output)
+        unless $output =~ m{^/};
+    my $header = $output;
+    $header =~ s/\.(c|cc|cxx|cpp)$/.h/;
+    my $flags = '';
+    while (@$args) {
+        my $kw = shift @$args;
+        if ($kw eq 'COMPILE_FLAGS') { $flags = shift @$args; }
+        elsif ($kw eq 'DEFINES_FILE') { $header = shift @$args; }
+        else { shift @$args; }
+    }
+    my $bison = '/usr/bin/bison';
+    push @{$state->{custom_commands}}, {
+        output => [$output, $header],
+        commands => ["$bison $flags -d -o $output $input"],
+        depends => [$input],
+        source_dir => $state->{current_source_dir},
+        binary_dir => $state->{current_binary_dir},
+    };
+    # Expose variables for dependents
+    $scope->{vars}{"${name}_OUTPUTS"} = "$output;$header";
+    $scope->{vars}{"${name}_OUTPUT_SOURCE"} = $output;
+    $scope->{vars}{"${name}_OUTPUT_HEADER"} = $header;
+};
+
+# flex_target(NAME input output [COMPILE_FLAGS <f>])
+$builtins{'flex_target'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my $input = shift @$args;
+    my $output = shift @$args;
+    $input = File::Spec->catfile($state->{current_source_dir}, $input)
+        unless $input =~ m{^/};
+    $output = File::Spec->catfile($state->{current_binary_dir}, $output)
+        unless $output =~ m{^/};
+    my $flags = '';
+    while (@$args) {
+        my $kw = shift @$args;
+        if ($kw eq 'COMPILE_FLAGS') { $flags = shift @$args; }
+        else { shift @$args; }
+    }
+    my $flex = '/usr/bin/flex';
+    push @{$state->{custom_commands}}, {
+        output => [$output],
+        commands => ["$flex $flags -o $output $input"],
+        depends => [$input],
+        source_dir => $state->{current_source_dir},
+        binary_dir => $state->{current_binary_dir},
+    };
+    $scope->{vars}{"${name}_OUTPUTS"} = $output;
+};
+
+$builtins{'add_flex_bison_dependency'} = sub { };  # no-op; bison/flex handle it
+
 $builtins{'install'} = sub { };          # stub — we don't install
 $builtins{'export'} = sub { };           # stub
 $builtins{'enable_testing'} = sub { };   # stub
@@ -1610,6 +1862,11 @@ sub generate_makefiles {
         my $t = $state->{targets}{$name};
         # Skip interface/imported/alias libraries (no build rules)
         next if $t->{libtype} && $t->{libtype} =~ /^(interface|imported|alias)$/;
+        next if $t->{imported};
+        # Skip targets with :: in the name (conventional for imported targets)
+        next if $name =~ /::/;
+        # Skip targets with no sources unless they're custom
+        next if !@{$t->{sources}} && $t->{type} ne 'custom';
 
         my $tdir = "$build_dir/CMakeFiles/$name.dir";
         make_path($tdir);
@@ -1622,12 +1879,61 @@ sub generate_makefiles {
     # Inter-target dependency graph
     _write_makefile2($state);
 
+    # Custom command rules
+    _write_custom_rules($state);
+
     # CMakeCache.txt (minimal - just what SmakCMake reads)
     _write_cmake_cache($state);
 
     # Top-level Makefile (for `make` compatibility — not strictly needed
     # for smak since SmakCMake reads CMakeFiles/ directly)
     _write_top_makefile($state);
+}
+
+# Write rules for add_custom_command outputs into a single rules.make.
+# SmakCMake doesn't read this yet — but make can use it, and we can
+# later hook it into SmakCMake's rule tables directly.
+sub _write_custom_rules {
+    my ($state) = @_;
+    my $build_dir = $state->{build_dir};
+    my @cmds = @{$state->{custom_commands} // []};
+    return unless @cmds;
+
+    use File::Path qw(make_path);
+    open(my $fh, '>', "$build_dir/CMakeFiles/custom_rules.make")
+        or die "write custom_rules.make: $!";
+    print $fh "# CMAKE generated file: DO NOT EDIT!\n";
+    print $fh "# Generated by SmakCMakeInterp\n\n";
+    for my $c (@cmds) {
+        my @outs = @{$c->{output} // []};
+        next unless @outs;
+        my @deps = @{$c->{depends} // []};
+        my $primary = shift @outs;
+        my $dir = $c->{working_dir} // $c->{binary_dir} // $build_dir;
+        # Ensure output dir exists so bison/flex can write to it
+        my $outdir = $primary;
+        $outdir =~ s{/[^/]*$}{};
+        make_path($outdir) if $outdir && $outdir ne $primary;
+
+        # Primary rule
+        print $fh "$primary: " . join(' ', @deps) . "\n";
+        print $fh "\t\@mkdir -p " . _shell_quote($outdir) . "\n" if $outdir;
+        print $fh "\tcd " . _shell_quote($dir) . " && ";
+        print $fh join(" && ", @{$c->{commands} // []});
+        print $fh "\n\n";
+
+        # Side-output rules — depend on primary (so building primary produces them)
+        for my $o (@outs) {
+            print $fh "$o: $primary\n\n";
+        }
+    }
+    close($fh);
+}
+
+sub _shell_quote {
+    my $s = shift // '';
+    return "'$s'" if $s =~ /[\s\$'"()\\]/;
+    return $s;
 }
 
 sub _write_makefile2 {
@@ -1833,6 +2139,8 @@ sub _compiler_for_lang {
 sub _include_flags {
     my ($t) = @_;
     my @inc = @{$t->{include_directories} // []};
+    my %seen;
+    @inc = grep { $_ ne '' && !$seen{$_}++ } @inc;
     return join(' ', map { "-I$_" } @inc);
 }
 

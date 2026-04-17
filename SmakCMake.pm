@@ -78,6 +78,7 @@ sub parse_cmake_cache {
     $info->{cmake_command} = $cache{CMAKE_COMMAND} // 'cmake';
     $info->{c_compiler} = $cache{CMAKE_C_COMPILER} // 'cc';
     $info->{cxx_compiler} = $cache{CMAKE_CXX_COMPILER} // 'c++';
+    $info->{fortran_compiler} = $cache{CMAKE_Fortran_COMPILER} // 'gfortran';
     $info->{ar} = $cache{CMAKE_AR} // 'ar';
     $info->{ranlib} = $cache{CMAKE_RANLIB} // 'ranlib';
     $info->{cache} = \%cache;
@@ -185,27 +186,48 @@ sub parse_depend_info {
     open(my $fh, '<', $file) or return;
 
     my $in_deps = 0;
-    my @lines;
+    my $in_check = '';  # language for CMAKE_DEPENDS_CHECK_<lang>
     while (<$fh>) {
         chomp;
         if (/set\(CMAKE_DEPENDS_DEPENDENCY_FILES/) {
             $in_deps = 1;
+            $in_check = '';
             next;
         }
-        if ($in_deps) {
-            last if /^\s*\)/;
-            # Collect quoted strings: "src" "obj" "compiler" "depfile"
+        # Older format: set(CMAKE_DEPENDS_CHECK_Fortran "src" "obj" ...)
+        if (/set\(CMAKE_DEPENDS_CHECK_(\w+)/) {
+            $in_check = $1;
+            $in_deps = 0;
+            next;
+        }
+        if ($in_deps || $in_check) {
+            if (/^\s*\)/) {
+                $in_deps = 0;
+                $in_check = '';
+                next;
+            }
             my @fields;
             while (/\"([^\"]*)\"/g) {
                 push @fields, $1;
             }
-            if (@fields >= 4) {
+            if ($in_deps && @fields >= 4) {
+                # New format: src obj compiler depfile
                 my ($src, $obj, $compiler, $depfile) = @fields;
                 push @{$target->{sources}}, {
                     src     => $src,
                     obj     => $obj,
                     compiler => $compiler,
                     depfile => $depfile,
+                };
+                push @{$target->{objects}}, $obj;
+            } elsif ($in_check && @fields >= 2) {
+                # Old format: src obj (language from variable name)
+                my ($src, $obj) = @fields;
+                push @{$target->{sources}}, {
+                    src     => $src,
+                    obj     => $obj,
+                    compiler => lc($in_check),
+                    depfile => "$obj.d",
                 };
                 push @{$target->{objects}}, $obj;
             }
@@ -278,29 +300,39 @@ sub generate_smak_rules {
 
             # Determine compiler from source extension
             my $compiler;
-            my $abs_obj = "$build_dir/$obj";
-            my $abs_depfile = "$build_dir/$depfile";
+            # Obj/depfile may be absolute (old CMAKE_DEPENDS_CHECK format)
+            # or relative to build_dir (new CMAKE_DEPENDS_DEPENDENCY_FILES)
+            my $abs_obj = $obj =~ m{^/} ? $obj : "$build_dir/$obj";
+            my $abs_depfile = $depfile =~ m{^/} ? $depfile : "$build_dir/$depfile";
 
-            if ($src =~ /\.c$/) {
-                $compiler = $cmake_info->{c_compiler};
-                my @parts = ($compiler);
+            # Pick compiler and flags based on source extension
+            my (@parts, $lang);
+            if ($src =~ /\.f(?:90|95|03|08)?$/i || $src =~ /\.F(?:90|95|03|08)?$/i) {
+                $lang = 'Fortran';
+                @parts = ($cmake_info->{fortran_compiler});
+                push @parts, $flags->{Fortran_DEFINES} // '';
+                push @parts, $flags->{Fortran_INCLUDES} // '';
+                push @parts, $flags->{Fortran_FLAGS} // '';
+            } elsif ($src =~ /\.c$/) {
+                $lang = 'C';
+                @parts = ($cmake_info->{c_compiler});
                 push @parts, $flags->{C_DEFINES} // '';
                 push @parts, $flags->{C_INCLUDES} // '';
                 push @parts, $flags->{C_FLAGS} // '';
-                push @parts, "-MD -MT $abs_obj -MF $abs_depfile -o $abs_obj -c $src";
-                my $compile_cmd = "mkdir -p " . dirname($abs_obj) . " && " .
-                    join(' ', grep { $_ ne '' } @parts);
-
-                my $dep_key = "$makefile_key\t$obj";
-                $fixed_deps->{$dep_key} = [$src];
-                $fixed_rule->{$dep_key} = $compile_cmd;
             } else {
-                $compiler = $cmake_info->{cxx_compiler};
-                my @parts = ($compiler);
+                $lang = 'CXX';
+                @parts = ($cmake_info->{cxx_compiler});
                 push @parts, $flags->{CXX_DEFINES} // '';
                 push @parts, $flags->{CXX_INCLUDES} // '';
                 push @parts, $flags->{CXX_FLAGS} // '';
+            }
+            # Fortran doesn't use -MD dependency tracking
+            if ($lang eq 'Fortran') {
+                push @parts, "-o $abs_obj -c $src";
+            } else {
                 push @parts, "-MD -MT $abs_obj -MF $abs_depfile -o $abs_obj -c $src";
+            }
+            {
                 my $compile_cmd = "mkdir -p " . dirname($abs_obj) . " && " .
                     join(' ', grep { $_ ne '' } @parts);
 

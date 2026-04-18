@@ -624,11 +624,32 @@ sub _if_expr {
         my ($op, $arg) = @$args;
         my $uop = uc($op);
         return exists _find_var($arg, $scope)->{$arg} if $uop eq 'DEFINED';
-        return -e $arg ? 1 : 0 if $uop eq 'EXISTS';
-        return -d $arg ? 1 : 0 if $uop eq 'IS_DIRECTORY';
-        return -f $arg && !(-l $arg) ? 1 : 0 if $uop eq 'IS_SYMLINK';
-        return -e $arg ? 1 : 0 if $uop eq 'IS_ABSOLUTE';
-        return (defined $scope->{vars}{$arg} && $scope->{vars}{$arg}) ? 1 : 0 if $uop eq 'TARGET' || $uop eq 'COMMAND';
+        if ($uop eq 'EXISTS' || $uop eq 'IS_DIRECTORY' || $uop eq 'IS_SYMLINK' || $uop eq 'IS_ABSOLUTE') {
+            # CMake: these check the literal path.  If the arg looks like
+            # a filename (has / or . or exists on disk), use it.  Otherwise
+            # dereference it as a variable name first.
+            my $path = $arg;
+            if ($arg !~ m{^/} && $arg !~ m{/} && !-e $arg) {
+                my $v = _lookup($arg, $scope);
+                $path = $v if defined $v && $v ne '';
+            }
+            return -e $path ? 1 : 0 if $uop eq 'EXISTS';
+            return -d $path ? 1 : 0 if $uop eq 'IS_DIRECTORY';
+            return -l $path ? 1 : 0 if $uop eq 'IS_SYMLINK';
+            return $path =~ m{^/} ? 1 : 0 if $uop eq 'IS_ABSOLUTE';
+        }
+        # TARGET <name> — does a target with this name exist?
+        if ($uop eq 'TARGET') {
+            my $st = _state_for($scope);
+            return ($st && exists $st->{targets}{$arg}) ? 1 : 0;
+        }
+        if ($uop eq 'COMMAND') {
+            my $st = _state_for($scope);
+            if ($st) {
+                return (exists $st->{functions}{lc($arg)} || exists $builtins{lc($arg)}) ? 1 : 0;
+            }
+            return 0;
+        }
     }
     # Single value — truthy test
     if (@$args == 1) {
@@ -661,6 +682,15 @@ sub _find_var {
         $scope = $scope->{parent};
     }
     return {};
+}
+
+sub _state_for {
+    my ($scope) = @_;
+    while ($scope) {
+        return $scope->{_state} if $scope->{_state};
+        $scope = $scope->{parent};
+    }
+    return undef;
 }
 
 # Dereference: if arg is a defined variable name, return its value;
@@ -1006,13 +1036,17 @@ $builtins{'target_link_libraries'} = sub {
             next;
         }
         next if $a eq 'LINK_INTERFACE_LIBRARIES';
-        push @{$t->{link_libraries}}, $a;
-        # Transitive propagation: if the library is a known target with
-        # interface/public include dirs or defines, propagate them to
-        # the consumer (unless we're in PRIVATE mode).
-        if ($mode ne 'PRIVATE' || 1) {  # PRIVATE still gets INTERFACE from deps
-            _propagate_interface($state, $t, $a);
+        # PRIVATE: only in link_libraries
+        # INTERFACE: only in interface_link_libraries
+        # PUBLIC: both
+        if ($mode ne 'INTERFACE') {
+            push @{$t->{link_libraries}}, $a;
         }
+        if ($mode ne 'PRIVATE') {
+            push @{$t->{interface_link_libraries}}, $a;
+        }
+        # Consumers always pull their deps' INTERFACE properties
+        _propagate_interface($state, $t, $a);
     }
 };
 
@@ -1148,10 +1182,23 @@ $builtins{'include'} = sub {
             if $ENV{SMAK_CMAKE_DEBUG};
         return;
     }
+    # Normalize the path (collapse a/../b → b) to prevent ever-growing
+    # chains when CMake configs use "${CMAKE_CURRENT_LIST_DIR}/../X"
+    $path = File::Spec->canonpath($path);
+    while ($path =~ s{/[^/]+/\.\./}{/}) {}
     warn "SmakCMake: include: $path\n" if $ENV{SMAK_CMAKE_DEBUG};
-    my $sub = parse_file($path);
+    # Parse-cache: avoid re-parsing the same file
+    $state->{parse_cache}{$path} //= parse_file($path);
+    my $sub = $state->{parse_cache}{$path};
+
+    my $saved_list_dir = $scope->{vars}{CMAKE_CURRENT_LIST_DIR};
+    my $saved_list_file = $scope->{vars}{CMAKE_CURRENT_LIST_FILE};
+    $scope->{vars}{CMAKE_CURRENT_LIST_DIR} = dirname($path);
+    $scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $path;
     eval_commands($sub, $state, $scope);
-    delete $scope->{_return};  # return() in included file unwinds to here
+    delete $scope->{_return};
+    $scope->{vars}{CMAKE_CURRENT_LIST_DIR} = $saved_list_dir;
+    $scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $saved_list_file;
 };
 
 $builtins{'list'} = sub {
@@ -1680,6 +1727,43 @@ $builtins{'flex_target'} = sub {
 
 $builtins{'add_flex_bison_dependency'} = sub { };  # no-op; bison/flex handle it
 
+$builtins{'get_filename_component'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($out, $input, $mode) = @$args;
+    my $val;
+    if ($mode eq 'DIRECTORY' || $mode eq 'PATH') {
+        $val = $input;
+        $val =~ s{/[^/]*$}{};
+        $val = '/' if $val eq '' && $input =~ m{^/};
+    } elsif ($mode eq 'NAME') {
+        $val = $input;
+        $val =~ s{^.*/}{};
+    } elsif ($mode eq 'EXT') {
+        $val = ($input =~ /(\.[^\/.]+)$/) ? $1 : '';
+    } elsif ($mode eq 'NAME_WE') {
+        $val = $input;
+        $val =~ s{^.*/}{};
+        $val =~ s{\..*$}{};
+    } elsif ($mode eq 'NAME_WLE') {
+        $val = $input;
+        $val =~ s{^.*/}{};
+        $val =~ s{\.[^.]+$}{};
+    } elsif ($mode eq 'ABSOLUTE' || $mode eq 'REALPATH') {
+        $val = File::Spec->rel2abs($input);
+    } elsif ($mode eq 'PROGRAM') {
+        $val = $input;
+    } else {
+        $val = $input;
+    }
+    $scope->{vars}{$out} = $val;
+};
+
+$builtins{'cmake_parse_arguments'} = sub { };  # TODO
+$builtins{'cmake_print_variables'} = sub { };
+$builtins{'cmake_print_properties'} = sub { };
+$builtins{'block'} = sub { };    # CMake 3.25+ scoping
+$builtins{'endblock'} = sub { };
+
 $builtins{'install'} = sub { };          # stub — we don't install
 $builtins{'export'} = sub { };           # stub
 $builtins{'enable_testing'} = sub { };   # stub
@@ -1724,7 +1808,13 @@ $builtins{'find_package'} = sub {
         warn "SmakCMake: find_package($name) → $config_file\n"
             if $ENV{SMAK_CMAKE_DEBUG};
         my $sub = parse_file($config_file);
+        my $saved_ld = $scope->{vars}{CMAKE_CURRENT_LIST_DIR};
+        my $saved_lf = $scope->{vars}{CMAKE_CURRENT_LIST_FILE};
+        $scope->{vars}{CMAKE_CURRENT_LIST_DIR} = dirname($config_file);
+        $scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $config_file;
         eval_commands($sub, $state, $scope);
+        $scope->{vars}{CMAKE_CURRENT_LIST_DIR} = $saved_ld;
+        $scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $saved_lf;
         return;
     }
 
@@ -2205,11 +2295,14 @@ sub interpret_project {
     };
 
     my $root_scope = new_scope(undef);
+    $root_scope->{_state} = $state;  # for predicates like TARGET that need state access
     # Predefined CMake variables
     $root_scope->{vars}{CMAKE_SOURCE_DIR} = $source_dir;
     $root_scope->{vars}{CMAKE_BINARY_DIR} = $build_dir;
     $root_scope->{vars}{CMAKE_CURRENT_SOURCE_DIR} = $source_dir;
     $root_scope->{vars}{CMAKE_CURRENT_BINARY_DIR} = $build_dir;
+    $root_scope->{vars}{CMAKE_CURRENT_LIST_DIR} = $source_dir;
+    $root_scope->{vars}{CMAKE_CURRENT_LIST_FILE} = "$source_dir/CMakeLists.txt";
     # Version string of our pretend cmake
     $root_scope->{vars}{CMAKE_VERSION} = '3.31.4';
     $root_scope->{vars}{CMAKE_MAJOR_VERSION} = 3;

@@ -937,10 +937,22 @@ $builtins{'target_include_directories'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
     my $t = $state->{targets}{$name} or return;
-    # Skip PUBLIC/PRIVATE/INTERFACE/SYSTEM/BEFORE keywords
+    my $mode = 'PRIVATE';
+    my $curdir = $state->{current_source_dir};
     for my $a (@$args) {
-        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|SYSTEM|BEFORE|AFTER)$/;
-        push @{$t->{include_directories}}, $a;
+        if ($a =~ /^(PUBLIC|PRIVATE|INTERFACE)$/) { $mode = $1; next; }
+        next if $a =~ /^(SYSTEM|BEFORE|AFTER)$/;
+        # Resolve relative paths against the current source directory
+        my $path = $a =~ m{^/} ? $a : File::Spec->catdir($curdir, $a);
+        # Normalize: resolve ./ and trailing /
+        $path =~ s{/\./}{/}g;
+        $path =~ s{/$}{};
+        if ($mode ne 'INTERFACE') {
+            push @{$t->{include_directories}}, $path;
+        }
+        if ($mode ne 'PRIVATE') {
+            push @{$t->{interface_include_directories}}, $path;
+        }
     }
 };
 
@@ -948,11 +960,16 @@ $builtins{'target_compile_definitions'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
     my $t = $state->{targets}{$name} or return;
+    my $mode = 'PRIVATE';
     for my $a (@$args) {
-        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE)$/;
-        # Accept both "FOO" and "FOO=bar"; add -D prefix
+        if ($a =~ /^(PUBLIC|PRIVATE|INTERFACE)$/) { $mode = $1; next; }
         my $d = $a =~ /^-D/ ? $a : "-D$a";
-        push @{$t->{defines_list}}, $d;
+        if ($mode ne 'INTERFACE') {
+            push @{$t->{defines_list}}, $d;
+        }
+        if ($mode ne 'PRIVATE') {
+            push @{$t->{interface_defines_list}}, $d;
+        }
     }
     $t->{compile_definitions} = join(' ', @{$t->{defines_list} // []});
 };
@@ -961,9 +978,18 @@ $builtins{'target_compile_options'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
     my $t = $state->{targets}{$name} or return;
+    my $mode = 'PRIVATE';
     for my $a (@$args) {
-        next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|BEFORE)$/;
-        push @{$t->{options_list}}, $a;
+        if ($a =~ /^(PUBLIC|PRIVATE|INTERFACE|BEFORE)$/) {
+            $mode = $1 if $a ne 'BEFORE';
+            next;
+        }
+        if ($mode ne 'INTERFACE') {
+            push @{$t->{options_list}}, $a;
+        }
+        if ($mode ne 'PRIVATE') {
+            push @{$t->{interface_options_list}}, $a;
+        }
     }
     $t->{compile_options} = join(' ', @{$t->{options_list} // []});
 };
@@ -990,38 +1016,40 @@ $builtins{'target_link_libraries'} = sub {
     }
 };
 
-# When target $t links against $lib, pull $lib's interface properties
-# (INTERFACE_INCLUDE_DIRECTORIES, INTERFACE_COMPILE_DEFINITIONS,
-#  INTERFACE_COMPILE_OPTIONS, INTERFACE_LINK_LIBRARIES) into $t.
+# When target $t links against $lib, pull $lib's INTERFACE_* properties
+# into $t.  These are only the publicly-exposed interfaces — PRIVATE
+# properties of $lib do not propagate.
 sub _propagate_interface {
-    my ($state, $t, $lib) = @_;
+    my ($state, $t, $lib, $visited) = @_;
+    $visited //= {};
+    return if $visited->{$lib}++;
+
     my $lt = $state->{targets}{$lib};
     return unless $lt;
 
-    # Add interface include dirs
+    # INTERFACE_INCLUDE_DIRECTORIES (set via PUBLIC/INTERFACE target_include_directories)
     for my $inc (@{$lt->{interface_include_directories} // []}) {
         push @{$t->{include_directories}}, $inc
             unless grep { $_ eq $inc } @{$t->{include_directories}};
     }
-    # Public include dirs (INTERFACE + source dir) — for regular targets,
-    # their include_directories IS the public view
-    for my $inc (@{$lt->{include_directories} // []}) {
-        push @{$t->{include_directories}}, $inc
-            unless grep { $_ eq $inc } @{$t->{include_directories}};
-    }
-    # Defines
+    # INTERFACE_COMPILE_DEFINITIONS
     for my $d (@{$lt->{interface_defines_list} // []}) {
         push @{$t->{defines_list}}, $d
             unless grep { $_ eq $d } @{$t->{defines_list}};
     }
+    # INTERFACE_COMPILE_OPTIONS
+    for my $o (@{$lt->{interface_options_list} // []}) {
+        push @{$t->{options_list}}, $o
+            unless grep { $_ eq $o } @{$t->{options_list}};
+    }
     $t->{compile_definitions} = join(' ', @{$t->{defines_list} // []});
     $t->{compile_options}     = join(' ', @{$t->{options_list} // []});
 
-    # Transitive link libraries (interface deps of deps)
-    for my $sublib (@{$lt->{interface_link_libraries} // []}, @{$lt->{link_libraries} // []}) {
+    # Transitive INTERFACE_LINK_LIBRARIES
+    for my $sublib (@{$lt->{interface_link_libraries} // []}) {
         next if grep { $_ eq $sublib } @{$t->{link_libraries}};
         push @{$t->{link_libraries}}, $sublib;
-        _propagate_interface($state, $t, $sublib);
+        _propagate_interface($state, $t, $sublib, $visited);
     }
 }
 
@@ -1816,19 +1844,33 @@ sub _find_package_builtin {
 $builtins{'add_subdirectory'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $subdir = $args->[0];
-    my $source_subdir = File::Spec->catdir($state->{current_source_dir}, $subdir);
-    my $binary_subdir = $args->[1] // File::Spec->catdir($state->{current_binary_dir}, $subdir);
+    # If subdir is absolute use as-is, else relative to current_source_dir
+    my $source_subdir = $subdir =~ m{^/} ? $subdir
+        : File::Spec->catdir($state->{current_source_dir}, $subdir);
+    my $binary_subdir = $args->[1];
+    if ($binary_subdir) {
+        $binary_subdir = File::Spec->catdir($state->{current_binary_dir}, $binary_subdir)
+            unless $binary_subdir =~ m{^/};
+    } else {
+        $binary_subdir = File::Spec->catdir($state->{current_binary_dir}, $subdir);
+    }
     my $sub_cmake = "$source_subdir/CMakeLists.txt";
     return unless -f $sub_cmake;
+
     my $sub_commands = parse_file($sub_cmake);
-    # New scope, new current dirs
     my $sub_scope = new_scope($scope);
+    # CMAKE_CURRENT_SOURCE_DIR/BINARY_DIR get the new values in the sub-scope
+    $sub_scope->{vars}{CMAKE_CURRENT_SOURCE_DIR} = $source_subdir;
+    $sub_scope->{vars}{CMAKE_CURRENT_BINARY_DIR} = $binary_subdir;
+
     my $saved_src = $state->{current_source_dir};
     my $saved_bin = $state->{current_binary_dir};
     $state->{current_source_dir} = $source_subdir;
     $state->{current_binary_dir} = $binary_subdir;
+
     eval_commands($sub_commands, $state, $sub_scope);
-    delete $sub_scope->{_return};  # return() at subdir scope unwinds here
+    delete $sub_scope->{_return};
+
     $state->{current_source_dir} = $saved_src;
     $state->{current_binary_dir} = $saved_bin;
 };

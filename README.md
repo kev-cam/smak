@@ -22,3 +22,7 @@ Xyce
 ngspice (+ OpenVAF)
 
 - which can be used together in "federated simulation" to fix various issues not addressed by any individual project.
+
+## Documentation
+
+- [docs/cmake.md](docs/cmake.md) — Building CMake projects with smak (including interpreting CMakeLists.txt directly, without running cmake)

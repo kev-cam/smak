@@ -1758,6 +1758,91 @@ $builtins{'get_filename_component'} = sub {
     $scope->{vars}{$out} = $val;
 };
 
+# Actually test if a header exists in our sysroot.  Real cmake compiles a
+# test program; we just check the filesystem.  Good enough for common cases.
+sub _check_include {
+    my ($header, $var, $lang, $scope) = @_;
+    # Common search paths
+    my @paths = ('/usr/include', '/usr/local/include',
+                 '/usr/include/x86_64-linux-gnu',
+                 '/usr/local/src/smak/cmake-install/include');
+    # Add include paths from CMAKE_REQUIRED_INCLUDES if set
+    my $req_inc = _lookup('CMAKE_REQUIRED_INCLUDES', $scope);
+    if ($req_inc) {
+        push @paths, split /;/, $req_inc;
+    }
+    for my $p (@paths) {
+        if (-f "$p/$header") {
+            $scope->{vars}{$var} = 1;
+            return;
+        }
+    }
+    # Treat a bare .h that's in standard locations as found (unistd.h etc)
+    my %standard = map { $_ => 1 } qw(
+        unistd.h sys/resource.h sys/stat.h sys/utsname.h sys/time.h
+        malloc.h pwd.h dlfcn.h stdlib.h stdio.h string.h time.h errno.h
+        limits.h ctype.h math.h assert.h signal.h fcntl.h
+    );
+    if ($standard{$header} && -f "/usr/include/$header") {
+        $scope->{vars}{$var} = 1;
+        return;
+    }
+    $scope->{vars}{$var} = '';  # not found
+}
+
+$builtins{'check_include_file'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($header, $var) = @$args;
+    _check_include($header, $var, 'C', $scope);
+};
+
+$builtins{'check_include_file_cxx'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($header, $var) = @$args;
+    _check_include($header, $var, 'CXX', $scope);
+};
+
+$builtins{'check_include_files'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($headers, $var) = @$args;
+    # All headers must be found
+    for my $h (split /;/, $headers) {
+        _check_include($h, $var, 'C', $scope);
+        return unless $scope->{vars}{$var};
+    }
+};
+
+# Symbol check — we only verify header exists, not the symbol.
+# Most cmake projects use these for optional features; being permissive
+# (symbol found if header exists) is safer than conservatively saying no.
+$builtins{'check_symbol_exists'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($symbol, $files, $var) = @$args;
+    my @headers = split /;/, ($files // '');
+    my $found = 1;
+    for my $h (@headers) {
+        my $exists;
+        _check_include($h, "_tmp_check_$var", 'C', $scope);
+        $exists = $scope->{vars}{"_tmp_check_$var"};
+        delete $scope->{vars}{"_tmp_check_$var"};
+        unless ($exists) { $found = 0; last; }
+    }
+    $scope->{vars}{$var} = $found ? 1 : '';
+};
+
+$builtins{'check_cxx_symbol_exists'} = $builtins{'check_symbol_exists'};
+$builtins{'check_function_exists'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($fn, $var) = @$args;
+    # Permissive: assume yes for common POSIX functions
+    $scope->{vars}{$var} = 1;
+};
+$builtins{'check_cxx_source_compiles'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($source, $var) = @$args;
+    $scope->{vars}{$var} = 1;  # assume yes
+};
+
 $builtins{'cmake_parse_arguments'} = sub { };  # TODO
 $builtins{'cmake_print_variables'} = sub { };
 $builtins{'cmake_print_properties'} = sub { };

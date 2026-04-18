@@ -914,7 +914,10 @@ $builtins{'project'} = sub {
 $builtins{'add_executable'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
-    my @sources = grep { !/^(IMPORTED|ALIAS|GLOBAL|EXCLUDE_FROM_ALL|WIN32|MACOSX_BUNDLE)$/ } @$args;
+    my @sources = grep {
+        !/^(IMPORTED|ALIAS|GLOBAL|EXCLUDE_FROM_ALL|WIN32|MACOSX_BUNDLE)$/
+        && !/\.(h|hh|hpp|hxx|H)$/
+    } @$args;
     $state->{targets}{$name} = _new_target($state, 'executable', \@sources);
 };
 
@@ -924,7 +927,6 @@ $builtins{'add_library'} = sub {
     my $libtype = 'static';
     my $imported = 0;
     my $global = 0;
-    # Peel off keywords
     while (@$args && $args->[0] =~ /^(STATIC|SHARED|MODULE|INTERFACE|OBJECT|IMPORTED|GLOBAL|ALIAS|EXCLUDE_FROM_ALL)$/) {
         my $kw = shift @$args;
         if ($kw =~ /^(STATIC|SHARED|MODULE|INTERFACE|OBJECT)$/) {
@@ -935,9 +937,9 @@ $builtins{'add_library'} = sub {
             $global = 1;
         }
     }
-    my @sources = @$args;
-    # ALIAS: add_library(alias ALIAS real) — just point to real
-    # (handled above by the while loop eating ALIAS and leaving the target name)
+    # Filter out header files (CMake source lists often include the header
+    # via bison output; they're not compile targets)
+    my @sources = grep { !/\.(h|hh|hpp|hxx|H)$/ } @$args;
     my $t = _new_target($state, 'library', \@sources);
     $t->{libtype} = $libtype;
     $t->{imported} = $imported;
@@ -1094,7 +1096,7 @@ $builtins{'target_sources'} = sub {
     my $curdir = $state->{current_source_dir};
     for my $a (@$args) {
         next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|FILE_SET|BASE_DIRS|TYPE|HEADERS|FILES)$/;
-        # If the source is relative and we're in a subdir, qualify it
+        next if $a =~ /\.(h|hh|hpp|hxx|H)$/;  # headers aren't compile sources
         my $src = $a =~ m{^/} ? $a : File::Spec->catfile($curdir, $a);
         push @{$t->{sources}}, $src;
     }
@@ -1500,14 +1502,41 @@ $builtins{'get_target_property'} = sub {
 
 $builtins{'get_property'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
-    # Minimal: get_property(<var> <GLOBAL|DIRECTORY|TARGET|SOURCE|CACHE> PROPERTY <prop>)
+    # get_property(<var> <GLOBAL|DIRECTORY|TARGET|SOURCE|CACHE> [<name>] PROPERTY <prop>)
     my $out = shift @$args;
-    shift @$args;  # scope keyword
-    # skip to PROPERTY
+    my $scope_kw = shift @$args;
+    my $target_name;
+    if ($scope_kw eq 'TARGET') {
+        $target_name = shift @$args;
+    }
     while (@$args && $args->[0] ne 'PROPERTY') { shift @$args; }
     shift @$args if @$args && $args->[0] eq 'PROPERTY';
     my $prop = shift @$args;
-    $scope->{vars}{$out} = '';
+
+    my $val = '';
+    if ($scope_kw eq 'TARGET' && $target_name) {
+        my $t = $state->{targets}{$target_name};
+        if ($t) {
+            if    ($prop eq 'INTERFACE_INCLUDE_DIRECTORIES') {
+                $val = join(';', @{$t->{interface_include_directories} // []});
+            } elsif ($prop eq 'INTERFACE_LINK_LIBRARIES') {
+                $val = join(';', @{$t->{interface_link_libraries} // []});
+            } elsif ($prop eq 'INTERFACE_COMPILE_DEFINITIONS') {
+                $val = join(';', @{$t->{interface_defines_list} // []});
+            } elsif ($prop eq 'INCLUDE_DIRECTORIES') {
+                $val = join(';', @{$t->{include_directories} // []});
+            } elsif ($prop eq 'LINK_LIBRARIES') {
+                $val = join(';', @{$t->{link_libraries} // []});
+            } elsif ($prop eq 'SOURCES') {
+                $val = join(';', @{$t->{sources} // []});
+            } elsif ($prop eq 'IMPORTED_LOCATION') {
+                $val = $t->{imported_location} // '';
+            } else {
+                $val = $t->{properties}{$prop} // '';
+            }
+        }
+    }
+    $scope->{vars}{$out} = $val;
 };
 
 $builtins{'set_property'} = sub { };  # stub
@@ -1543,13 +1572,107 @@ $builtins{'find_program'} = sub {
 $builtins{'find_library'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $out = shift @$args;
+    my @names;
+    my @paths = (
+        '/usr/lib/x86_64-linux-gnu',
+        '/usr/lib', '/usr/local/lib',
+        '/lib/x86_64-linux-gnu', '/lib',
+    );
+    while (@$args) {
+        my $kw = shift @$args;
+        if ($kw eq 'NAMES') {
+            while (@$args && $args->[0] !~ /^(PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES|NAMES_PER_DIR)$/) {
+                push @names, shift @$args;
+            }
+        } elsif ($kw eq 'PATHS' || $kw eq 'HINTS') {
+            while (@$args && $args->[0] !~ /^(NAMES|PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES|NAMES_PER_DIR)$/) {
+                unshift @paths, shift @$args;  # user paths take priority
+            }
+        } elsif ($kw =~ /^(REQUIRED|NO_DEFAULT_PATH|NAMES_PER_DIR)$/) {
+            # flag, no arg
+        } elsif (@names == 0) {
+            # First positional arg is the name
+            push @names, $kw;
+        }
+    }
+    for my $name (@names) {
+        for my $ext ('.so', '.a', '.so.0', '.so.1') {
+            for my $prefix ('lib', '') {
+                for my $dir (@paths) {
+                    my $path = "$dir/$prefix$name$ext";
+                    if (-f $path) {
+                        $scope->{vars}{$out} = $path;
+                        return;
+                    }
+                }
+            }
+        }
+    }
     $scope->{vars}{$out} = "$out-NOTFOUND";
 };
 
 $builtins{'find_path'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $out = shift @$args;
+    my @names;
+    my @paths = (
+        '/usr/include', '/usr/local/include',
+        '/usr/include/x86_64-linux-gnu',
+    );
+    while (@$args) {
+        my $kw = shift @$args;
+        if ($kw eq 'NAMES') {
+            while (@$args && $args->[0] !~ /^(PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES)$/) {
+                push @names, shift @$args;
+            }
+        } elsif ($kw eq 'PATHS' || $kw eq 'HINTS') {
+            while (@$args && $args->[0] !~ /^(NAMES|PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES)$/) {
+                unshift @paths, shift @$args;
+            }
+        } elsif ($kw =~ /^(REQUIRED|NO_DEFAULT_PATH)$/) {
+            # flag
+        } elsif (@names == 0) {
+            push @names, $kw;
+        }
+    }
+    for my $name (@names) {
+        for my $dir (@paths) {
+            if (-f "$dir/$name") {
+                $scope->{vars}{$out} = $dir;
+                return;
+            }
+        }
+    }
     $scope->{vars}{$out} = "$out-NOTFOUND";
+};
+
+# find_package_handle_standard_args(<name> ...)  — set <name>_FOUND based
+# on whether the passed-in variables are valid (not ending in -NOTFOUND).
+$builtins{'find_package_handle_standard_args'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    my @check_vars;
+    while (@$args) {
+        my $a = shift @$args;
+        if ($a eq 'REQUIRED_VARS') {
+            while (@$args && $args->[0] !~ /^(REQUIRED_VARS|VERSION_VAR|HANDLE_COMPONENTS|CONFIG_MODE|FOUND_VAR|FAIL_MESSAGE)$/) {
+                push @check_vars, shift @$args;
+            }
+        } elsif ($a =~ /^(VERSION_VAR|FOUND_VAR|FAIL_MESSAGE)$/) {
+            shift @$args;  # skip value
+        } elsif ($a =~ /^(HANDLE_COMPONENTS|CONFIG_MODE)$/) {
+            # flags
+        }
+    }
+    my $all_ok = 1;
+    for my $v (@check_vars) {
+        my $val = _lookup($v, $scope);
+        if (!defined $val || $val eq '' || $val =~ /-NOTFOUND$/) {
+            $all_ok = 0; last;
+        }
+    }
+    $scope->{vars}{"${name}_FOUND"} = $all_ok ? 'TRUE' : 'FALSE';
+    $scope->{vars}{uc($name) . "_FOUND"} = $all_ok ? 'TRUE' : 'FALSE';
 };
 
 # add_custom_command(OUTPUT <files> COMMAND <cmd> [ARGS <a>...] [DEPENDS <d>...] ...)
@@ -1692,10 +1815,11 @@ $builtins{'bison_target'} = sub {
         source_dir => $state->{current_source_dir},
         binary_dir => $state->{current_binary_dir},
     };
-    # Expose variables for dependents
-    $scope->{vars}{"${name}_OUTPUTS"} = "$output;$header";
-    $scope->{vars}{"${name}_OUTPUT_SOURCE"} = $output;
-    $scope->{vars}{"${name}_OUTPUT_HEADER"} = $header;
+    # Expose variables for dependents (CMake's BISON module uses BISON_<NAME>_*)
+    $scope->{vars}{"BISON_${name}_OUTPUTS"} = "$output;$header";
+    $scope->{vars}{"BISON_${name}_OUTPUT_SOURCE"} = $output;
+    $scope->{vars}{"BISON_${name}_OUTPUT_HEADER"} = $header;
+    $scope->{vars}{"${name}_OUTPUTS"} = "$output;$header";  # back-compat
 };
 
 # flex_target(NAME input output [COMPILE_FLAGS <f>])
@@ -1722,7 +1846,8 @@ $builtins{'flex_target'} = sub {
         source_dir => $state->{current_source_dir},
         binary_dir => $state->{current_binary_dir},
     };
-    $scope->{vars}{"${name}_OUTPUTS"} = $output;
+    $scope->{vars}{"FLEX_${name}_OUTPUTS"} = $output;
+    $scope->{vars}{"${name}_OUTPUTS"} = $output;  # back-compat
 };
 
 $builtins{'add_flex_bison_dependency'} = sub { };  # no-op; bison/flex handle it
@@ -1907,6 +2032,7 @@ $builtins{'find_package'} = sub {
     unless ($config_mode) {
         my @mod_paths = split /;/, (_lookup('CMAKE_MODULE_PATH', $scope) // '');
         push @mod_paths, "/usr/local/src/smak/cmake-modules";
+        my $ran_module = 0;
         for my $dir (@mod_paths) {
             my $mod = "$dir/Find$name.cmake";
             if (-f $mod) {
@@ -1914,13 +2040,19 @@ $builtins{'find_package'} = sub {
                     if $ENV{SMAK_CMAKE_DEBUG};
                 my $sub = parse_file($mod);
                 eval_commands($sub, $state, $scope);
+                $ran_module = 1;
+                last;
+            }
+        }
+        # If module didn't find it (or no module exists), try built-in
+        my $found_var = "${name}_FOUND";
+        my $found = _lookup($found_var, $scope);
+        if (!$found || $found =~ /^(0|OFF|NO|FALSE)$/i) {
+            if (_find_package_builtin($name, $state, $scope)) {
                 return;
             }
         }
-        # Built-in FindXxx handlers for common packages
-        if (_find_package_builtin($name, $state, $scope)) {
-            return;
-        }
+        return if $ran_module;
     }
 
     $scope->{vars}{"${name}_FOUND"} = 'FALSE';
@@ -2008,6 +2140,41 @@ sub _find_package_builtin {
                 $scope->{vars}{GTEST_LIBRARIES} = '-lgtest';
             }
         },
+        FFTW => sub {
+            if (-f '/usr/include/fftw3.h') {
+                $scope->{vars}{FFTW_FOUND} = 'TRUE';
+                $scope->{vars}{FFTW_INCLUDE_DIRS} = '/usr/include';
+                $scope->{vars}{FFTW_DOUBLE_LIB} = '/usr/lib/x86_64-linux-gnu/libfftw3.so';
+                $scope->{vars}{FFTW_LIBRARIES} = '/usr/lib/x86_64-linux-gnu/libfftw3.so';
+            }
+        },
+        CURL => sub {
+            if (-f '/usr/include/curl/curl.h') {
+                $scope->{vars}{CURL_FOUND} = 'TRUE';
+                $scope->{vars}{CURL_INCLUDE_DIRS} = '/usr/include';
+                $scope->{vars}{CURL_LIBRARIES} = '-lcurl';
+            }
+        },
+        Boost => sub {
+            if (-d '/usr/include/boost') {
+                $scope->{vars}{Boost_FOUND} = 'TRUE';
+                $scope->{vars}{BOOST_FOUND} = 'TRUE';
+                $scope->{vars}{Boost_INCLUDE_DIRS} = '/usr/include';
+            }
+        },
+        Dakota => sub { $scope->{vars}{Dakota_FOUND} = 'FALSE'; },
+        OpenMP => sub {
+            $scope->{vars}{OpenMP_FOUND} = 'TRUE';
+            $scope->{vars}{OpenMP_CXX_FLAGS} = '-fopenmp';
+        },
+        Git => sub {
+            if (-x '/usr/bin/git') {
+                $scope->{vars}{Git_FOUND} = 'TRUE';
+                $scope->{vars}{GIT_FOUND} = 'TRUE';
+                $scope->{vars}{GIT_EXECUTABLE} = '/usr/bin/git';
+            }
+        },
+        Doxygen => sub { $scope->{vars}{Doxygen_FOUND} = 'FALSE'; },
     );
     if ($builtins{$name}) {
         $builtins{$name}->();
@@ -2098,7 +2265,10 @@ sub generate_makefiles {
     # Inter-target dependency graph
     _write_makefile2($state);
 
-    # Custom command rules
+    # Custom command rules — also run them now if outputs don't exist
+    # or are older than inputs.  These generate source files (bison/flex)
+    # that compile rules need at build time.
+    _run_custom_commands($state);
     _write_custom_rules($state);
 
     # CMakeCache.txt (minimal - just what SmakCMake reads)
@@ -2112,6 +2282,58 @@ sub generate_makefiles {
 # Write rules for add_custom_command outputs into a single rules.make.
 # SmakCMake doesn't read this yet — but make can use it, and we can
 # later hook it into SmakCMake's rule tables directly.
+# Run any add_custom_command whose outputs are missing or out of date.
+# We run them at "configure" time (from generate_makefiles) because the
+# outputs are source files that subsequent compile rules need.
+sub _run_custom_commands {
+    my ($state) = @_;
+    my @cmds = @{$state->{custom_commands} // []};
+    return unless @cmds;
+
+    use File::Path qw(make_path);
+    for my $c (@cmds) {
+        my @outs = @{$c->{output} // []};
+        next unless @outs;
+        # Check if all outputs exist and are newer than all deps
+        my $needs_run = 0;
+        my $newest_dep = 0;
+        for my $d (@{$c->{depends} // []}) {
+            next unless -e $d;
+            my $m = (stat($d))[9] // 0;
+            $newest_dep = $m if $m > $newest_dep;
+        }
+        for my $o (@outs) {
+            unless (-e $o) { $needs_run = 1; last; }
+            my $m = (stat($o))[9] // 0;
+            if ($m < $newest_dep) { $needs_run = 1; last; }
+        }
+        next unless $needs_run;
+
+        # Ensure output directories exist
+        for my $o (@outs) {
+            my $d = $o;
+            $d =~ s{/[^/]*$}{};
+            make_path($d) if $d && $d ne $o;
+        }
+
+        my $dir = $c->{working_dir} // $c->{binary_dir} // $state->{build_dir};
+        make_path($dir);
+        for my $cmd (@{$c->{commands} // []}) {
+            my $pid = fork();
+            if (!defined $pid) { warn "fork: $!\n"; next; }
+            if ($pid == 0) {
+                chdir($dir) or do { warn "chdir $dir: $!\n"; POSIX::_exit(1); };
+                exec("/bin/sh", "-c", $cmd) or do { warn "exec: $!\n"; POSIX::_exit(127); };
+            }
+            waitpid($pid, 0);
+            my $rc = $? >> 8;
+            if ($rc != 0) {
+                warn "SmakCMake: custom command failed (exit $rc): $cmd\n";
+            }
+        }
+    }
+}
+
 sub _write_custom_rules {
     my ($state) = @_;
     my $build_dir = $state->{build_dir};
@@ -2480,6 +2702,7 @@ sub interpret_project {
     $root_scope->{vars}{CMAKE_C_COMPILER_ID} = 'GNU';
     $root_scope->{vars}{CMAKE_CXX_COMPILER_ID} = 'GNU';
     $root_scope->{vars}{CMAKE_SIZEOF_VOID_P} = 8;
+    $root_scope->{vars}{CMAKE_COMMAND} = '/usr/local/src/smak/cmake-install/bin/cmake';
 
     my $commands = parse_file("$source_dir/CMakeLists.txt");
     eval_commands($commands, $state, $root_scope);

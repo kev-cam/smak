@@ -365,16 +365,16 @@ sub generate_smak_rules {
                 $fixed_deps->{$dep_key} = [@{$t->{objects}}];
 
                 # Absolutize paths in link command (link.txt paths are
-                # relative to the target's subdirectory)
+                # relative to the target's subdirectory).  Only rewrite
+                # paths that aren't already absolute.
                 my $link_cmd = $t->{link_cmd};
                 if ($rel_dir ne '.') {
-                    # Replace relative object/library paths with absolute ones
                     # CMakeFiles/foo.dir/bar.o → /abs/build/rel_dir/CMakeFiles/...
-                    $link_cmd =~ s{(CMakeFiles/\S+)}{$abs_dir/$1}g;
-                    # Library output: libfoo.a → /abs/build/rel_dir/libfoo.a
-                    $link_cmd =~ s{\b(lib\w+\.a)\b}{$abs_dir/$1}g;
-                    # Executable output: -o foo → -o /abs/build/rel_dir/foo
-                    $link_cmd =~ s{-o\s+(\S+)}{-o $abs_dir/$1}g
+                    $link_cmd =~ s{(?<![/\w.])(CMakeFiles/\S+)}{$abs_dir/$1}g;
+                    # libfoo.a — only if not already part of a path (no leading slash)
+                    $link_cmd =~ s{(?<![/\w.])(lib\w+\.a)(?=\s|$)}{$abs_dir/$1}g;
+                    # -o outname — only if it's a bare name
+                    $link_cmd =~ s{-o\s+(?!/)(\S+)}{-o $abs_dir/$1}g
                         unless $link_cmd =~ /\bar\b/;
                 }
                 $fixed_rule->{$dep_key} = $link_cmd;

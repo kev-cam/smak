@@ -2322,10 +2322,6 @@ sub _write_depend_info {
 sub _write_link_txt {
     my ($t, $tdir, $state, $name) = @_;
     my $lang = _primary_lang($t);
-    # In cmake's convention, link.txt uses object paths relative to the
-    # target's binary_dir (e.g., "CMakeFiles/XyceLib.dir/foo.o"), then
-    # runs the command from that binary_dir.  SmakCMake.pm cd's into
-    # the target's dir before executing the link.
     my @objs = map {
         my $s = $_;
         $s =~ s{^.*/}{};
@@ -2339,7 +2335,20 @@ sub _write_link_txt {
                     "/usr/bin/ranlib $out";
     } elsif ($t->{type} eq 'executable') {
         my $compiler = _compiler_for_lang($lang);
-        $link_cmd = "$compiler " . join(' ', @objs) . " -o $name";
+        my @libs = _resolve_link_libraries($t, $state);
+        # Wrap static libs in --start-group/--end-group so the linker can
+        # resolve circular references between them (common with Trilinos).
+        # Linker flags (-lm, -pthread) and shared libs stay outside.
+        my $libs_str = '';
+        if (@libs) {
+            my @static = grep { /\.a$/ } @libs;
+            my @rest = grep { !/\.a$/ } @libs;
+            if (@static) {
+                $libs_str .= ' -Wl,--start-group ' . join(' ', @static) . ' -Wl,--end-group';
+            }
+            $libs_str .= ' ' . join(' ', @rest) if @rest;
+        }
+        $link_cmd = "$compiler " . join(' ', @objs) . " -o $name" . $libs_str;
     } else {
         $link_cmd = "# unsupported target type: $t->{type}";
     }
@@ -2347,6 +2356,57 @@ sub _write_link_txt {
     open(my $fh, '>', "$tdir/link.txt") or die "write $tdir/link.txt: $!";
     print $fh $link_cmd, "\n";
     close($fh);
+}
+
+# Resolve a target's link_libraries (and transitive INTERFACE_LINK_LIBRARIES)
+# to an ordered, deduplicated list of linker flags.  Each library is either:
+#   - a filesystem path (.a, .so) -- used as-is
+#   - "-lfoo" style flag -- passed through
+#   - a bareword "-lfoo" (no leading slash) -- treat as -lX
+#   - a known target name -- resolved to its output path or IMPORTED_LOCATION
+sub _resolve_link_libraries {
+    my ($t, $state) = @_;
+    my @out;
+    my %seen;
+    my @queue = @{$t->{link_libraries} // []};
+    while (@queue) {
+        my $lib = shift @queue;
+        next unless defined $lib;
+        next if $seen{$lib}++;
+
+        # Known target?
+        my $lt = $state->{targets}{$lib};
+        if ($lt) {
+            # Expand transitive interface deps
+            push @queue, @{$lt->{interface_link_libraries} // []};
+            # Does it have an IMPORTED_LOCATION?
+            if ($lt->{imported_location}) {
+                push @out, $lt->{imported_location};
+                next;
+            }
+            # Skip interface/alias/:: targets with no output
+            next if $lib =~ /::/;
+            next if $lt->{libtype} && $lt->{libtype} eq 'interface';
+            next unless @{$lt->{sources} // []};
+            # Our own target — point at where the link will produce the .a
+            my $bin = $lt->{binary_dir} // $state->{build_dir};
+            push @out, "$bin/lib$lib.a";
+            next;
+        }
+        # Starts with /  → filesystem path
+        if ($lib =~ m{^/}) {
+            push @out, $lib;
+            next;
+        }
+        # Starts with - → linker flag (-lm, -pthread, etc.)
+        if ($lib =~ /^-/) {
+            push @out, $lib;
+            next;
+        }
+        # Bare name — pass as -lname
+        push @out, "-l$lib";
+    }
+    return @out;
 }
 
 sub _primary_lang {

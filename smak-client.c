@@ -68,15 +68,19 @@ int smak_connect(int port)
       return -1;
    }
 
-   // Send minimal ENV then ENV_END
-   dprintf(fd, "ENV_END\n");
+   // Use CHILD_CONNECT mode so SUBMIT_JOB can carry an arbitrary
+   // command (via COMMAND_LINES). The master-socket's plain SUBMIT_JOB
+   // only accepts Makefile-resolved targets, which doesn't work for
+   // clients like NVC's --accel path that want to submit ad-hoc
+   // gen_statemachine + gcc shell pipelines.
+   dprintf(fd, "CHILD_CONNECT\n");
 
-   // Wait for JOBSERVER_WORKERS_READY
+   // Wait for CHILD_READY
    char buf[256];
    FILE *sf = fdopen(dup(fd), "r");
    if (sf && fgets(buf, sizeof(buf), sf)) {
       fclose(sf);
-      if (strncmp(buf, "JOBSERVER_WORKERS_READY", 22) == 0)
+      if (strncmp(buf, "CHILD_READY", 11) == 0)
          return fd;
    }
    if (sf) fclose(sf);
@@ -88,8 +92,17 @@ int smak_connect(int port)
 bool smak_submit(int sockfd, const char *target,
                  const char *command, const char *cwd)
 {
-   // smak expects: SUBMIT_JOB\n<target>\n<cwd>\n<composite>\n
-   dprintf(sockfd, "SUBMIT_JOB\n%s\n%s\ntrue\n", target, cwd);
+   // CHILD-relay SUBMIT_JOB protocol (Smak.pm handler at line ~16037):
+   //   SUBMIT_JOB\n<target>\n<exec_dir>\n
+   //   DEPS <N>\n<dep_1>\n...<dep_N>\n
+   //   [SIBLINGS <N>\n<sib_1>\n...]   (optional, may be omitted)
+   //   COMMAND_LINES <N>\n<cmd_line_1>\n...
+   //
+   // We submit one target, zero dependencies, and the command as a
+   // single line. The server runs it via its worker pool.
+   if (dprintf(sockfd, "SUBMIT_JOB\n%s\n%s\nDEPS 0\nCOMMAND_LINES 1\n%s\n",
+               target, cwd, command) < 0)
+      return false;
    return true;
 }
 

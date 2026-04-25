@@ -4484,7 +4484,7 @@ sub looks_phony {
     # Skip the ninja file itself and meson internals
     return 1 if $target =~ /\.ninja$/;
     if ($target =~ /^meson-/) {
-	return 1 if (! $target =~ /.dat$/);
+	return 1 if $target !~ /\.dat$/;
     }
     
     return 0;
@@ -15102,13 +15102,13 @@ sub run_job_master {
                     } else {
                         # Regular master connecting - replace old master
                         if ($master_socket) {
-                            print STDERR "New master connecting, closing old connection\n";
+                            print STDERR "New master connecting, closing old connection\n" if $ENV{SMAK_DEBUG};
                             $select->remove($master_socket);
                             close($master_socket);
                         }
                         $master_socket = $new_conn;
                         $select->add($master_socket);
-                        print STDERR "New master connected\n";
+                        print STDERR "New master connected\n" if $ENV{SMAK_DEBUG};
 
                         # First line was environment data, process it
                         %worker_env = ();
@@ -15124,7 +15124,7 @@ sub run_job_master {
                             }
                         }
                         print $master_socket "JOBSERVER_WORKERS_READY\n";
-                        print STDERR "New master ready\n";
+                        print STDERR "New master ready\n" if $ENV{SMAK_DEBUG};
 
                         # Check queue state before dispatching
                         check_queue_state("master reconnect");
@@ -16883,6 +16883,9 @@ sub run_job_master {
                 # Worker sent us something - drain all available messages
                 # (Perl's buffered I/O may have multiple lines ready but select only sees kernel buffer)
                 $socket->blocking(0);
+                # Suppress "readline on closed filehandle" if the worker
+                # disconnects mid-drain — the loop's while-undef ends naturally.
+                no warnings 'closed';
                 while (my $line = <$socket>) {
                     chomp $line;
                     print STDERR "DEBUG: Worker read line: '$line'\n" if $ENV{SMAK_DEBUG};

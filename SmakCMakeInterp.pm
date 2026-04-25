@@ -756,7 +756,24 @@ sub _if_expr {
         return _deref_q($l, $scope, $lq) >= _deref_q($r, $scope, $rq) if $uop eq 'GREATER_EQUAL';
         if ($uop eq 'MATCHES') {
             my $s = _deref_q($l, $scope, $lq);
-            return $s =~ /$r/;
+            if ($s =~ /$r/) {
+                # CMake sets CMAKE_MATCH_0..9 after a successful match.
+                # Walk to root scope to set them globally (matches CMake's
+                # behavior of these being directory-level vars).
+                my $root = $scope;
+                while ($root->{parent}) { $root = $root->{parent}; }
+                my @caps = ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+                $scope->{vars}{CMAKE_MATCH_0} = $&;
+                for my $i (1..9) {
+                    if (defined $caps[$i-1]) {
+                        $scope->{vars}{"CMAKE_MATCH_$i"} = $caps[$i-1];
+                    } else {
+                        delete $scope->{vars}{"CMAKE_MATCH_$i"};
+                    }
+                }
+                return 1;
+            }
+            return 0;
         }
         if ($uop =~ /^VERSION_/) {
             return _version_cmp(_deref_q($l, $scope, $lq), $uop,
@@ -1602,7 +1619,20 @@ $builtins{'string'} = sub {
             my ($rx, $out, @inputs) = @$args;
             my $s = join('', @inputs);
             if ($mode eq 'MATCH') {
-                $scope->{vars}{$out} = ($s =~ /($rx)/) ? $1 : '';
+                if ($s =~ /$rx/) {
+                    $scope->{vars}{$out} = $&;
+                    my @caps = ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+                    $scope->{vars}{CMAKE_MATCH_0} = $&;
+                    for my $i (1..9) {
+                        if (defined $caps[$i-1]) {
+                            $scope->{vars}{"CMAKE_MATCH_$i"} = $caps[$i-1];
+                        } else {
+                            delete $scope->{vars}{"CMAKE_MATCH_$i"};
+                        }
+                    }
+                } else {
+                    $scope->{vars}{$out} = '';
+                }
             } else {
                 my @m;
                 while ($s =~ /($rx)/g) { push @m, $1; }

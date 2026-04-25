@@ -11,13 +11,108 @@ use Time::HiRes qw(time);
 use lib $RealBin;
 use Smak qw(:all);
 use SmakCMake;
+use SmakCMakeInterp;
 
-# Check for -cmake option early (passthrough to cmake)
-if (@ARGV && $ARGV[0] eq '-cmake') {
-    shift @ARGV;  # Remove -cmake
-    # Execute cmake with remaining arguments
+# Check for -cmake option early. Runs SmakCMakeInterp to see how far it
+# gets and what commands it doesn't know, then falls through to the real
+# cmake binary so the build still succeeds while we collect gaps.
+# Use -cmake-interp-only to run the interpreter alone (no fallback).
+if (@ARGV && ($ARGV[0] eq '-cmake'
+           || $ARGV[0] eq '-cmake-interp-only'
+           || $ARGV[0] eq '-cmake-passthrough')) {
+    my $mode = shift @ARGV;
+    my $interp_only = ($mode eq '-cmake-interp-only');
+    my $passthrough = ($mode eq '-cmake-passthrough');
+
+    # Parse cmake-style args enough to find source dir, -S, -B, -D, -C.
+    my (@cache_files, @defines, $source_dir, $build_dir, @passthrough);
+    my @args = @ARGV;
+    while (@args) {
+        my $a = shift @args;
+        if ($a eq '-C') { push @cache_files, shift(@args); }
+        elsif ($a =~ /^-C(.+)$/) { push @cache_files, $1; }
+        elsif ($a eq '-D') { push @defines, shift(@args); }
+        elsif ($a =~ /^-D(.+)$/) { push @defines, $1; }
+        elsif ($a eq '-S') { $source_dir = shift(@args); }
+        elsif ($a =~ /^-S(.+)$/) { $source_dir = $1; }
+        elsif ($a eq '-B') { $build_dir = shift(@args); }
+        elsif ($a =~ /^-B(.+)$/) { $build_dir = $1; }
+        elsif ($a =~ /^-/) { push @passthrough, $a; }
+        else {
+            if (!defined $source_dir) { $source_dir = $a; }
+            else { push @passthrough, $a; }
+        }
+    }
+    $source_dir //= '.';
+    $build_dir  //= '.';
+
+    if ($passthrough) {
+        # Explicit passthrough: skip the interp, use the real cmake binary.
+        exec('cmake', @ARGV);
+        die "Failed to execute cmake: $!\n";
+    }
+
+    # Seed initial cache (-C files) and -D defines.
+    my %initial_vars;
+    for my $d (@defines) {
+        next unless $d =~ /^([^=]+)(?::[^=]+)?=(.*)$/;
+        $initial_vars{$1} = $2;
+    }
+
+    my ($interp_ok, $state, $ntargets, @unknowns);
+    $interp_ok = eval {
+        my $source_abs = File::Spec->rel2abs($source_dir);
+        my $build_abs  = File::Spec->rel2abs($build_dir);
+        die "no CMakeLists.txt at $source_abs\n" unless -f "$source_abs/CMakeLists.txt";
+        print STDERR "SmakCMakeInterp: parsing $source_abs/CMakeLists.txt\n";
+        $state = SmakCMakeInterp::interpret_project($source_abs, $build_abs,
+                                                    \%initial_vars, \@cache_files);
+        @unknowns = $state->{unknown_commands} ? @{$state->{unknown_commands}} : ();
+        $ntargets = scalar keys %{ $state->{targets} // {} };
+        1;
+    };
+    if (!$interp_ok) {
+        print STDERR "SmakCMakeInterp: parse failed: $@";
+    } else {
+        my %seen;
+        my @uniq = grep { !$seen{$_}++ } @unknowns;
+        if (@uniq) {
+            print STDERR "SmakCMakeInterp: unknown commands (",
+                         scalar(@uniq), " unique, ", scalar(@unknowns), " total):\n";
+            print STDERR "  $_\n" for sort @uniq;
+        }
+        print STDERR "SmakCMakeInterp: targets: $ntargets\n";
+        if ($ntargets && $ENV{SMAK_CMAKE_DEBUG}) {
+            print STDERR "  $_\n" for sort keys %{$state->{targets}};
+        }
+    }
+
+    # Generate build artifacts (CMakeCache.txt, CMakeFiles/*.dir/*) so
+    # smak's regular path can drive the compile with no real cmake involved.
+    my $gen_ok = 0;
+    if ($interp_ok && $ntargets > 0) {
+        $gen_ok = eval { SmakCMakeInterp::generate_makefiles($state); 1 };
+        if (!$gen_ok) {
+            print STDERR "SmakCMakeInterp: generator failed: $@";
+        } else {
+            print STDERR "SmakCMakeInterp: generated build artifacts in ",
+                         $state->{build_dir}, "\n";
+        }
+    }
+
+    if ($interp_only) {
+        exit(($interp_ok && ($ntargets == 0 || $gen_ok)) ? 0 : 1);
+    }
+
+    # Success path: no real cmake needed.
+    if ($interp_ok && $gen_ok) {
+        exit 0;
+    }
+
+    # Fallback: the interp/generator couldn't handle this project. Use the
+    # real cmake binary so the build still works while we collect gaps.
+    print STDERR "SmakCMakeInterp: falling back to real cmake\n";
     exec('cmake', @ARGV);
-    # exec never returns on success
     die "Failed to execute cmake: $!\n";
 }
 

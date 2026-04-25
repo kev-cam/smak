@@ -24,6 +24,23 @@ use warnings;
 use File::Basename;
 use File::Spec;
 
+# Locate the cmake-install that ships alongside smak. Works whether
+# smak lives in /usr/local/src/smak (dev checkout) or
+# /.../share/smak (installed). Falls back to the hard-coded path.
+sub _cmake_install_root {
+    my $this = __FILE__;
+    my $dir  = dirname($this);
+    for my $cand ("$dir/cmake-install", '/usr/local/src/smak/cmake-install') {
+        return $cand if -d "$cand/bin" && -x "$cand/bin/cmake";
+    }
+    return "$dir/cmake-install";
+}
+sub _cmake_modules_dir {
+    my $root = _cmake_install_root();
+    my ($ver) = glob("$root/share/cmake-*");
+    return $ver ? "$ver/Modules" : "$root/share/cmake-3.31/Modules";
+}
+
 # ─── Lexer ──────────────────────────────────────────────────────────
 #
 # Token types:
@@ -125,6 +142,11 @@ sub _read_quoted_string {
         my $c = _advance($lex);
         if ($c eq '\\') {
             my $nc = _advance($lex);
+            # Special-case `\$`: per CMake docs, an escaped dollar
+            # disables the following `${...}` from being expanded as a
+            # variable reference. Encode it as a sentinel ("\x01") so
+            # expand() can skip past it, then convert back to '$'.
+            if ($nc eq '$') { $text .= "\x01"; next; }
             # Standard C-like escapes
             $text .= { 'n' => "\n", 't' => "\t", 'r' => "\r",
                        '"' => '"', '\\' => '\\', ' ' => ' ',
@@ -292,24 +314,82 @@ sub parse_string {
 
 sub expand {
     my ($str, $scope) = @_;
-    # Repeat until no more expansions (${${X}} nested refs)
-    my $prev = '';
-    while ($str ne $prev) {
-        $prev = $str;
-        $str =~ s/\$\{([^\{\}\$]+?)\}/_lookup($1, $scope) \/\/ ''/ge;
-        $str =~ s/\$ENV\{([^\}]+)\}/$ENV{$1} \/\/ ''/ge;
-        $str =~ s/\$CACHE\{([^\}]+)\}/_lookup_cache($1, $scope) \/\/ ''/ge;
+    # CMake variable expansion: ONE left-to-right pass. The text
+    # introduced by a substitution is NOT re-scanned — that's how
+    # `set(DOLLAR "$") ; "${DOLLAR}{X}"` produces literal `${X}`. But
+    # within a single `${...}`, nested forms like `${${var}_libs}` are
+    # evaluated inside-out.
+    my @out;
+    my $i = 0;
+    my $len = length($str);
+    while ($i < $len) {
+        my $c = substr($str, $i, 1);
+        if ($c eq '$' && $i + 1 < $len) {
+            my $next = substr($str, $i + 1, 1);
+            if ($next eq '{') {
+                # Find matching }
+                my $start = $i + 2;
+                my $j = $start;
+                my $depth = 1;
+                while ($j < $len && $depth > 0) {
+                    my $c2 = substr($str, $j, 1);
+                    if ($c2 eq '{') { $depth++; }
+                    elsif ($c2 eq '}') { $depth--; }
+                    $j++;
+                }
+                if ($depth == 0) {
+                    my $inner = substr($str, $start, $j - $start - 1);
+                    # Evaluate inner recursively (so ${${var}_libs} works)
+                    my $name = expand($inner, $scope);
+                    push @out, _lookup($name, $scope) // '';
+                    $i = $j;
+                    next;
+                }
+            } elsif ($next eq 'E' && substr($str, $i, 5) eq '$ENV{') {
+                my $start = $i + 5;
+                my $j = index($str, '}', $start);
+                if ($j >= 0) {
+                    my $name = expand(substr($str, $start, $j - $start), $scope);
+                    push @out, $ENV{$name} // '';
+                    $i = $j + 1;
+                    next;
+                }
+            } elsif ($next eq 'C' && substr($str, $i, 7) eq '$CACHE{') {
+                my $start = $i + 7;
+                my $j = index($str, '}', $start);
+                if ($j >= 0) {
+                    my $name = expand(substr($str, $start, $j - $start), $scope);
+                    push @out, _lookup_cache($name, $scope) // '';
+                    $i = $j + 1;
+                    next;
+                }
+            }
+        }
+        push @out, $c;
+        $i++;
     }
-    return $str;
+    my $result = join('', @out);
+    # Convert sentinel back to literal '$' (set by _read_quoted_string for `\$`).
+    $result =~ s/\x01/\$/g;
+    return $result;
 }
 
 sub _lookup {
     my ($name, $scope) = @_;
     # Walk scope chain
+    my $depth = 0;
     while ($scope) {
-        return $scope->{vars}{$name} if exists $scope->{vars}{$name};
+        if (exists $scope->{vars}{$name}) {
+            if ($ENV{SMAK_CMAKE_TRACE_LOOKUP} && $name =~ /^\Q$ENV{SMAK_CMAKE_TRACE_LOOKUP}\E$/) {
+                warn "TRACE-lookup: $name at depth $depth = [" . ($scope->{vars}{$name}//"undef") . "]\n";
+            }
+            return $scope->{vars}{$name};
+        }
         $scope = $scope->{parent};
+        $depth++;
     }
+    warn "TRACE-lookup: $name not found\n"
+        if $ENV{SMAK_CMAKE_TRACE_LOOKUP} && $name =~ /^\Q$ENV{SMAK_CMAKE_TRACE_LOOKUP}\E$/;
     return undef;
 }
 
@@ -553,8 +633,17 @@ sub _eval_if {
         if ($branches[$b]{name} eq 'else') {
             $truthy = 1;
         } else {
-            my @args = expand_args($branches[$b]{args}, $scope);
-            $truthy = _if_test(\@args, $scope);
+            # For if() we need to know which args were quoted so STREQUAL
+            # etc. don't re-dereference already-expanded quoted strings.
+            # Produce a parallel list of "is quoted" flags aligned with
+            # the flat expanded args.
+            my (@args, @quoted);
+            for my $a (@{$branches[$b]{args}}) {
+                my $q = ($a->{type} eq 'quoted' || $a->{type} eq 'bracket');
+                my @vs = expand_arg($a, $scope);
+                for my $v (@vs) { push @args, $v; push @quoted, $q; }
+            }
+            $truthy = _if_test(\@args, $scope, \@quoted);
         }
         if ($truthy) {
             my @body = @{$commands}[$body_start .. $body_end];
@@ -571,59 +660,134 @@ sub _eval_if {
 #            DEFINED, EXISTS, IS_DIRECTORY, VERSION_LESS, etc.
 # Simplified — good enough for common cases.
 sub _if_test {
-    my ($args, $scope) = @_;
-    # Shunting-yard-ish: handle NOT, AND, OR by recursion
-    return _if_expr($args, $scope);
+    my ($args, $scope, $quoted) = @_;
+    $quoted //= [(0) x scalar @$args];
+    return _if_expr($args, $scope, $quoted);
+}
+
+# _deref_q: like _deref, but if $was_quoted, the value is a literal and we
+# don't attempt a second lookup. CMake's if() rule: quoted strings are
+# literals for STREQUAL etc.; only bare (unquoted) operands are looked up.
+sub _deref_q {
+    my ($v, $scope, $was_quoted) = @_;
+    return $v if $was_quoted;
+    return _deref($v, $scope);
 }
 
 sub _if_expr {
-    my ($args, $scope) = @_;
-    # Handle parens (rare; we pass tokens through)
-    # Handle OR (lowest precedence)
+    my ($args, $scope, $quoted) = @_;
+    $quoted //= [(0) x scalar @$args];
+
+    # Strip a single enclosing pair of parens: ( expr ). Detect the pair by
+    # scanning to the matching close paren. If it equals $#args, strip it.
+    while (@$args >= 2 && !$quoted->[0] && $args->[0] eq '('
+           && !$quoted->[-1] && $args->[-1] eq ')') {
+        my $depth = 0; my $matched_end = -1;
+        for my $i (0 .. $#$args) {
+            next if $quoted->[$i];
+            $depth++ if $args->[$i] eq '(';
+            $depth-- if $args->[$i] eq ')';
+            if ($depth == 0) { $matched_end = $i; last; }
+        }
+        last if $matched_end != $#$args;   # outer ( not matched to outer )
+        shift @$args; shift @$quoted;
+        pop @$args;   pop @$quoted;
+    }
+
+    # Recursively evaluate any parenthesized subgroup and replace it with
+    # its truthy value ('1' or '0'). Repeat until no bare parens remain.
+    while (1) {
+        my $open = -1;
+        for my $i (0 .. $#$args) {
+            if (!$quoted->[$i] && $args->[$i] eq '(') { $open = $i; last; }
+        }
+        last if $open < 0;
+        my $depth = 0; my $close = -1;
+        for my $i ($open .. $#$args) {
+            next if $quoted->[$i];
+            $depth++ if $args->[$i] eq '(';
+            $depth-- if $args->[$i] eq ')';
+            if ($depth == 0) { $close = $i; last; }
+        }
+        last if $close < 0;
+        my @inner  = @$args[$open+1 .. $close-1];
+        my @innerq = @$quoted[$open+1 .. $close-1];
+        my $val = _if_expr(\@inner, $scope, \@innerq) ? '1' : '0';
+        splice(@$args,   $open, $close - $open + 1, $val);
+        splice(@$quoted, $open, $close - $open + 1, 0);
+    }
+
+    # Handle OR (lowest precedence) — but only when OR is an UNQUOTED keyword
     for (my $i = 0; $i < @$args; $i++) {
-        if (uc($args->[$i]) eq 'OR') {
-            my @l = @$args[0..$i-1];
-            my @r = @$args[$i+1..$#$args];
-            return _if_expr(\@l, $scope) || _if_expr(\@r, $scope);
+        if (!$quoted->[$i] && uc($args->[$i]) eq 'OR') {
+            my @l  = @$args[0..$i-1];
+            my @r  = @$args[$i+1..$#$args];
+            my @lq = @$quoted[0..$i-1];
+            my @rq = @$quoted[$i+1..$#$quoted];
+            return _if_expr(\@l, $scope, \@lq) || _if_expr(\@r, $scope, \@rq);
         }
     }
     for (my $i = 0; $i < @$args; $i++) {
-        if (uc($args->[$i]) eq 'AND') {
-            my @l = @$args[0..$i-1];
-            my @r = @$args[$i+1..$#$args];
-            return _if_expr(\@l, $scope) && _if_expr(\@r, $scope);
+        if (!$quoted->[$i] && uc($args->[$i]) eq 'AND') {
+            my @l  = @$args[0..$i-1];
+            my @r  = @$args[$i+1..$#$args];
+            my @lq = @$quoted[0..$i-1];
+            my @rq = @$quoted[$i+1..$#$quoted];
+            return _if_expr(\@l, $scope, \@lq) && _if_expr(\@r, $scope, \@rq);
         }
     }
     # NOT
-    if (@$args >= 1 && uc($args->[0]) eq 'NOT') {
-        my @r = @$args[1..$#$args];
-        return !_if_expr(\@r, $scope);
+    if (@$args >= 1 && !$quoted->[0] && uc($args->[0]) eq 'NOT') {
+        my @r  = @$args[1..$#$args];
+        my @rq = @$quoted[1..$#$quoted];
+        return !_if_expr(\@r, $scope, \@rq);
     }
     # Binary predicates
     if (@$args == 3) {
-        my ($l, $op, $r) = @$args;
-        my $uop = uc($op);
-        return _deref($l, $scope) eq _deref($r, $scope) if $uop eq 'STREQUAL';
-        return _deref($l, $scope) ne _deref($r, $scope) if $uop eq 'STRNOTEQUAL';
-        return _deref($l, $scope) == _deref($r, $scope) if $uop eq 'EQUAL';
-        return _deref($l, $scope) <  _deref($r, $scope) if $uop eq 'LESS';
-        return _deref($l, $scope) <= _deref($r, $scope) if $uop eq 'LESS_EQUAL';
-        return _deref($l, $scope) >  _deref($r, $scope) if $uop eq 'GREATER';
-        return _deref($l, $scope) >= _deref($r, $scope) if $uop eq 'GREATER_EQUAL';
+        my ($l, $op, $r)    = @$args;
+        my ($lq, $oq, $rq)  = @$quoted;
+        my $uop = !$oq ? uc($op) : '';
+        return _deref_q($l, $scope, $lq) eq _deref_q($r, $scope, $rq) if $uop eq 'STREQUAL';
+        return _deref_q($l, $scope, $lq) ne _deref_q($r, $scope, $rq) if $uop eq 'STRNOTEQUAL';
+        return _deref_q($l, $scope, $lq) == _deref_q($r, $scope, $rq) if $uop eq 'EQUAL';
+        return _deref_q($l, $scope, $lq) <  _deref_q($r, $scope, $rq) if $uop eq 'LESS';
+        return _deref_q($l, $scope, $lq) <= _deref_q($r, $scope, $rq) if $uop eq 'LESS_EQUAL';
+        return _deref_q($l, $scope, $lq) >  _deref_q($r, $scope, $rq) if $uop eq 'GREATER';
+        return _deref_q($l, $scope, $lq) >= _deref_q($r, $scope, $rq) if $uop eq 'GREATER_EQUAL';
         if ($uop eq 'MATCHES') {
-            my $s = _deref($l, $scope);
+            my $s = _deref_q($l, $scope, $lq);
             return $s =~ /$r/;
         }
-        # Version comparison — compare parts
         if ($uop =~ /^VERSION_/) {
-            return _version_cmp(_deref($l, $scope), $uop, _deref($r, $scope));
+            return _version_cmp(_deref_q($l, $scope, $lq), $uop,
+                                _deref_q($r, $scope, $rq));
+        }
+        if ($uop eq 'IN_LIST') {
+            # Left is value (deref if unquoted id), right is list var name.
+            my $needle = _deref_q($l, $scope, $lq);
+            my $listval = _lookup($r, $scope) // '';
+            for my $item (split /;/, $listval) {
+                return 1 if $item eq $needle;
+            }
+            return 0;
         }
     }
     # Unary predicates
     if (@$args == 2) {
         my ($op, $arg) = @$args;
-        my $uop = uc($op);
-        return exists _find_var($arg, $scope)->{$arg} if $uop eq 'DEFINED';
+        my $uop = !$quoted->[0] ? uc($op) : '';
+        if ($uop eq 'DEFINED') {
+            # DEFINED CACHE{X} / ENV{X} / normal VAR
+            if ($arg =~ /^CACHE\{([^}]+)\}$/) {
+                my $s = $scope;
+                while ($s->{parent}) { $s = $s->{parent}; }
+                return exists $s->{cache}{$1} ? 1 : 0;
+            }
+            if ($arg =~ /^ENV\{([^}]+)\}$/) {
+                return exists $ENV{$1} ? 1 : 0;
+            }
+            return exists _find_var($arg, $scope)->{$arg} ? 1 : 0;
+        }
         if ($uop eq 'EXISTS' || $uop eq 'IS_DIRECTORY' || $uop eq 'IS_SYMLINK' || $uop eq 'IS_ABSOLUTE') {
             # CMake: these check the literal path.  If the arg looks like
             # a filename (has / or . or exists on disk), use it.  Otherwise
@@ -654,6 +818,15 @@ sub _if_expr {
     # Single value — truthy test
     if (@$args == 1) {
         my $v = $args->[0];
+        # Quoted single value: the string IS the value; only the
+        # false-constant short-list counts as false. No var lookup.
+        if ($quoted->[0]) {
+            return 0 if !defined $v;
+            return 1 if $v =~ /^(1|ON|YES|TRUE|Y)$/i;
+            return 0 if $v =~ /^(0|OFF|NO|FALSE|N|IGNORE|NOTFOUND|)$/i;
+            return 0 if $v =~ /-NOTFOUND$/;
+            return 1;  # any other non-empty string is truthy when quoted
+        }
         return _truthy($v, $scope);
     }
     # Empty
@@ -661,18 +834,27 @@ sub _if_expr {
 }
 
 # Is a bare value "truthy" in cmake if() context?
+# Per CMake: a value is false if it's 0, OFF, NO, FALSE, N, IGNORE, NOTFOUND,
+# empty, or ends in -NOTFOUND. A value like "/foo" is TRUE. For a bare word,
+# we dereference once: if it names a variable, the variable's value is the
+# final answer (no second dereference — paths shouldn't be looked up as vars).
 sub _truthy {
     my ($v, $scope) = @_;
-    # Constants
+    return 0 if !defined $v;
     return 1 if $v =~ /^(1|ON|YES|TRUE|Y)$/i;
     return 0 if $v =~ /^(0|OFF|NO|FALSE|N|IGNORE|NOTFOUND|)$/i;
     return 0 if $v =~ /-NOTFOUND$/;
-    # Otherwise, treat as variable name — look it up recursively
-    my $lookup = _lookup($v, $scope);
-    if (defined $lookup && $lookup ne '') {
-        return _truthy($lookup, $scope);
+    # If $v looks like a plain identifier, resolve it as a variable once.
+    # Otherwise it's already a literal (path, number, string) → truthy.
+    if ($v =~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
+        my $lookup = _lookup($v, $scope);
+        return 0 unless defined $lookup;
+        return 0 if $lookup eq '';
+        return 0 if $lookup =~ /^(0|OFF|NO|FALSE|N|IGNORE|NOTFOUND)$/i;
+        return 0 if $lookup =~ /-NOTFOUND$/;
+        return 1;
     }
-    return 0;
+    return 1;
 }
 
 sub _find_var {
@@ -801,13 +983,27 @@ sub _eval_function_def {
         params => \@params,
         body   => \@body,
         is_macro => $is_macro,
+        # CMake: inside a function/macro body, ${CMAKE_CURRENT_LIST_DIR}
+        # refers to the file containing the *definition*, not the caller.
+        # Capture it now so _call_function can restore it.
+        list_dir => _lookup('CMAKE_CURRENT_LIST_DIR', $scope),
+        list_file => _lookup('CMAKE_CURRENT_LIST_FILE', $scope),
     };
     return $end + 1;
 }
 
 sub eval_command {
     my ($cmd, $state, $scope) = @_;
+    if ($ENV{SMAK_CMAKE_TRACE_RAW} && $cmd->{name} =~ /^\Q$ENV{SMAK_CMAKE_TRACE_RAW}\E$/) {
+        warn "RAW $cmd->{name} at $cmd->{source}:$cmd->{line}: "
+             . scalar(@{$cmd->{args}}) . " raw args [",
+             join(' | ', map { "($_->{type}:$_->{text})" } @{$cmd->{args}}), "]\n";
+    }
     my @expanded = expand_args($cmd->{args}, $scope);
+    if ($ENV{SMAK_CMAKE_TRACE_RAW} && $cmd->{name} =~ /^\Q$ENV{SMAK_CMAKE_TRACE_RAW}\E$/) {
+        warn "RAW expanded: " . scalar(@expanded) . " args ["
+             . join(' | ', map { $_ // '' } @expanded) . "]\n";
+    }
     my $handler = $builtins{$cmd->{name}};
     if ($handler) {
         $handler->($state, \@expanded, $cmd, $scope);
@@ -826,30 +1022,101 @@ sub eval_command {
 
 sub _call_function {
     my ($name, $args, $state, $scope) = @_;
+    if ($ENV{SMAK_CMAKE_TRACE} && $name =~ /^\Q$ENV{SMAK_CMAKE_TRACE}\E$/) {
+        my @dbg = map { defined $_ ? "[$_]" : "[undef]" } @$args;
+        warn "TRACE: $name(" . join(' ', @dbg) . ")\n";
+    }
+    if ($ENV{SMAK_CMAKE_TRACE_ARGS} && $name =~ /^\Q$ENV{SMAK_CMAKE_TRACE_ARGS}\E$/) {
+        warn "TRACE-args $name: " . scalar(@$args) . " args -> ["
+             . join("|", map { $_ // '' } @$args) . "]\n";
+    }
+    if ($ENV{SMAK_CMAKE_TRACE_IN} && $name =~ /^\Q$ENV{SMAK_CMAKE_TRACE_IN}\E$/
+        && $args->[0] && $ENV{SMAK_CMAKE_TRACE_PKG}
+        && $args->[0] eq $ENV{SMAK_CMAKE_TRACE_PKG}) {
+        warn "==== enter $name for " . $args->[0] . " ====\n";
+        $scope->{_trace_fn} = 1;
+    }
     my $fn = $state->{functions}{$name};
     my $call_scope = $fn->{is_macro} ? $scope : new_scope($scope);
     $args = [] unless ref($args) eq 'ARRAY';
     my $params = (ref($fn->{params}) eq 'ARRAY') ? $fn->{params} : [];
+
+    # For macros, parameter names (ARGC/ARGV/ARGVn/ARGN + named params) are
+    # technically textual substitutions in CMake. We simulate by binding
+    # them as vars, then restoring on exit so inner macro calls that share
+    # param names don't clobber the outer macro's bindings.
+    my %saved;
+    my $remember = sub {
+        my $n = shift;
+        return if exists $saved{$n};
+        $saved{$n} = exists $call_scope->{vars}{$n}
+            ? $call_scope->{vars}{$n}
+            : undef;  # means: wasn't set, delete on restore
+    };
+
+    $remember->('ARGC'); $remember->('ARGV'); $remember->('ARGN');
     $call_scope->{vars}{ARGC} = scalar @$args;
     $call_scope->{vars}{ARGV} = join(';', map { ref($_) ? '' : ($_ // '') } @$args);
     for my $k (0 .. $#$args) {
+        $remember->("ARGV$k");
         my $v = $args->[$k];
         $call_scope->{vars}{"ARGV$k"} = ref($v) ? '' : (defined $v ? "$v" : '');
     }
     for my $k (0 .. $#$params) {
+        $remember->($params->[$k]);
         my $v = $args->[$k];
         $call_scope->{vars}{$params->[$k]} = ref($v) ? '' : ($v // '');
     }
-    # ARGN = extra args beyond named params
+    # ARGN = extra args beyond named params. Must be set even when empty,
+    # otherwise _lookup falls through to an outer function's ARGN, which
+    # then gets iterated inside this function's foreach(... ${ARGN}).
     my $nparams = scalar @$params;
     if (@$args > $nparams) {
         my @extra = @$args[$nparams..$#$args];
         $call_scope->{vars}{ARGN} = join(';', map { ref($_) ? '' : ($_ // '') } @extra);
+    } else {
+        $call_scope->{vars}{ARGN} = '';
+    }
+
+    # Inside the function body, ${CMAKE_CURRENT_LIST_DIR} should refer to
+    # the *defining* file's directory (CMake semantics). Save and restore.
+    my $saved_list_dir  = $call_scope->{vars}{CMAKE_CURRENT_LIST_DIR};
+    my $saved_list_file = $call_scope->{vars}{CMAKE_CURRENT_LIST_FILE};
+    if (defined $fn->{list_dir}) {
+        $call_scope->{vars}{CMAKE_CURRENT_LIST_DIR}  = $fn->{list_dir};
+    }
+    if (defined $fn->{list_file}) {
+        $call_scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $fn->{list_file};
     }
 
     eval_commands($fn->{body}, $state, $call_scope);
     # Clear return flag — it only unwinds to the function boundary
     delete $call_scope->{_return};
+
+    if (defined $saved_list_dir) {
+        $call_scope->{vars}{CMAKE_CURRENT_LIST_DIR} = $saved_list_dir;
+    } else {
+        delete $call_scope->{vars}{CMAKE_CURRENT_LIST_DIR};
+    }
+    if (defined $saved_list_file) {
+        $call_scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $saved_list_file;
+    } else {
+        delete $call_scope->{vars}{CMAKE_CURRENT_LIST_FILE};
+    }
+
+    # Restore ARGC/ARGV/ARGN/ARGVn/named-params to whatever the caller had.
+    # (Macros don't open a new scope, so without this, an outer macro's
+    # ${param} after a nested-macro call would see the inner macro's
+    # bindings — faithful CMake does textual substitution, not lookup.)
+    if ($fn->{is_macro}) {
+        for my $n (keys %saved) {
+            if (defined $saved{$n}) {
+                $call_scope->{vars}{$n} = $saved{$n};
+            } else {
+                delete $call_scope->{vars}{$n};
+            }
+        }
+    }
 }
 
 # ─── Built-in commands (minimal) ────────────────────────────────────
@@ -858,13 +1125,25 @@ $builtins{'set'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     return unless @$args;
     my $name = shift @$args;
-    # Detect CACHE / PARENT_SCOPE keywords
+    if ($ENV{SMAK_CMAKE_TRACE_SET} && $name =~ /^\Q$ENV{SMAK_CMAKE_TRACE_SET}\E$/) {
+        my @dbg = map { defined $_ ? "[$_]" : "[undef]" } @$args;
+        warn "TRACE-set: $name = " . join(' ', @dbg) . "\n";
+    }
+    # Detect CACHE / PARENT_SCOPE / FORCE keywords
     my $cache = 0;
     my $parent = 0;
+    my $force = 0;
     my @values;
+    my @post_cache;  # args after CACHE: [TYPE DOC ...FORCE?]
+    my $after_cache = 0;
     for my $a (@$args) {
-        if ($a eq 'CACHE') { $cache = 1; last; }
+        if ($a eq 'CACHE') { $cache = 1; $after_cache = 1; next; }
         if ($a eq 'PARENT_SCOPE') { $parent = 1; last; }
+        if ($after_cache) {
+            $force = 1 if $a eq 'FORCE';
+            push @post_cache, $a;
+            next;
+        }
         push @values, $a;
     }
     my $value = join(';', @values);
@@ -872,8 +1151,31 @@ $builtins{'set'} = sub {
         # Walk to root
         my $s = $scope;
         while ($s->{parent}) { $s = $s->{parent}; }
-        $s->{cache}{$name} = $value unless exists $s->{cache}{$name};
-        $s->{vars}{$name} = $value;
+        # CMake rule: set(X val CACHE TYPE DOC) does NOT overwrite an
+        # existing cache entry unless FORCE is specified. Additionally, a
+        # regular (non-cache) variable of the same name ALWAYS shadows the
+        # cache variable at read time — CMake's cache-set must not clobber
+        # an existing normal variable unless FORCE.
+        # CMake special case: CACHE INTERNAL is implicitly FORCE.
+        my $cache_type = $post_cache[0] // '';
+        $force = 1 if $cache_type eq 'INTERNAL';
+        my $already = exists $s->{cache}{$name};
+        if (!$already || $force) {
+            $s->{cache}{$name} = $value;
+        }
+        # Only update the normal variable if it's not already set in some
+        # scope, or if FORCE was given. This mirrors CMake's rule that a
+        # normal variable shadows cache; `set(X "" CACHE STRING …)` without
+        # FORCE must not clobber a prior `set(X ON)`.
+        my $has_normal = 0;
+        for (my $sc = $scope; $sc; $sc = $sc->{parent}) {
+            if (exists $sc->{vars}{$name}) { $has_normal = 1; last; }
+        }
+        if ($force) {
+            $s->{vars}{$name} = $value;
+        } elsif (!$has_normal) {
+            $s->{vars}{$name} = $s->{cache}{$name};
+        }
     } elsif ($parent) {
         $scope->{parent}{vars}{$name} = $value if $scope->{parent};
     } else {
@@ -885,6 +1187,9 @@ $builtins{'unset'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     return unless @$args;
     my $name = $args->[0];
+    if ($ENV{SMAK_CMAKE_TRACE_SET} && $name =~ /^\Q$ENV{SMAK_CMAKE_TRACE_SET}\E$/) {
+        warn "TRACE-unset: $name\n";
+    }
     delete $scope->{vars}{$name};
 };
 
@@ -892,10 +1197,25 @@ $builtins{'message'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     return unless @$args;
     my $mode = $args->[0];
-    if ($mode =~ /^(STATUS|NOTICE|VERBOSE|DEBUG|TRACE|CHECK_START|CHECK_PASS|CHECK_FAIL)$/) {
+    my $suppress = 0;  # Default: print so TriBITS trace output is visible.
+    if ($mode =~ /^(STATUS|NOTICE|VERBOSE|CHECK_START|CHECK_PASS|CHECK_FAIL)$/) {
         shift @$args;
+    } elsif ($mode =~ /^(DEBUG|TRACE)$/) {
+        shift @$args;
+        $suppress = !$ENV{SMAK_CMAKE_DEBUG};
+    } elsif ($mode eq 'FATAL_ERROR' || $mode eq 'SEND_ERROR') {
+        shift @$args;
+        warn "CMake Error: ", join(' ', @$args), "\n";
+        # Continue on "fatal" so we can see downstream issues. Callers
+        # that want die semantics can set SMAK_CMAKE_FATAL=1.
+        die "fatal\n" if $mode eq 'FATAL_ERROR' && $ENV{SMAK_CMAKE_FATAL};
+        return;
+    } elsif ($mode eq 'WARNING' || $mode eq 'AUTHOR_WARNING' || $mode eq 'DEPRECATION') {
+        shift @$args;
+        warn "CMake Warning: ", join(' ', @$args), "\n";
+        return;
     }
-    print STDERR "-- ", join(' ', @$args), "\n" if $ENV{SMAK_CMAKE_DEBUG};
+    print STDERR join(' ', @$args), "\n" unless $suppress;
 };
 
 $builtins{'cmake_minimum_required'} = sub { };  # no-op
@@ -1173,8 +1493,8 @@ $builtins{'include'} = sub {
     }
     # 4. Built-in modules (we have cmake's install available)
     unless ($path) {
-        for my $try ("/usr/local/src/smak/cmake-install/share/cmake-3.31/Modules/$file",
-                     "/usr/local/src/smak/cmake-install/share/cmake-3.31/Modules/$file.cmake") {
+        my $modules_dir = _cmake_modules_dir();
+        for my $try ("$modules_dir/$file", "$modules_dir/$file.cmake") {
             if (-f $try) { $path = $try; last; }
         }
     }
@@ -1309,7 +1629,14 @@ $builtins{'string'} = sub {
         $scope->{vars}{$out} = length $in;
     } elsif ($op eq 'SUBSTRING') {
         my ($in, $start, $len, $out) = @$args;
+        $start = 0 unless defined $start && $start ne '';
+        $len = -1 unless defined $len && $len ne '';
         $scope->{vars}{$out} = $len < 0 ? substr($in, $start) : substr($in, $start, $len);
+    } elsif ($op eq 'FIND') {
+        # string(FIND <string> <substring> <out_var> [REVERSE])
+        my ($in, $sub, $out, $rev) = @$args;
+        my $idx = (defined $rev && $rev eq 'REVERSE') ? rindex($in, $sub) : index($in, $sub);
+        $scope->{vars}{$out} = $idx;
     } elsif ($op eq 'STRIP') {
         my ($in, $out) = @$args;
         $in =~ s/^\s+|\s+$//g;
@@ -1328,7 +1655,11 @@ $builtins{'string'} = sub {
 
 sub _cmake_regex_expand {
     my $repl = shift;
-    # Stub: don't expand backrefs; assume $1..$9 used by caller
+    # Snapshot the outer match's capture groups before doing any further
+    # regex work in here.
+    my @cap = ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+    # CMake uses \1..\9 for backrefs. Convert to the captured text.
+    $repl =~ s/\\(\d)/defined $cap[$1-1] ? $cap[$1-1] : ''/ge;
     return $repl;
 }
 
@@ -1405,9 +1736,17 @@ $builtins{'file'} = sub {
         }
     } elsif ($op eq 'WRITE' || $op eq 'APPEND') {
         my $path = shift @$args;
+        my $dir = $path;
+        $dir =~ s{/[^/]*$}{};
+        if ($dir && $dir ne $path && !-d $dir) {
+            use File::Path qw(make_path);
+            make_path($dir);
+        }
         if (open(my $fh, $op eq 'APPEND' ? '>>' : '>', $path)) {
             print $fh join('', @$args);
             close $fh;
+        } else {
+            warn "file($op) cannot open $path: $!\n" if $ENV{SMAK_CMAKE_DEBUG};
         }
     } elsif ($op eq 'MAKE_DIRECTORY') {
         use File::Path qw(make_path);
@@ -1418,6 +1757,9 @@ $builtins{'file'} = sub {
 $builtins{'configure_file'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my ($in, $out) = @$args[0, 1];
+    my @opts = @$args[2..$#$args];
+    my $copy_only = grep { $_ eq 'COPYONLY' } @opts;
+    my $at_only   = grep { $_ eq '@ONLY'    } @opts;
     # Resolve paths
     $in = File::Spec->catfile($state->{current_source_dir}, $in)
         unless $in =~ m{^/};
@@ -1431,10 +1773,51 @@ $builtins{'configure_file'} = sub {
     my $text = <$ifh>;
     close $ifh;
 
-    # Substitute @VAR@
-    $text =~ s/\@([A-Za-z_][A-Za-z0-9_]*)\@/_lookup($1, $scope) \/\/ ''/ge;
-    # Substitute ${VAR}
-    $text =~ s/\$\{([^\{\}\$]+?)\}/_lookup($1, $scope) \/\/ ''/ge;
+    if (!$copy_only) {
+        # Substitute @VAR@ (single pass — @ syntax doesn't nest)
+        $text =~ s/\@([A-Za-z_][A-Za-z0-9_]*)\@/_lookup($1, $scope) \/\/ ''/ge;
+        # Substitute ${VAR} — CMake's configure_file does NOT recurse on
+        # text introduced by a substitution (this is how TriBITS uses the
+        # `${PDOLLAR}` trick: PDOLLAR="$" turns `${PDOLLAR}{pkg}` into
+        # `${pkg}` in the output, which is preserved literally so it's
+        # looked up at find_package consume time). Under @ONLY, `${}` is
+        # preserved completely.
+        unless ($at_only) {
+            my @out;
+            my $pos = 0;
+            while ($pos < length($text)) {
+                if (substr($text, $pos, 2) eq '${') {
+                    # find matching } with nesting
+                    my $start = $pos + 2;
+                    my $i = $start;
+                    my $depth = 1;
+                    while ($i < length($text) && $depth > 0) {
+                        my $c = substr($text, $i, 1);
+                        if ($c eq '{') { $depth++; }
+                        elsif ($c eq '}') { $depth--; }
+                        $i++;
+                    }
+                    if ($depth == 0) {
+                        my $inner = substr($text, $start, $i - $start - 1);
+                        # recursively substitute INSIDE the braces (handles
+                        # ${${FOO}}), but the result is NOT re-scanned for
+                        # more ${ outside.
+                        my $prev_i = '';
+                        while ($inner ne $prev_i) {
+                            $prev_i = $inner;
+                            $inner =~ s/\$\{([^\{\}\$]+?)\}/_lookup($1, $scope) \/\/ ''/ge;
+                        }
+                        push @out, _lookup($inner, $scope) // '';
+                        $pos = $i;
+                        next;
+                    }
+                }
+                push @out, substr($text, $pos, 1);
+                $pos++;
+            }
+            $text = join('', @out);
+        }
+    }
     # #cmakedefine VAR → #define VAR val, or /* #undef VAR */
     $text =~ s{^(\s*)#cmakedefine\s+(\w+)(.*)$}{
         my ($ws, $var, $rest) = ($1, $2, $3);
@@ -1502,18 +1885,37 @@ $builtins{'get_target_property'} = sub {
 
 $builtins{'get_property'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
-    # get_property(<var> <GLOBAL|DIRECTORY|TARGET|SOURCE|CACHE> [<name>] PROPERTY <prop>)
+    # get_property(<var> <GLOBAL|DIRECTORY|TARGET|SOURCE|CACHE> [<name>] PROPERTY <prop> [SET])
     my $out = shift @$args;
     my $scope_kw = shift @$args;
     my $target_name;
-    if ($scope_kw eq 'TARGET') {
+    if ($scope_kw eq 'TARGET' || $scope_kw eq 'CACHE' || $scope_kw eq 'SOURCE') {
         $target_name = shift @$args;
     }
     while (@$args && $args->[0] ne 'PROPERTY') { shift @$args; }
     shift @$args if @$args && $args->[0] eq 'PROPERTY';
     my $prop = shift @$args;
+    my $want_set = (@$args && $args->[0] eq 'SET');
 
     my $val = '';
+    if ($scope_kw eq 'CACHE' && $target_name) {
+        my $root = $scope;
+        while ($root->{parent}) { $root = $root->{parent}; }
+        if ($want_set) {
+            $val = exists $root->{cache}{$target_name} ? 1 : '';
+        } elsif ($prop eq 'VALUE') {
+            $val = $root->{cache}{$target_name} // '';
+        } else {
+            $val = $root->{cache_props}{$target_name}{$prop} // '';
+        }
+        $scope->{vars}{$out} = $val;
+        return;
+    }
+    if ($scope_kw eq 'GLOBAL') {
+        $val = $state->{global_properties}{$prop} // '';
+        $scope->{vars}{$out} = $val;
+        return;
+    }
     if ($scope_kw eq 'TARGET' && $target_name) {
         my $t = $state->{targets}{$target_name};
         if ($t) {
@@ -1539,11 +1941,85 @@ $builtins{'get_property'} = sub {
     $scope->{vars}{$out} = $val;
 };
 
-$builtins{'set_property'} = sub { };  # stub
+$builtins{'set_property'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # set_property(<scope> <name>... [APPEND|APPEND_STRING] PROPERTY <prop> <vals>...)
+    my $scope_kw = shift @$args;
+    my @names;
+    if ($scope_kw eq 'TARGET' || $scope_kw eq 'CACHE' || $scope_kw eq 'SOURCE'
+        || $scope_kw eq 'DIRECTORY' || $scope_kw eq 'TEST') {
+        while (@$args && $args->[0] ne 'APPEND' && $args->[0] ne 'APPEND_STRING'
+               && $args->[0] ne 'PROPERTY') {
+            push @names, shift @$args;
+        }
+    }
+    my $append = 0;
+    if (@$args && $args->[0] eq 'APPEND')        { $append = 1; shift @$args; }
+    elsif (@$args && $args->[0] eq 'APPEND_STRING') { $append = 2; shift @$args; }
+    shift @$args if @$args && $args->[0] eq 'PROPERTY';
+    my $prop = shift @$args;
+    my @vals = @$args;
+
+    return unless defined $prop;
+
+    if ($scope_kw eq 'GLOBAL') {
+        my $cur = $state->{global_properties}{$prop} // '';
+        if ($append) {
+            my $sep = $append == 2 ? '' : ';';
+            $cur .= ($cur eq '' ? '' : $sep) . join(';', @vals);
+        } else {
+            $cur = join(';', @vals);
+        }
+        $state->{global_properties}{$prop} = $cur;
+        return;
+    }
+
+    # Only TARGET scope is wired up end-to-end.  Others are accepted but
+    # only stored in {properties} for later lookup.
+    for my $name (@names) {
+        my $t = $state->{targets}{$name};
+        next unless $t;
+
+        # Map to well-known target fields
+        my $field;
+        if ($prop eq 'INTERFACE_INCLUDE_DIRECTORIES') { $field = 'interface_include_directories'; }
+        elsif ($prop eq 'INCLUDE_DIRECTORIES')        { $field = 'include_directories'; }
+        elsif ($prop eq 'INTERFACE_LINK_LIBRARIES')   { $field = 'interface_link_libraries'; }
+        elsif ($prop eq 'LINK_LIBRARIES')             { $field = 'link_libraries'; }
+        elsif ($prop eq 'INTERFACE_COMPILE_DEFINITIONS') { $field = 'interface_defines_list'; }
+
+        if ($field) {
+            my @existing = $append ? @{$t->{$field} // []} : ();
+            # Flatten and split on ; (CMake semantics)
+            my @new;
+            for my $v (@vals) {
+                push @new, grep { defined $_ && $_ ne '' } split /;/, $v;
+            }
+            $t->{$field} = [@existing, @new];
+        }
+
+        # Also record in the generic properties hash.
+        if ($append) {
+            my $cur = $t->{properties}{$prop} // '';
+            my $sep = $append == 2 ? '' : ';';
+            $cur .= ($cur eq '' ? '' : $sep) . join(';', @vals);
+            $t->{properties}{$prop} = $cur;
+        } else {
+            $t->{properties}{$prop} = join(';', @vals);
+        }
+    }
+};
 
 $builtins{'find_program'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $out = shift @$args;
+    {
+        my $cur = _lookup($out, $scope);
+        if (defined $cur && $cur ne '' && $cur !~ /-NOTFOUND$/
+            && $cur !~ /^\Q$out\E-NOTFOUND$/) {
+            return;
+        }
+    }
     my $prog = shift @$args;
     # Shift past NAMES, PATHS, HINTS, DOC, REQUIRED, etc.
     my @candidates = ($prog);
@@ -1572,6 +2048,13 @@ $builtins{'find_program'} = sub {
 $builtins{'find_library'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $out = shift @$args;
+    {
+        my $cur = _lookup($out, $scope);
+        if (defined $cur && $cur ne '' && $cur !~ /-NOTFOUND$/
+            && $cur !~ /^\Q$out\E-NOTFOUND$/) {
+            return;
+        }
+    }
     my @names;
     my @paths = (
         '/usr/lib/x86_64-linux-gnu',
@@ -1614,6 +2097,16 @@ $builtins{'find_library'} = sub {
 $builtins{'find_path'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $out = shift @$args;
+    # CMake rule: if $out already holds a non-NOTFOUND value, skip the
+    # search. TriBITS relies on this — it calls find_path twice (scoped
+    # then default), and the second call must not clobber the first.
+    {
+        my $cur = _lookup($out, $scope);
+        if (defined $cur && $cur ne '' && $cur !~ /-NOTFOUND$/
+            && $cur !~ /^\Q$out\E-NOTFOUND$/) {
+            return;
+        }
+    }
     my @names;
     my @paths = (
         '/usr/include', '/usr/local/include',
@@ -1890,7 +2383,7 @@ sub _check_include {
     # Common search paths
     my @paths = ('/usr/include', '/usr/local/include',
                  '/usr/include/x86_64-linux-gnu',
-                 '/usr/local/src/smak/cmake-install/include');
+                 _cmake_install_root() . '/include');
     # Add include paths from CMAKE_REQUIRED_INCLUDES if set
     my $req_inc = _lookup('CMAKE_REQUIRED_INCLUDES', $scope);
     if ($req_inc) {
@@ -1965,16 +2458,448 @@ $builtins{'check_function_exists'} = sub {
 $builtins{'check_cxx_source_compiles'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my ($source, $var) = @$args;
-    $scope->{vars}{$var} = 1;  # assume yes
+    $scope->{vars}{$var} = _try_compile($source, 'CXX', $scope) ? 1 : '';
 };
 
-$builtins{'cmake_parse_arguments'} = sub { };  # TODO
+$builtins{'check_c_source_compiles'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($source, $var) = @$args;
+    $scope->{vars}{$var} = _try_compile($source, 'C', $scope) ? 1 : '';
+};
+
+sub _try_compile {
+    my ($source, $lang, $scope) = @_;
+    my $cc = $lang eq 'CXX'
+        ? ($scope->{vars}{CMAKE_CXX_COMPILER} // 'c++')
+        : ($scope->{vars}{CMAKE_C_COMPILER}  // 'cc');
+    my $ext = $lang eq 'CXX' ? '.cc' : '.c';
+    require File::Temp;
+    my $tmpdir = $ENV{TMPDIR} || '/tmp';
+    my ($fh, $path) = File::Temp::tempfile("smakcheckXXXXXX",
+        DIR => $tmpdir, SUFFIX => $ext, UNLINK => 1);
+    print $fh $source;
+    close $fh;
+    my $flags = $scope->{vars}{CMAKE_REQUIRED_FLAGS} // '';
+    my $obj = "$path.o";
+    my $rc = system("$cc $flags -c $path -o $obj >/dev/null 2>&1");
+    unlink $obj;
+    return $rc == 0;
+}
+
+$builtins{'site_name'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $var = $args->[0] or return;
+    my $h = `hostname -s 2>/dev/null`;
+    chomp $h;
+    $h ||= $ENV{HOSTNAME} // 'localhost';
+    $scope->{vars}{$var} = $h;
+};
+
+$builtins{'enable_language'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    for my $lang (@$args) {
+        next if $lang eq 'OPTIONAL';
+        $scope->{vars}{"CMAKE_${lang}_COMPILER_WORKS"} = 1;
+        $scope->{vars}{"CMAKE_${lang}_COMPILER_LOADED"} = 1;
+        if ($lang eq 'C') {
+            $scope->{vars}{CMAKE_C_COMPILER}    //= '/usr/bin/cc';
+            $scope->{vars}{CMAKE_C_COMPILER_ID} //= 'GNU';
+        } elsif ($lang eq 'CXX') {
+            $scope->{vars}{CMAKE_CXX_COMPILER}    //= '/usr/bin/c++';
+            $scope->{vars}{CMAKE_CXX_COMPILER_ID} //= 'GNU';
+        } elsif ($lang eq 'Fortran') {
+            $scope->{vars}{CMAKE_Fortran_COMPILER}    //= '/usr/bin/gfortran';
+            $scope->{vars}{CMAKE_Fortran_COMPILER_ID} //= 'GNU';
+        }
+        $state->{languages}{$lang} = 1;
+    }
+};
+
+$builtins{'find_file'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $out = shift @$args;
+    my @names;
+    my @paths = ('/usr/include', '/usr/local/include',
+                 '/usr/include/x86_64-linux-gnu');
+    my $no_default = 0;
+    while (@$args) {
+        my $kw = shift @$args;
+        if ($kw eq 'NAMES') {
+            while (@$args && $args->[0] !~ /^(PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES)$/) {
+                push @names, shift @$args;
+            }
+        } elsif ($kw eq 'PATHS' || $kw eq 'HINTS') {
+            while (@$args && $args->[0] !~ /^(NAMES|PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES)$/) {
+                unshift @paths, shift @$args;
+            }
+        } elsif ($kw eq 'NO_DEFAULT_PATH') {
+            $no_default = 1;
+        } elsif ($kw =~ /^(REQUIRED|PATH_SUFFIXES|DOC)$/) {
+            shift @$args if $kw eq 'DOC' || $kw eq 'PATH_SUFFIXES';
+        } elsif (!@names) {
+            push @names, $kw;
+        }
+    }
+    @paths = grep { !/^\/usr/ } @paths if $no_default;
+    for my $name (@names) {
+        # If name has a path separator, try it verbatim in each dir
+        for my $dir (@paths) {
+            my $p = "$dir/$name";
+            if (-f $p) { $scope->{vars}{$out} = $p; return; }
+        }
+        # Or as absolute path
+        if ($name =~ m{^/} && -f $name) {
+            $scope->{vars}{$out} = $name; return;
+        }
+    }
+    $scope->{vars}{$out} = "$out-NOTFOUND";
+};
+
+$builtins{'execute_process'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my (@commands, $wd, $result_var, $output_var, $error_var, $results_var,
+        $output_strip, $error_strip, $output_quiet, $error_quiet, $timeout,
+        $input_file, $output_file, $error_file, $fatal);
+    my @current;
+    my $in_command = 0;
+    while (@$args) {
+        my $kw = shift @$args;
+        if ($kw eq 'COMMAND') {
+            push @commands, [@current] if $in_command && @current;
+            @current = (); $in_command = 1;
+            next;
+        }
+        if ($kw eq 'WORKING_DIRECTORY')              { $in_command = 0; $wd = shift @$args; next; }
+        if ($kw eq 'RESULT_VARIABLE')                { $in_command = 0; $result_var  = shift @$args; next; }
+        if ($kw eq 'RESULTS_VARIABLE')               { $in_command = 0; $results_var = shift @$args; next; }
+        if ($kw eq 'OUTPUT_VARIABLE')                { $in_command = 0; $output_var  = shift @$args; next; }
+        if ($kw eq 'ERROR_VARIABLE')                 { $in_command = 0; $error_var   = shift @$args; next; }
+        if ($kw eq 'INPUT_FILE')                     { $in_command = 0; $input_file  = shift @$args; next; }
+        if ($kw eq 'OUTPUT_FILE')                    { $in_command = 0; $output_file = shift @$args; next; }
+        if ($kw eq 'ERROR_FILE')                     { $in_command = 0; $error_file  = shift @$args; next; }
+        if ($kw eq 'TIMEOUT')                        { $in_command = 0; $timeout     = shift @$args; next; }
+        if ($kw eq 'OUTPUT_STRIP_TRAILING_WHITESPACE') { $in_command = 0; $output_strip = 1; next; }
+        if ($kw eq 'ERROR_STRIP_TRAILING_WHITESPACE')  { $in_command = 0; $error_strip  = 1; next; }
+        if ($kw eq 'OUTPUT_QUIET')                   { $in_command = 0; $output_quiet = 1; next; }
+        if ($kw eq 'ERROR_QUIET')                    { $in_command = 0; $error_quiet  = 1; next; }
+        if ($kw eq 'COMMAND_ERROR_IS_FATAL')         { $in_command = 0; $fatal = shift @$args; next; }
+        if ($kw eq 'COMMAND_ECHO' || $kw eq 'ENCODING') { $in_command = 0; shift @$args; next; }
+        if ($kw eq 'OUTPUT_STRIP_TRAILING_WHITESPACE' || $kw =~ /^(ANY|LAST)$/) { next; }
+        if ($in_command) { push @current, $kw; }
+    }
+    push @commands, [@current] if $in_command && @current;
+    return unless @commands;
+
+    # Build pipeline: cmd1 | cmd2 | ... — implement as a single shell line
+    # using proper quoting.  This is good enough for TriBITS/Trilinos use.
+    my @shell_parts;
+    for my $c (@commands) {
+        push @shell_parts, join(' ', map {
+            my $a = $_; $a =~ s/'/'\\''/g; "'$a'";
+        } @$c);
+    }
+    my $shell = join(' | ', @shell_parts);
+    $shell = "cd " . (_sq($wd) // "'.'") . " && $shell" if defined $wd && $wd ne '';
+
+    my $out = `$shell 2>&1`;
+    my $rc = $? == -1 ? -1 : ($? >> 8);
+    chomp $out if $output_strip;
+    $scope->{vars}{$output_var} = $out if defined $output_var;
+    $scope->{vars}{$error_var}  = ''  if defined $error_var;
+    $scope->{vars}{$result_var} = $rc if defined $result_var;
+    $scope->{vars}{$results_var} = $rc if defined $results_var;
+    if (defined $fatal && $fatal =~ /^(ANY|LAST)$/ && $rc != 0) {
+        die "execute_process failed (rc=$rc): $shell\n";
+    }
+};
+
+sub _sq {
+    my $s = shift;
+    return undef unless defined $s;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+# fortrancinterface_verify — we don't actually use Fortran for the paths
+# we care about (Xyce's Trilinos build uses C-linkage BLAS/LAPACK), so
+# stub as success.
+$builtins{'fortrancinterface_verify'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    $scope->{vars}{FortranCInterface_VERIFIED_C}   = 1;
+    $scope->{vars}{FortranCInterface_VERIFIED_CXX} = 1;
+};
+
+# Cmake-internal / rarely-used commands we stub so TriBITS can run.
+$builtins{'_cmake_find_compiler_path'}    = sub { };
+$builtins{'_cmake_find_compiler_sysroot'} = sub { };
+$builtins{'cmake_determine_compiler_id'}  = sub { };
+$builtins{'define_property'}              = sub { };
+$builtins{'build_command'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $var = $args->[0];
+    $scope->{vars}{$var} = 'smak' if $var;
+};
+
+$builtins{'separate_arguments'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # separate_arguments(<var>) — in-place: split current value on spaces
+    # separate_arguments(<var> <UNIX|WINDOWS|NATIVE>_COMMAND <str>)
+    # separate_arguments(<var> PROGRAM [SEPARATE_ARGS] <str>)
+    return unless @$args;
+    my $var = shift @$args;
+    my $mode = @$args ? $args->[0] : '';
+    my $src;
+    if ($mode && $mode =~ /_COMMAND$/) {
+        shift @$args;
+        $src = shift(@$args) // '';
+    } elsif ($mode eq 'PROGRAM') {
+        shift @$args;
+        shift @$args if @$args && $args->[0] eq 'SEPARATE_ARGS';
+        $src = shift(@$args) // '';
+    } else {
+        $src = _lookup($var, $scope) // '';
+    }
+    # Split on whitespace (cmake is more elaborate but this is enough for
+    # TriBITS' library-name patterns like "lapack lapack_win32").
+    my @parts = split /\s+/, $src;
+    @parts = grep { defined $_ && $_ ne '' } @parts;
+    $scope->{vars}{$var} = join(';', @parts);
+};
+
+$builtins{'cmake_parse_arguments'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # Forms:
+    #   cmake_parse_arguments(PARSE_ARGV <N>          <opts> <one> <multi>)
+    #   cmake_parse_arguments(<prefix>                <opts> <one> <multi> <args>...)
+    if ($ENV{SMAK_CMAKE_TRACE_PARSE_ARGS}) {
+        my $prefix = @$args >= 1 ? ($args->[0] eq 'PARSE_ARGV' ? $args->[2] : $args->[0]) : '';
+        if ($prefix eq $ENV{SMAK_CMAKE_TRACE_PARSE_ARGS}) {
+            warn "TRACE-parse_args($prefix): " . join(' | ', map { "[$_]" } @$args) . "\n";
+        }
+    }
+    return unless @$args >= 4;
+    my $prefix;
+    my @args_local = @$args;
+    if ($args_local[0] eq 'PARSE_ARGV') {
+        # Not supported precisely (we don't have ARGN indexing from here).
+        # Take prefix from next arg and use ARGN from scope.
+        shift @args_local;  # PARSE_ARGV
+        shift @args_local;  # N
+        $prefix = shift @args_local;
+    } else {
+        $prefix = shift @args_local;
+    }
+    my $opts_str  = shift @args_local;
+    my $one_str   = shift @args_local;
+    my $multi_str = shift @args_local;
+    my @opts  = split /;/, ($opts_str  // '');
+    my @one   = split /;/, ($one_str   // '');
+    my @multi = split /;/, ($multi_str // '');
+    my %is_opt   = map { $_ => 1 } @opts;
+    my %is_one   = map { $_ => 1 } @one;
+    my %is_multi = map { $_ => 1 } @multi;
+
+    # Remaining are the values to parse. If none given explicitly, use ARGN.
+    my @vals;
+    if (@args_local) {
+        @vals = @args_local;
+    } else {
+        my $argn = _lookup('ARGN', $scope) // '';
+        @vals = split /;/, $argn;
+    }
+
+    # Initialize all output vars to empty so the "not set" check works
+    $scope->{vars}{"${prefix}_${_}"} = '' for @opts;
+    $scope->{vars}{"${prefix}_${_}"} = '' for @one;
+    $scope->{vars}{"${prefix}_${_}"} = '' for @multi;
+    my @unparsed;
+    my @keywords_missing_values;
+
+    my $current_key;
+    my $current_kind;  # 'one' or 'multi'
+    my @current_multi;
+    my $commit = sub {
+        return unless defined $current_key;
+        if ($current_kind eq 'one') {
+            # one-value keyword: value in @current_multi (possibly empty)
+            if (@current_multi == 0) {
+                push @keywords_missing_values, $current_key;
+            } else {
+                $scope->{vars}{"${prefix}_${current_key}"} = $current_multi[0];
+                # anything extra goes to unparsed
+                push @unparsed, @current_multi[1..$#current_multi] if @current_multi > 1;
+            }
+        } else {
+            # multi
+            if (@current_multi == 0) {
+                push @keywords_missing_values, $current_key;
+            } else {
+                $scope->{vars}{"${prefix}_${current_key}"} = join(';', @current_multi);
+            }
+        }
+        $current_key = undef;
+        $current_kind = undef;
+        @current_multi = ();
+    };
+
+    for my $v (@vals) {
+        if ($is_opt{$v}) {
+            $commit->();
+            $scope->{vars}{"${prefix}_$v"} = 'TRUE';
+        } elsif ($is_one{$v}) {
+            $commit->();
+            $current_key = $v; $current_kind = 'one';
+        } elsif ($is_multi{$v}) {
+            $commit->();
+            $current_key = $v; $current_kind = 'multi';
+        } else {
+            if (defined $current_key) {
+                push @current_multi, $v;
+            } else {
+                push @unparsed, $v;
+            }
+        }
+    }
+    $commit->();
+    $scope->{vars}{"${prefix}_UNPARSED_ARGUMENTS"} = join(';', @unparsed);
+    $scope->{vars}{"${prefix}_KEYWORDS_MISSING_VALUES"} = join(';', @keywords_missing_values);
+};
 $builtins{'cmake_print_variables'} = sub { };
 $builtins{'cmake_print_properties'} = sub { };
 $builtins{'block'} = sub { };    # CMake 3.25+ scoping
 $builtins{'endblock'} = sub { };
 
-$builtins{'install'} = sub { };          # stub — we don't install
+$builtins{'install'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # Minimal install() for TriBITS use. Accumulates entries into
+    # $state->{install_rules}; the generator emits an install script.
+    #
+    # Supported forms:
+    #   install(TARGETS tgt... [EXPORT E] [DESTINATION d]
+    #     [RUNTIME|LIBRARY|ARCHIVE|INCLUDES DESTINATION d] ...)
+    #   install(FILES files... DESTINATION d)
+    #   install(PROGRAMS files... DESTINATION d)
+    #   install(DIRECTORY dirs... DESTINATION d)
+    # Everything else is ignored silently.
+    $state->{install_rules} //= [];
+    return unless @$args;
+    my $kind = shift @$args;
+
+    if ($kind eq 'TARGETS') {
+        my @targets;
+        while (@$args && $args->[0] !~ /^(EXPORT|DESTINATION|RUNTIME|LIBRARY|ARCHIVE|INCLUDES|FRAMEWORK|BUNDLE|RESOURCE|OBJECTS|PUBLIC_HEADER|OPTIONAL|COMPONENT|NAMELINK_SKIP|NAMELINK_ONLY)$/) {
+            push @targets, shift @$args;
+        }
+        # Default dest per target type
+        my %dest_by_type = (RUNTIME=>'bin', LIBRARY=>'lib', ARCHIVE=>'lib',
+                             INCLUDES=>'include', PUBLIC_HEADER=>'include');
+        my $generic_dest;
+        my $export_set;
+        while (@$args) {
+            my $kw = shift @$args;
+            if ($kw eq 'DESTINATION') { $generic_dest = shift @$args; }
+            elsif ($kw =~ /^(RUNTIME|LIBRARY|ARCHIVE|INCLUDES|FRAMEWORK|BUNDLE|RESOURCE|OBJECTS|PUBLIC_HEADER)$/) {
+                # next is usually DESTINATION <dir>, or more props we skip
+                if (@$args && $args->[0] eq 'DESTINATION') {
+                    shift @$args;
+                    $dest_by_type{$kw} = shift @$args;
+                }
+            } elsif ($kw eq 'EXPORT') {
+                $export_set = shift @$args;
+            } elsif ($kw eq 'COMPONENT') {
+                shift @$args;
+            }
+        }
+        for my $t (@targets) {
+            push @{$state->{install_rules}}, {
+                kind => 'target',
+                target => $t,
+                dest_runtime => $dest_by_type{RUNTIME} // $generic_dest // 'bin',
+                dest_library => $dest_by_type{LIBRARY} // $generic_dest // 'lib',
+                dest_archive => $dest_by_type{ARCHIVE} // $generic_dest // 'lib',
+            };
+            if ($export_set) {
+                push @{$state->{export_sets}{$export_set} //= []}, $t;
+            }
+        }
+        return;
+    }
+
+    if ($kind eq 'EXPORT') {
+        # install(EXPORT <set> DESTINATION dir [FILE name] [NAMESPACE ns])
+        my $name = shift @$args;
+        my ($dest, $file, $namespace);
+        while (@$args) {
+            my $kw = shift @$args;
+            if ($kw eq 'DESTINATION') { $dest = shift @$args; }
+            elsif ($kw eq 'FILE')      { $file = shift @$args; }
+            elsif ($kw eq 'NAMESPACE') { $namespace = shift @$args; }
+            else { shift @$args; }
+        }
+        push @{$state->{install_rules}}, {
+            kind => 'export', name => $name, dest => $dest // '.',
+            file => $file // "${name}Targets.cmake",
+            namespace => $namespace // '',
+        };
+        return;
+    }
+
+    if ($kind eq 'FILES' || $kind eq 'PROGRAMS') {
+        my @files;
+        my $dest;
+        my $rename;
+        while (@$args) {
+            my $a = shift @$args;
+            if ($a eq 'DESTINATION') { $dest = shift @$args; }
+            elsif ($a eq 'RENAME')   { $rename = shift @$args; }
+            elsif ($a =~ /^(COMPONENT|PERMISSIONS|OPTIONAL|CONFIGURATIONS)$/) {
+                shift @$args;  # skip value (approximation)
+            } else {
+                push @files, $a;
+            }
+        }
+        push @{$state->{install_rules}}, {
+            kind => 'file', files => \@files, dest => $dest // '.',
+            mode => ($kind eq 'PROGRAMS' ? '0755' : '0644'),
+            rename => $rename,
+            source_dir => $state->{current_source_dir},
+            binary_dir => $state->{current_binary_dir},
+        };
+        return;
+    }
+
+    if ($kind eq 'DIRECTORY') {
+        my @dirs;
+        my $dest;
+        my @patterns;
+        while (@$args) {
+            my $a = shift @$args;
+            if ($a eq 'DESTINATION') { $dest = shift @$args; }
+            elsif ($a eq 'FILES_MATCHING') { next; }
+            elsif ($a eq 'PATTERN') {
+                my $pat = shift @$args;
+                # Optional EXCLUDE / PERMISSIONS after
+                while (@$args && $args->[0] =~ /^(EXCLUDE|PERMISSIONS|OWNER_READ|OWNER_WRITE|OWNER_EXECUTE|GROUP_READ|GROUP_EXECUTE|WORLD_READ|WORLD_EXECUTE)$/) {
+                    shift @$args;
+                }
+                push @patterns, $pat;
+            } elsif ($a =~ /^(COMPONENT|PERMISSIONS|OPTIONAL|USE_SOURCE_PERMISSIONS|DIRECTORY_PERMISSIONS|FILE_PERMISSIONS)$/) {
+                # skip next value if it looks like one
+                shift @$args if @$args && $args->[0] !~ /^(DESTINATION|PATTERN)$/;
+            } else {
+                push @dirs, $a;
+            }
+        }
+        push @{$state->{install_rules}}, {
+            kind => 'directory', dirs => \@dirs, dest => $dest // '.',
+            patterns => \@patterns,
+            source_dir => $state->{current_source_dir},
+            binary_dir => $state->{current_binary_dir},
+        };
+        return;
+    }
+    # CODE, SCRIPT, EXPORT: unsupported (silently)
+};
 $builtins{'export'} = sub { };           # stub
 $builtins{'enable_testing'} = sub { };   # stub
 $builtins{'add_test'} = sub { };         # stub (we can add later)
@@ -2196,6 +3121,7 @@ $builtins{'add_subdirectory'} = sub {
     } else {
         $binary_subdir = File::Spec->catdir($state->{current_binary_dir}, $subdir);
     }
+    warn "SmakCMake: add_subdirectory($source_subdir)\n" if $ENV{SMAK_CMAKE_DEBUG};
     my $sub_cmake = "$source_subdir/CMakeLists.txt";
     return unless -f $sub_cmake;
 
@@ -2277,6 +3203,213 @@ sub generate_makefiles {
     # Top-level Makefile (for `make` compatibility — not strictly needed
     # for smak since SmakCMake reads CMakeFiles/ directly)
     _write_top_makefile($state);
+
+    # Emit an install.sh script derived from the install() rules we
+    # captured during interp. `smak install` runs it.
+    _write_install_script($state);
+}
+
+sub _write_install_script {
+    my ($state) = @_;
+    my @rules = @{$state->{install_rules} // []};
+    my $path  = $state->{build_dir} . "/install.sh";
+    open(my $fh, '>', $path) or die "write $path: $!";
+    my $configured_prefix = '/usr/local';
+    if ($state->{root_scope}) {
+        my $rs = $state->{root_scope};
+        my $p = $rs->{vars}{CMAKE_INSTALL_PREFIX} // $rs->{cache}{CMAKE_INSTALL_PREFIX};
+        $configured_prefix = $p if defined $p && $p ne '';
+    }
+    print $fh "#!/bin/bash\n";
+    print $fh "# Generated by SmakCMakeInterp\n";
+    print $fh ": \"\${CMAKE_INSTALL_PREFIX:=$configured_prefix}\"\n";
+    print $fh <<'BANNER';
+: "${DESTDIR:=}"
+PREFIX="${DESTDIR}${CMAKE_INSTALL_PREFIX}"
+_skipped=0
+_ok=0
+_mkdir() { mkdir -p "$1"; }
+_cp_file() { # src dest_dir mode
+    if [ ! -e "$1" ]; then _skipped=$((_skipped+1)); return 0; fi
+    _mkdir "$2" || return 0
+    if install -m "$3" "$1" "$2/" 2>/dev/null; then
+        _ok=$((_ok+1))
+    else
+        _skipped=$((_skipped+1))
+    fi
+}
+_cp_dir() { # src dest_dir [mode: dir|contents, default dir]
+    _mode="${3:-dir}"
+    if [ ! -d "$1" ]; then _skipped=$((_skipped+1)); return 0; fi
+    _mkdir "$2" || return 0
+    if [ "$_mode" = "contents" ]; then
+        if cp -a "$1/." "$2/" 2>/dev/null; then _ok=$((_ok+1)); else _skipped=$((_skipped+1)); fi
+    else
+        if cp -a "$1" "$2/" 2>/dev/null; then _ok=$((_ok+1)); else _skipped=$((_skipped+1)); fi
+    fi
+}
+_cp_file_rename() { # src dest_dir new_name mode
+    if [ ! -e "$1" ]; then _skipped=$((_skipped+1)); return 0; fi
+    _mkdir "$2" || return 0
+    if install -m "$4" "$1" "$2/$3" 2>/dev/null; then
+        _ok=$((_ok+1))
+    else
+        _skipped=$((_skipped+1))
+    fi
+}
+BANNER
+
+    for my $r (@rules) {
+        if ($r->{kind} eq 'target') {
+            my $t = $state->{targets}{$r->{target}};
+            next unless $t;
+            next if $t->{imported};
+            my $tbin = $t->{binary_dir} // $state->{build_dir};
+            if ($t->{type} eq 'library' && ($t->{libtype} // 'static') eq 'static') {
+                my $src = "$tbin/lib$r->{target}.a";
+                my $dest = "\$PREFIX/$r->{dest_archive}";
+                print $fh qq(_cp_file "$src" "$dest" 0644\n);
+            } elsif ($t->{type} eq 'library' && $t->{libtype} eq 'shared') {
+                my $src = "$tbin/lib$r->{target}.so";
+                my $dest = "\$PREFIX/$r->{dest_library}";
+                print $fh qq(_cp_file "$src" "$dest" 0755\n);
+            } elsif ($t->{type} eq 'executable') {
+                my $src = "$tbin/$r->{target}";
+                my $dest = "\$PREFIX/$r->{dest_runtime}";
+                print $fh qq(_cp_file "$src" "$dest" 0755\n);
+            }
+        } elsif ($r->{kind} eq 'file') {
+            my $dest = $r->{dest} =~ m{^/} ? $r->{dest} : "\$PREFIX/$r->{dest}";
+            for my $f (@{$r->{files}}) {
+                my $src = $f;
+                unless ($src =~ m{^/}) {
+                    # Try binary_dir first (generated), then source_dir
+                    my $cand = "$r->{binary_dir}/$f";
+                    if (-e $cand) { $src = $cand; }
+                    else { $src = "$r->{source_dir}/$f"; }
+                }
+                if ($r->{rename}) {
+                    print $fh qq(_cp_file_rename "$src" "$dest" "$r->{rename}" $r->{mode}\n);
+                } else {
+                    print $fh qq(_cp_file "$src" "$dest" $r->{mode}\n);
+                }
+            }
+        } elsif ($r->{kind} eq 'export') {
+            # Generate a Targets.cmake file with IMPORTED interface
+            # libraries for each target in the export set. Honours each
+            # target's EXPORT_NAME property (e.g., TriBITS sets
+            # `pkg_all_libs` → exports as `pkg::all_libs`).
+            my @targets = @{$state->{export_sets}{$r->{name}} // []};
+            next unless @targets;
+            my $dest = $r->{dest} =~ m{^/} ? $r->{dest} : "\$PREFIX/$r->{dest}";
+            my $here = "$state->{build_dir}/_export_$r->{name}_$r->{file}";
+            open(my $efh, '>', $here) or next;
+            print $efh "# Generated by SmakCMakeInterp install(EXPORT)\n";
+            for my $tname (@targets) {
+                my $t = $state->{targets}{$tname};
+                next unless $t;
+                my $export_name = $t->{properties}{EXPORT_NAME} // $tname;
+                my $exported = $r->{namespace} ? "$r->{namespace}$export_name" : $export_name;
+                print $efh "if (NOT TARGET $exported)\n";
+                print $efh "  add_library($exported INTERFACE IMPORTED)\n";
+                # For an INTERFACE-typed target, INTERFACE_LINK_LIBRARIES
+                # is what consumers transitively pick up. Translate the
+                # original target's link_libraries / interface_link_libraries.
+                my @ill = (@{$t->{interface_link_libraries} // []},
+                           @{$t->{link_libraries} // []});
+                my %seen;
+                my @resolved;
+                # Build a name→exported map for in-export-set targets so we
+                # can rewrite local refs to their namespaced exported names.
+                my %export_map;
+                for my $tn (@targets) {
+                    my $tt = $state->{targets}{$tn} or next;
+                    my $en = $tt->{properties}{EXPORT_NAME} // $tn;
+                    $export_map{$tn} = $r->{namespace} ? "$r->{namespace}$en" : $en;
+                }
+                for my $dep (@ill) {
+                    next unless defined $dep && $dep ne '';
+                    next if $dep =~ /^(PUBLIC|PRIVATE|INTERFACE)$/;
+                    next if $seen{$dep}++;
+                    my $rep = $export_map{$dep} // $dep;
+                    push @resolved, $rep;
+                }
+                if ($t->{type} eq 'library' && ($t->{libtype} // 'static') ne 'interface') {
+                    my $lib_dest = ($t->{libtype} // 'static') eq 'static'
+                        ? "lib/lib$tname.a" : "lib/lib$tname.so";
+                    unshift @resolved, "\${CMAKE_CURRENT_LIST_DIR}/../../../$lib_dest";
+                }
+                # Heuristic for TriBITS: a target with EXPORT_NAME=all_libs
+                # exports as `${pkg}::all_libs` and is meant to aggregate all
+                # OTHER non-`*_all_libs` targets in the same export set.
+                # If no link libraries were captured, link it to those.
+                if ($export_name eq 'all_libs' && !@resolved) {
+                    for my $tn (@targets) {
+                        next if $tn eq $tname;
+                        next if $tn =~ /_all_libs$/;
+                        my $en = $state->{targets}{$tn}{properties}{EXPORT_NAME} // $tn;
+                        my $en_full = $r->{namespace} ? "$r->{namespace}$en" : $en;
+                        push @resolved, $en_full;
+                    }
+                }
+                if (@resolved) {
+                    print $efh "  set_property(TARGET $exported APPEND PROPERTY INTERFACE_LINK_LIBRARIES @resolved)\n";
+                }
+                # INCLUDE_DIRECTORIES — point at installed include dir
+                print $efh "  set_property(TARGET $exported APPEND PROPERTY INTERFACE_INCLUDE_DIRECTORIES \"\${CMAKE_CURRENT_LIST_DIR}/../../../include\")\n";
+                print $efh "endif()\n";
+            }
+            close($efh);
+            print $fh qq(_cp_file_rename "$here" "$dest" "$r->{file}" 0644\n);
+        } elsif ($r->{kind} eq 'directory') {
+            my $dest = $r->{dest} =~ m{^/} ? $r->{dest} : "\$PREFIX/$r->{dest}";
+            for my $d (@{$r->{dirs}}) {
+                my $src = $d;
+                my $trailing = ($src =~ m{/$}) ? 1 : 0;
+                unless ($src =~ m{^/}) {
+                    $src = "$r->{source_dir}/$d";
+                    $trailing = 1 if $d =~ m{/$};
+                }
+                $src =~ s{/$}{};
+                my $mode = $trailing ? 'contents' : 'dir';
+                print $fh qq(_cp_dir "$src" "$dest" $mode\n);
+            }
+        }
+    }
+    # Post-install: append IMPORTED target shims for system TPLs that
+    # TriBITS would normally emit. This makes the installed config
+    # compatible with consumers (e.g. Xyce) that look for BLAS::all_libs,
+    # LAPACK::all_libs, AMD::all_libs.
+    print $fh <<'TPLPATCH';
+
+# Define IMPORTED targets for common system TPLs so consumers' `if (TARGET
+# X::all_libs)` checks succeed. Skipped silently if the cmake dir wasn't
+# created (no Trilinos install).
+_trilinos_dir="$PREFIX/lib/cmake/Trilinos"
+if [ -f "$_trilinos_dir/TrilinosConfig.cmake" ]; then
+    if ! grep -q "TPL_SHIMS_BEGIN" "$_trilinos_dir/TrilinosConfig.cmake"; then
+        cat >> "$_trilinos_dir/TrilinosConfig.cmake" <<'TPL_SHIMS_BEGIN'
+
+# === TPL_SHIMS_BEGIN === appended by smak install ===
+foreach(_tpl_pair "BLAS:blas" "LAPACK:lapack" "AMD:amd")
+    string(REPLACE ":" ";" _tpl_pair "${_tpl_pair}")
+    list(GET _tpl_pair 0 _tpl)
+    list(GET _tpl_pair 1 _libname)
+    if(NOT TARGET ${_tpl}::all_libs)
+        add_library(${_tpl}::all_libs INTERFACE IMPORTED)
+        set_target_properties(${_tpl}::all_libs PROPERTIES
+            INTERFACE_LINK_LIBRARIES "-l${_libname}")
+    endif()
+endforeach()
+# === TPL_SHIMS_END ===
+TPL_SHIMS_BEGIN
+    fi
+fi
+
+TPLPATCH
+    print $fh qq(echo "install: \$_ok files installed, \$_skipped missing"\n);
+    close($fh);
+    chmod 0755, $path;
 }
 
 # Write rules for add_custom_command outputs into a single rules.make.
@@ -2442,7 +3575,7 @@ sub _write_cmake_cache {
     open(my $fh, '>', "$build_dir/CMakeCache.txt") or die "write CMakeCache.txt: $!";
     print $fh "# Generated by SmakCMakeInterp\n";
     print $fh "CMAKE_HOME_DIRECTORY:INTERNAL=$state->{source_dir}\n";
-    print $fh "CMAKE_COMMAND:INTERNAL=/usr/local/src/smak/cmake-install/bin/cmake\n";
+    print $fh "CMAKE_COMMAND:INTERNAL=" . _cmake_install_root() . "/bin/cmake\n";
     print $fh "CMAKE_C_COMPILER:FILEPATH=/usr/bin/cc\n";
     print $fh "CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++\n";
     print $fh "CMAKE_Fortran_COMPILER:FILEPATH=/usr/bin/gfortran\n";
@@ -2467,14 +3600,25 @@ sub _target_sources_with_paths {
     my ($t, $state) = @_;
     my @out;
     for my $src (@{$t->{sources}}) {
-        my $src_path = $src =~ m{^/} ? $src
-            : File::Spec->catfile($t->{source_dir}, $src);
+        my $src_path = _resolve_source_path($src, $t);
         my $obj_rel = $src;
         $obj_rel =~ s{^.*/}{};  # basename
         my $obj = "CMakeFiles/" . _target_name_from_dir($t) . ".dir/$obj_rel.o";
         push @out, { src => $src_path, obj => $obj };
     }
     return @out;
+}
+
+# Resolve a relative source path against the target's binary_dir first
+# (for configure_file-generated sources), then source_dir.
+sub _resolve_source_path {
+    my ($src, $t) = @_;
+    return $src if $src =~ m{^/};
+    if ($t->{binary_dir}) {
+        my $b = File::Spec->catfile($t->{binary_dir}, $src);
+        return $b if -e $b;
+    }
+    return File::Spec->catfile($t->{source_dir}, $src);
 }
 
 sub _target_name_from_dir {
@@ -2497,7 +3641,7 @@ sub _write_flags_make {
     for my $lang (sort keys %langs) {
         print $fh "# compile $lang with ", _compiler_for_lang($lang), "\n";
         print $fh "${lang}_DEFINES = ", ($t->{compile_definitions} // ''), "\n";
-        print $fh "${lang}_INCLUDES = ", _include_flags($t), "\n";
+        print $fh "${lang}_INCLUDES = ", _include_flags($t, $state), "\n";
         print $fh "${lang}_FLAGS = ", ($t->{compile_options} // ''), "\n\n";
     }
     close($fh);
@@ -2528,8 +3672,7 @@ sub _write_depend_info {
     print $fh "set(CMAKE_DEPENDS_LANGUAGES\n  \"$lang\"\n  )\n";
     print $fh "set(CMAKE_DEPENDS_DEPENDENCY_FILES\n";
     for my $src (@{$t->{sources}}) {
-        my $src_path = $src =~ m{^/} ? $src
-            : File::Spec->catfile($t->{source_dir}, $src);
+        my $src_path = _resolve_source_path($src, $t);
         my $obj_base = $src;
         $obj_base =~ s{^.*/}{};
         my $obj = "$obj_prefix/$obj_base.o";
@@ -2625,6 +3768,13 @@ sub _resolve_link_libraries {
             push @out, $lib;
             next;
         }
+        # Namespaced "Foo::all_libs" or "Foo::Bar" with no matching target —
+        # strip namespace and pass the package as -lFoo. Common for find_package
+        # imports that didn't resolve to a known IMPORTED target.
+        if ($lib =~ /^([^:]+)::/) {
+            push @out, "-l$1";
+            next;
+        }
         # Bare name — pass as -lname
         push @out, "-l$lib";
     }
@@ -2651,8 +3801,24 @@ sub _compiler_for_lang {
 }
 
 sub _include_flags {
-    my ($t) = @_;
+    my ($t, $state) = @_;
     my @inc = @{$t->{include_directories} // []};
+    # Also merge any TPL_*_INCLUDE_DIRS set in the root scope. Strictly a
+    # TriBITS workaround: the proper path is imported-target INTERFACE
+    # propagation, which we don't fully model. Adding these globally is
+    # harmless for compile lines and avoids manual target wiring.
+    if ($state && $state->{root_scope}) {
+        my $rs = $state->{root_scope};
+        for my $name (keys %{$rs->{vars}}) {
+            next unless $name =~ /^TPL_.+_INCLUDE_DIRS$/;
+            my $v = $rs->{vars}{$name};
+            next unless defined $v && $v ne '';
+            next if $v =~ /-NOTFOUND$/;
+            for my $d (split /;/, $v) {
+                push @inc, $d if $d ne '' && $d !~ /-NOTFOUND$/;
+            }
+        }
+    }
     my %seen;
     @inc = grep { $_ ne '' && !$seen{$_}++ } @inc;
     return join(' ', map { "-I$_" } @inc);
@@ -2663,7 +3829,9 @@ sub _include_flags {
 # Parse + evaluate a project rooted at $source_dir, targeting $build_dir.
 # Returns the state hash (targets, variables, etc.).
 sub interpret_project {
-    my ($source_dir, $build_dir) = @_;
+    my ($source_dir, $build_dir, $cli_defines, $cache_files) = @_;
+    $cli_defines //= {};
+    $cache_files //= [];
     $source_dir = File::Spec->rel2abs($source_dir);
     $build_dir  = File::Spec->rel2abs($build_dir);
 
@@ -2702,11 +3870,25 @@ sub interpret_project {
     $root_scope->{vars}{CMAKE_C_COMPILER_ID} = 'GNU';
     $root_scope->{vars}{CMAKE_CXX_COMPILER_ID} = 'GNU';
     $root_scope->{vars}{CMAKE_SIZEOF_VOID_P} = 8;
-    $root_scope->{vars}{CMAKE_COMMAND} = '/usr/local/src/smak/cmake-install/bin/cmake';
+    $root_scope->{vars}{CMAKE_COMMAND} = _cmake_install_root() . '/bin/cmake';
+
+    # Initial cache files from cmake -C
+    for my $cache (@$cache_files) {
+        next unless -f $cache;
+        my $cmds = parse_file($cache);
+        eval_commands($cmds, $state, $root_scope);
+    }
+    # CLI -D overrides (seed as top-scope vars + cache)
+    for my $k (sort keys %$cli_defines) {
+        $root_scope->{vars}{$k}  = $cli_defines->{$k};
+        $root_scope->{cache}{$k} = $cli_defines->{$k};
+    }
 
     my $commands = parse_file("$source_dir/CMakeLists.txt");
     eval_commands($commands, $state, $root_scope);
 
+    # Stash the final scope so the generator can consult vars/cache.
+    $state->{root_scope} = $root_scope;
     return $state;
 }
 

@@ -114,6 +114,9 @@ our %EXPORT_TAGS = (
     all => \@EXPORT_OK,
 );
 
+# Names of make functions we've already warned as unsupported
+our %SmakUnknownFunc;
+
 # Separate hashes for different rule types
 our %fixed_rule;
 our %fixed_deps;
@@ -1784,12 +1787,15 @@ sub expand_vars {
                     $replacement = join(' ', @result);
                 }
             } elsif ($func eq 'wildcard') {
-                # $(wildcard pattern...)
+                # $(wildcard pattern...) — GNU make only returns names of
+                # files that actually exist. Perl's glob() returns a
+                # non-wildcard pattern verbatim even when the file is
+                # missing, so filter to -e.
                 if (@args >= 1) {
                     my @patterns = split /\s+/, $args[0];
                     my @files;
                     for my $pattern (@patterns) {
-                        push @files, glob($pattern);
+                        push @files, grep { -e $_ } glob($pattern);
                     }
                     $replacement = join(' ', @files);
                 }
@@ -1857,9 +1863,46 @@ sub expand_vars {
                     }
                     $replacement = join(' ', @resolved);
                 }
+            } elsif ($func eq 'or') {
+                # $(or cond1[,cond2[,...]]) — first non-empty arg, else ''
+                $replacement = '';
+                for my $a (@args) {
+                    if (defined $a && $a ne '') { $replacement = $a; last; }
+                }
+            } elsif ($func eq 'and') {
+                # $(and cond1[,cond2[,...]]) — last arg if all non-empty, else ''
+                $replacement = '';
+                if (@args) {
+                    my $all = 1;
+                    for my $a (@args) {
+                        if (!defined $a || $a eq '') { $all = 0; last; }
+                    }
+                    $replacement = $all ? $args[-1] : '';
+                }
+            } elsif ($func eq 'if') {
+                # $(if cond,then[,else]) — cond already expanded
+                if (@args >= 2) {
+                    $replacement = (defined $args[0] && $args[0] ne '')
+                                   ? $args[1]
+                                   : (@args >= 3 ? $args[2] : '');
+                }
+            } elsif ($func eq 'error') {
+                # $(error message) — make would exit; we warn and emit empty
+                warn "smak: *** " . ($args[0] // '') . ".  Stop.\n";
+                $replacement = '';
+            } elsif ($func eq 'warning') {
+                warn "smak: " . ($args[0] // '') . "\n";
+                $replacement = '';
+            } elsif ($func eq 'info') {
+                print STDOUT ($args[0] // ''), "\n";
+                $replacement = '';
             } else {
-                # Unknown function, leave as-is
-                $replacement = "\$($content)";
+                # Unknown function — do NOT leave $(content) in the text
+                # (that's the classic "iteration limit" loop). Emit empty
+                # and warn once.
+                warn "smak: unsupported make function '$func' — treating as empty\n"
+                    unless $SmakUnknownFunc{$func}++;
+                $replacement = '';
             }
         } elsif ($content =~ /^(\w+):([^=]*)=(.*)$/) {
             # Substitution reference: $(VAR:pattern=replacement)
@@ -2110,6 +2153,10 @@ sub parse_makefile {
     $MV{PWD} = getcwd();
     $MV{CURDIR} = getcwd();
 
+    # $(MAKEFILE_LIST) is the list of makefiles parsed so far. yosys uses
+    # `YOSYS_SRC := $(dir $(firstword $(MAKEFILE_LIST)))` to locate itself.
+    $MV{MAKEFILE_LIST} = $makefile_path;
+
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
     # Track file mtime and size for cache validation
@@ -2226,6 +2273,42 @@ sub parse_makefile {
             last unless defined $next;
             chomp $next;
             $line .= $next;
+        }
+
+        # Multi-line define VAR [:=|=|+=|?=] ... endef  (GNU make canned recipes)
+        # Must run BEFORE var-assignment parsing so the following lines aren't
+        # misinterpreted as top-level rules/recipes. Skipped entirely in an
+        # inactive conditional branch so we don't assign variables there.
+        if ($line =~ /^\s*define\s+([A-Za-z_][A-Za-z0-9_.-]*)\s*([:?+]?=)?\s*$/) {
+            my ($var, $op) = ($1, $2 // '=');
+            my @body;
+            while (my $dl = <$fh>) {
+                chomp $dl;
+                if ($dl =~ /^\s*endef\s*$/) { last; }
+                push @body, $dl;
+            }
+            if ($cond_stack[-1]{active}) {
+                my $value = join("\n", @body);
+                if ($op eq ':=') {
+                    my $expanded = expand_vars(format_output(transform_make_vars($value)));
+                    $MV{$var} = transform_make_vars($expanded);
+                } elsif ($op eq '+=') {
+                    my $add = transform_make_vars($value);
+                    if (exists $MV{$var} && $MV{$var} ne '') {
+                        $MV{$var} .= "\n$add";
+                    } else {
+                        $MV{$var} = $add;
+                    }
+                } elsif ($op eq '?=') {
+                    unless (exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '') {
+                        $MV{$var} = transform_make_vars($value);
+                    }
+                } else {
+                    $MV{$var} = transform_make_vars($value);
+                }
+                warn "DEBUG: define $var $op ... endef (" . scalar(@body) . " lines)\n" if $ENV{SMAK_DEBUG};
+            }
+            next;
         }
 
         # Handle conditional directives (ifeq, ifdef, ifndef, ifneq, else, endif)
@@ -2357,7 +2440,7 @@ sub parse_makefile {
             }
             next;
         }
-        elsif ($line =~ /^\s*endif\s*$/) {
+        elsif ($line =~ /^\s*endif\s*(?:#.*)?$/) {
             if (@cond_stack <= 1) {
                 warn "Warning: endif without matching if in $makefile\n";
                 next;
@@ -2418,15 +2501,39 @@ sub parse_makefile {
             # Expand variables and functions in the include filename
             $include_files = expand_vars($include_files);
 
-            # Handle multiple includes on one line
-            for my $include_file (split /\s+/, $include_files) {
+            # Handle multiple includes on one line — and glob-expand any
+            # entry containing a shell wildcard (yosys uses
+            # `include $(YOSYS_SRC)/frontends/*/Makefile.inc` etc.).
+            my @include_entries;
+            for my $ent (split /\s+/, $include_files) {
+                next if $ent eq '';
+                if ($ent =~ /[*?\[]/) {
+                    # Resolve relative paths like glob does on-disk
+                    my @matches = glob($ent);
+                    if (!@matches) {
+                        # Also try relative to makefile dir
+                        use File::Basename;
+                        use File::Spec;
+                        my $mf_dir = dirname($makefile);
+                        my $rel = File::Spec->catfile($mf_dir, $ent);
+                        @matches = grep { -f $_ } glob($rel);
+                    } else {
+                        @matches = grep { -f $_ } @matches;
+                    }
+                    push @include_entries, @matches;
+                } else {
+                    push @include_entries, $ent;
+                }
+            }
+
+            for my $include_file (@include_entries) {
                 # Skip empty entries
                 next if $include_file eq '';
-		
+
 		if (defined $missing_inc{$include_file}) {
 		    die "Already missing: $include_file !!!\n";
 		}
-			
+
                 # Determine include path
                 my $include_path = $include_file;
 
@@ -2457,6 +2564,13 @@ sub parse_makefile {
                     # Save current makefile name
                     my $saved_makefile = $makefile;
 
+                    # Append to MAKEFILE_LIST before parsing
+                    if (defined $MV{MAKEFILE_LIST} && $MV{MAKEFILE_LIST} ne '') {
+                        $MV{MAKEFILE_LIST} .= " $include_path";
+                    } else {
+                        $MV{MAKEFILE_LIST} = $include_path;
+                    }
+
                     # Parse included file in-place (variables go into same %MV)
                     parse_included_makefile($include_path);
 
@@ -2480,6 +2594,25 @@ sub parse_makefile {
             my ($ws, $prefix_var, $rest) = ($1, $2, $3);
             my $prefix_val = $cmd_vars{$prefix_var} // $MV{$prefix_var} // '';
             $line = "$ws$prefix_val$rest";
+        }
+
+        # `export VAR ...` / `unexport VAR ...` — drop the leading directive,
+        # allow the rest to fall through to normal assignment parsing.
+        # `export VAR = value` / `export VAR := value` etc. all work this way.
+        # A bare `export VAR` (no = sign) marks it for export; we still set
+        # it as a variable but don't need to actually export to children
+        # since the underlying shell invocations inherit our environment.
+        if ($line =~ /^[ ]*export[ \t]+(.*)$/) {
+            my $rest = $1;
+            if ($rest =~ /^[A-Za-z_][A-Za-z0-9_]*\s*([:?+]?=)/) {
+                $line = $rest;  # fall through to assignment
+            } else {
+                # Bare `export FOO` — no-op (variables are already inherited)
+                next;
+            }
+        }
+        if ($line =~ /^[ ]*unexport[ \t]+(.*)$/) {
+            next;  # no-op for our purposes
         }
 
         # Variable assignment (may have leading spaces inside conditionals,
@@ -3048,7 +3181,7 @@ sub parse_included_makefile {
             warn "DEBUG(include): else => active now " . $cond->{active} . "\n" if $ENV{SMAK_DEBUG};
             next;
         }
-        elsif ($line =~ /^\s*endif\s*$/) {
+        elsif ($line =~ /^\s*endif\s*(?:#.*)?$/) {
             if (@cond_stack <= 1) {
                 warn "Warning: endif without matching if in $include_path\n";
                 next;
@@ -5155,7 +5288,11 @@ sub build_target {
 
                             $rule = $rules[$best_variant];
                             $matched_pkey = $pkey;  # Save for multi-output sibling detection
-                            push @deps, @expanded_deps;
+                            # Prepend pattern-matched deps so they come first:
+                            # GNU make's $< is the pattern-matched source, not
+                            # an explicit-prereq addition. Explicit prereqs
+                            # already in @deps at this point.
+                            unshift @deps, @expanded_deps;
                             warn "DEBUG: Using pattern rule variant $best_variant for $target (deps: @expanded_deps)\n" if $ENV{SMAK_DEBUG};
                             last PATTERN_SEARCH;
                         }
@@ -11564,19 +11701,55 @@ sub run_job_master {
                         my $rule_ref = $pattern_rule{$pkey} || '';
                         my $deps_ref = $pattern_deps{$pkey} || [];
                         # Handle both single rule (string) and multiple variants (array)
-                        $rule = ref($rule_ref) eq 'ARRAY' ? $rule_ref->[0] : $rule_ref;
+                        my @rules = ref($rule_ref) eq 'ARRAY' ? @$rule_ref : ($rule_ref);
+                        my @deps_list;
+                        if (ref($deps_ref) eq 'ARRAY' && @$deps_ref && ref($deps_ref->[0]) eq 'ARRAY') {
+                            @deps_list = @$deps_ref;
+                        } elsif (ref($deps_ref) eq 'ARRAY') {
+                            @deps_list = ($deps_ref);
+                        }
+
+                        # Pick the variant whose first dep (pattern source)
+                        # exists on disk. GNU make does the same: try each
+                        # pattern rule variant and use the first whose
+                        # prerequisites can be satisfied.
+                        use Cwd 'getcwd';
+                        my $cwd = getcwd();
+                        my $best = 0;
+                        for (my $i = 0; $i < @rules; $i++) {
+                            my @vd = @{$deps_list[$i] || []};
+                            next unless @vd;
+                            my $first = $vd[0];
+                            $first =~ s/%/$match_stem/g;
+                            my $p = $first =~ m{^/} ? $first : "$cwd/$first";
+                            if (-e $p || -e resolve_vpath($first, $cwd)) {
+                                $best = $i;
+                                last;
+                            }
+                        }
+
+                        $rule = $rules[$best];
                         $stem = $match_stem;  # Save stem for $* expansion
                         $matched_pattern_key = $pkey;  # Save for multi-output detection
 
-                        # Add pattern rule deps (needed for $< expansion and dependency tracking)
-                        my @pdeps = (ref($deps_ref) eq 'ARRAY' && @$deps_ref && ref($deps_ref->[0]) eq 'ARRAY')
-                                    ? @{$deps_ref->[0]} : (ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ());
+                        # Add pattern rule deps (needed for $< expansion and dependency tracking).
+                        # Prepend so pattern-matched source is first ($<).
+                        my @pdeps = @{$deps_list[$best] || []};
+                        my @new_pdeps;
                         for my $pd (@pdeps) {
                             my $expanded_dep = $pd;
                             $expanded_dep =~ s/%/$stem/g;
-                            push @deps, $expanded_dep unless grep { $_ eq $expanded_dep } @deps;
+                            push @new_pdeps, $expanded_dep;
                         }
-                        print STDERR "Found pattern rule for target '$target' (stem='$stem')\n" if $ENV{SMAK_DEBUG};
+                        # If pattern source already appears in @deps (e.g., it
+                        # was auto-added earlier), remove it first so the
+                        # unshift actually puts it at position 0. This
+                        # matters for $< in the recipe.
+                        my %new_set = map { $_ => 1 } @new_pdeps;
+                        @deps = grep { !$new_set{$_} } @deps;
+                        unshift @deps, @new_pdeps;
+                        print STDERR "Found pattern rule for target '$target' (variant=$best stem='$stem')\n" if $ENV{SMAK_DEBUG};
+                        print STDERR "  after unshift, deps[0..2] = [" . join(", ", @deps[0..2]) . "]\n" if $ENV{SMAK_DEBUG};
                         last;
                 }
             }

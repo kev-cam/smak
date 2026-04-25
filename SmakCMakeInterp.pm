@@ -2067,8 +2067,10 @@ $builtins{'find_library'} = sub {
     my @names;
     my @paths = (
         '/usr/lib/x86_64-linux-gnu',
+        '/usr/lib64',
         '/usr/lib', '/usr/local/lib',
-        '/lib/x86_64-linux-gnu', '/lib',
+        '/usr/local/lib64',
+        '/lib/x86_64-linux-gnu', '/lib64', '/lib',
     );
     while (@$args) {
         my $kw = shift @$args;
@@ -3078,8 +3080,17 @@ sub _find_package_builtin {
             if (-f '/usr/include/fftw3.h') {
                 $scope->{vars}{FFTW_FOUND} = 'TRUE';
                 $scope->{vars}{FFTW_INCLUDE_DIRS} = '/usr/include';
-                $scope->{vars}{FFTW_DOUBLE_LIB} = '/usr/lib/x86_64-linux-gnu/libfftw3.so';
-                $scope->{vars}{FFTW_LIBRARIES} = '/usr/lib/x86_64-linux-gnu/libfftw3.so';
+                # Probe Debian-style multiarch path then RH-style /usr/lib64.
+                my $libpath;
+                for my $cand ('/usr/lib/x86_64-linux-gnu/libfftw3.so',
+                              '/usr/lib64/libfftw3.so',
+                              '/usr/lib/libfftw3.so') {
+                    if (-e $cand) { $libpath = $cand; last; }
+                }
+                if (defined $libpath) {
+                    $scope->{vars}{FFTW_DOUBLE_LIB} = $libpath;
+                    $scope->{vars}{FFTW_LIBRARIES}  = $libpath;
+                }
             }
         },
         CURL => sub {
@@ -3400,14 +3411,41 @@ if [ -f "$_trilinos_dir/TrilinosConfig.cmake" ]; then
         cat >> "$_trilinos_dir/TrilinosConfig.cmake" <<'TPL_SHIMS_BEGIN'
 
 # === TPL_SHIMS_BEGIN === appended by smak install ===
+# IMPORTED targets for common system TPLs so consumers' `if (TARGET
+# X::all_libs)` checks succeed. Probes Debian-multiarch and RH-style
+# /usr/lib64 paths; falls back to -l<name> if neither matches so the
+# linker's default search picks it up.
 foreach(_tpl_pair "BLAS:blas" "LAPACK:lapack" "AMD:amd")
     string(REPLACE ":" ";" _tpl_pair "${_tpl_pair}")
     list(GET _tpl_pair 0 _tpl)
     list(GET _tpl_pair 1 _libname)
     if(NOT TARGET ${_tpl}::all_libs)
+        set(_libpath "")
+        foreach(_d "/usr/lib/x86_64-linux-gnu" "/usr/lib64" "/usr/lib" "/usr/local/lib64" "/usr/local/lib")
+            if(EXISTS "${_d}/lib${_libname}.so")
+                set(_libpath "${_d}/lib${_libname}.so")
+                break()
+            elseif(EXISTS "${_d}/lib${_libname}.a")
+                set(_libpath "${_d}/lib${_libname}.a")
+                break()
+            endif()
+        endforeach()
+        if(_libpath STREQUAL "")
+            set(_libpath "-l${_libname}")
+        endif()
         add_library(${_tpl}::all_libs INTERFACE IMPORTED)
         set_target_properties(${_tpl}::all_libs PROPERTIES
-            INTERFACE_LINK_LIBRARIES "-l${_libname}")
+            INTERFACE_LINK_LIBRARIES "${_libpath}")
+    endif()
+endforeach()
+
+# Append the TPL shims to Trilinos::all_libs and Trilinos::all_selected_libs
+# so consumers that just link Trilinos::all_selected_libs (e.g., Xyce) pick
+# up BLAS/LAPACK/AMD transitively without having to mention them.
+foreach(_aggregate Trilinos::all_libs Trilinos::all_selected_libs)
+    if(TARGET ${_aggregate})
+        set_property(TARGET ${_aggregate} APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES BLAS::all_libs LAPACK::all_libs AMD::all_libs)
     endif()
 endforeach()
 # === TPL_SHIMS_END ===
@@ -3879,7 +3917,11 @@ sub interpret_project {
     $root_scope->{vars}{CMAKE_C_COMPILER_ID} = 'GNU';
     $root_scope->{vars}{CMAKE_CXX_COMPILER_ID} = 'GNU';
     $root_scope->{vars}{CMAKE_SIZEOF_VOID_P} = 8;
-    $root_scope->{vars}{CMAKE_COMMAND} = _cmake_install_root() . '/bin/cmake';
+    # Use the bare name so $PATH lookup hits smak's `cmake` wrapper at run
+    # time. add_custom_command rules that invoke `${CMAKE_COMMAND} -P ...`
+    # then route through smak-cmake.pl, which handles -P via the script-eval
+    # interp (no bundled cmake binary required).
+    $root_scope->{vars}{CMAKE_COMMAND} = 'cmake';
 
     # Initial cache files from cmake -C
     for my $cache (@$cache_files) {

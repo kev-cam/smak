@@ -33,13 +33,37 @@ sub _run_real {
 # Decide whether to attempt the smak interp. Non-configure invocations
 # (--build, --install, -E, --version) go straight to real cmake.
 my $is_config = 1;
+my $is_script = 0;
 for my $a (@ARGV) {
     if ($a eq '--build' || $a eq '--install' || $a eq '-E'
-        || $a eq '--version' || $a eq '--help' || $a eq '-P') {
+        || $a eq '--version' || $a eq '--help') {
         $is_config = 0; last;
     }
+    if ($a eq '-P') { $is_script = 1; last; }
 }
 $is_config = 0 if $ENV{SMAK_CMAKE_REAL};
+$is_config = 0 if $is_script;
+
+# `cmake -P script.cmake [-D ...]`: route to the smak interp's script-eval
+# mode so the bundled fallback cmake can be removed entirely. Used by build-
+# time custom commands (e.g., Xyce's BuildTimeStamp.cmake).
+if ($is_script && -f $smak_pl && !$ENV{SMAK_CMAKE_REAL}) {
+    my @args;
+    my $script;
+    for (my $i = 0; $i < @ARGV; $i++) {
+        my $a = $ARGV[$i];
+        if    ($a eq '-D')      { push @args, '-D', $ARGV[++$i]; }
+        elsif ($a =~ /^-D./)    { push @args, $a; }
+        elsif ($a eq '-P')      { $script = $ARGV[++$i]; }
+        # Other flags (e.g., --log-level) ignored.
+    }
+    if (defined $script) {
+        local $ENV{PERLLIB} = ($ENV{PERLLIB} // '') eq '' ? $script_dir : "$script_dir:$ENV{PERLLIB}";
+        my $rc = system('perl', $smak_pl, '-cmake-script', @args, $script);
+        exit 0 if $rc == 0;
+        warn "smak -cmake-script failed (rc=", ($rc >> 8), "); falling back to real cmake\n";
+    }
+}
 
 if ($is_config && -f $smak_pl) {
     # Call smak.pl directly (NOT via the bash wrapper `smak`, which would

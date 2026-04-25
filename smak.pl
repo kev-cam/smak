@@ -13,6 +13,30 @@ use Smak qw(:all);
 use SmakCMake;
 use SmakCMakeInterp;
 
+# -cmake-script <opts> <script.cmake>: cmake -P emulation. Lets the bundled
+# cmake fallback be removed entirely while still supporting build-time
+# scripts (e.g., Xyce's BuildTimeStamp.cmake).
+if (@ARGV && $ARGV[0] eq '-cmake-script') {
+    shift @ARGV;
+    my %initial_vars;
+    my $script_file;
+    while (@ARGV) {
+        my $a = shift @ARGV;
+        if ($a eq '-D') {
+            my $kv = shift @ARGV; next unless defined $kv;
+            $initial_vars{$1} = $2 if $kv =~ /^([^=]+)(?::[^=]+)?=(.*)$/;
+        } elsif ($a =~ /^-D(.+)$/) {
+            $initial_vars{$1} = $2 if $1 =~ /^([^=]+)(?::[^=]+)?=(.*)$/;
+        } elsif (!defined $script_file && $a !~ /^-/) {
+            $script_file = $a;
+        }
+    }
+    die "Usage: smak -cmake-script [-D var=val ...] <script.cmake>\n"
+        unless defined $script_file && -f $script_file;
+    SmakCMakeInterp::run_script($script_file, \%initial_vars);
+    exit 0;
+}
+
 # Check for -cmake option early. Runs SmakCMakeInterp to see how far it
 # gets and what commands it doesn't know, then falls through to the real
 # cmake binary so the build still succeeds while we collect gaps.

@@ -1637,6 +1637,15 @@ $builtins{'string'} = sub {
         my ($in, $sub, $out, $rev) = @$args;
         my $idx = (defined $rev && $rev eq 'REVERSE') ? rindex($in, $sub) : index($in, $sub);
         $scope->{vars}{$out} = $idx;
+    } elsif ($op eq 'TIMESTAMP') {
+        # string(TIMESTAMP <out_var> [<format string>] [UTC])
+        my $out = shift @$args;
+        my $fmt = (@$args && $args->[0] ne 'UTC') ? shift @$args : '%Y-%m-%dT%H:%M:%S';
+        my $utc = (@$args && $args->[0] eq 'UTC') ? 1 : 0;
+        my @t = $utc ? gmtime() : localtime();
+        # Map cmake %Y/%m/%d/%H/%M/%S/%j/%a/%A/%b/%B → strftime
+        require POSIX;
+        $scope->{vars}{$out} = POSIX::strftime($fmt, @t);
     } elsif ($op eq 'STRIP') {
         my ($in, $out) = @$args;
         $in =~ s/^\s+|\s+$//g;
@@ -3888,6 +3897,37 @@ sub interpret_project {
     eval_commands($commands, $state, $root_scope);
 
     # Stash the final scope so the generator can consult vars/cache.
+    $state->{root_scope} = $root_scope;
+    return $state;
+}
+
+# Lightweight cmake -P emulation: evaluate a single .cmake script.
+# No project / no build artifacts — just run the commands with the given
+# -D variables in scope.
+sub run_script {
+    my ($script_file, $cli_defines) = @_;
+    $cli_defines //= {};
+    $script_file = File::Spec->rel2abs($script_file);
+    my $script_dir = $script_file;
+    $script_dir =~ s{/[^/]*$}{};
+    my $state = {
+        source_dir => $script_dir,
+        build_dir  => '.',
+        current_source_dir => $script_dir,
+        current_binary_dir => '.',
+        targets    => {},
+        unknown_commands => [],
+    };
+    my $root_scope = new_scope(undef);
+    $root_scope->{_state} = $state;
+    $root_scope->{vars}{CMAKE_CURRENT_LIST_DIR}  = $script_dir;
+    $root_scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $script_file;
+    $root_scope->{vars}{CMAKE_VERSION} = '3.31.4';
+    for my $k (sort keys %$cli_defines) {
+        $root_scope->{vars}{$k} = $cli_defines->{$k};
+    }
+    my $cmds = parse_file($script_file);
+    eval_commands($cmds, $state, $root_scope);
     $state->{root_scope} = $root_scope;
     return $state;
 }

@@ -18,10 +18,13 @@ install: libsmak-client.so
 	install -d $(DESTDIR)$(PREFIX)/include
 	install -m 0755 libsmak-client.so $(DESTDIR)$(PREFIX)/lib/
 	install -m 0644 smak-client.h $(DESTDIR)$(PREFIX)/include/
+	./smak-install $(DESTDIR)$(PREFIX)
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/lib/libsmak-client.so
 	rm -f $(DESTDIR)$(PREFIX)/include/smak-client.h
+	rm -f $(DESTDIR)$(PREFIX)/bin/smak $(DESTDIR)$(PREFIX)/bin/cmake
+	rm -rf $(DESTDIR)$(PREFIX)/share/smak
 
 clean:
 	rm -f libsmak-client.so

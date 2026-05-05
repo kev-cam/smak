@@ -1790,6 +1790,82 @@ $builtins{'file'} = sub {
     } elsif ($op eq 'MAKE_DIRECTORY') {
         use File::Path qw(make_path);
         for my $d (@$args) { make_path($d); }
+    } elsif ($op eq 'CHMOD' || $op eq 'CHMOD_RECURSE') {
+        # file(CHMOD <files>... PERMISSIONS <perm>...
+        #      [FILE_PERMISSIONS ...] [DIRECTORY_PERMISSIONS ...])
+        my %bit = (
+            OWNER_READ => 0400, OWNER_WRITE => 0200, OWNER_EXECUTE => 0100,
+            GROUP_READ => 0040, GROUP_WRITE => 0020, GROUP_EXECUTE => 0010,
+            WORLD_READ => 0004, WORLD_WRITE => 0002, WORLD_EXECUTE => 0001,
+            SETUID => 04000, SETGID => 02000,
+        );
+        my @paths;
+        my $mode = 0;
+        my $in_perms = 0;
+        while (@$args) {
+            my $a = shift @$args;
+            if ($a =~ /^(PERMISSIONS|FILE_PERMISSIONS|DIRECTORY_PERMISSIONS)$/) {
+                $in_perms = 1;
+                next;
+            }
+            if ($in_perms) {
+                if (exists $bit{$a}) { $mode |= $bit{$a}; }
+                else { unshift @$args, $a; last; }
+            } else {
+                push @paths, $a;
+            }
+        }
+        for my $p (@paths) {
+            chmod($mode, $p) if $mode;
+        }
+    } elsif ($op eq 'COPY' || $op eq 'INSTALL') {
+        # file(COPY <files...> DESTINATION <dir> [...])
+        # file(INSTALL ...) is similar; we treat them the same.
+        use File::Path qw(make_path);
+        use File::Copy qw(copy);
+        my @items;
+        my $dest;
+        my @ignored;  # other options we don't model (FILE_PERMISSIONS, etc.)
+        while (@$args) {
+            my $a = shift @$args;
+            if ($a eq 'DESTINATION') {
+                $dest = shift @$args;
+            } elsif ($a =~ /^(NO_SOURCE_PERMISSIONS|USE_SOURCE_PERMISSIONS|FOLLOW_SYMLINK_CHAIN)$/) {
+                # flag, no arg
+            } elsif ($a =~ /^(FILE_PERMISSIONS|DIRECTORY_PERMISSIONS|FILES_MATCHING|PATTERN|REGEX|EXCLUDE|PERMISSIONS|TYPE|RENAME|OPTIONAL)$/) {
+                # eat one or more args until next keyword
+                while (@$args && $args->[0] !~ /^(DESTINATION|FILE_PERMISSIONS|DIRECTORY_PERMISSIONS|FILES_MATCHING|PATTERN|REGEX|EXCLUDE|PERMISSIONS|NO_SOURCE_PERMISSIONS|USE_SOURCE_PERMISSIONS|FOLLOW_SYMLINK_CHAIN|TYPE|RENAME|OPTIONAL)$/) {
+                    shift @$args;
+                }
+            } else {
+                push @items, $a;
+            }
+        }
+        return unless defined $dest;
+        $dest = File::Spec->catdir($state->{current_binary_dir}, $dest)
+            unless $dest =~ m{^/};
+        make_path($dest);
+        for my $item (@items) {
+            my $src = $item =~ m{^/} ? $item
+                : File::Spec->catfile($state->{current_source_dir}, $item);
+            next unless -e $src;
+            my $base = $item;
+            $base =~ s{.*/}{};
+            my $target = File::Spec->catfile($dest, $base);
+            if (-d $src) {
+                # recursive copy
+                use File::Find;
+                File::Find::find({ wanted => sub {
+                    my $rel = File::Spec->abs2rel($File::Find::name, $src);
+                    my $tgt = $rel eq '.' ? $target
+                                          : File::Spec->catfile($target, $rel);
+                    if (-d $File::Find::name) { make_path($tgt); }
+                    else { copy($File::Find::name, $tgt); }
+                }, no_chdir => 1 }, $src);
+            } else {
+                copy($src, $target);
+            }
+        }
     }
 };
 
@@ -2013,6 +2089,21 @@ $builtins{'set_property'} = sub {
         return;
     }
 
+    if ($scope_kw eq 'TEST') {
+        for my $name (@names) {
+            my $t = $state->{tests}{$name} or next;
+            if ($append) {
+                my $cur = $t->{properties}{$prop} // '';
+                my $sep = $append == 2 ? '' : ';';
+                $cur .= ($cur eq '' ? '' : $sep) . join(';', @vals);
+                $t->{properties}{$prop} = $cur;
+            } else {
+                $t->{properties}{$prop} = join(';', @vals);
+            }
+        }
+        return;
+    }
+
     # Only TARGET scope is wired up end-to-end.  Others are accepted but
     # only stored in {properties} for later lookup.
     for my $name (@names) {
@@ -2059,22 +2150,39 @@ $builtins{'find_program'} = sub {
             return;
         }
     }
-    my $prog = shift @$args;
-    # Shift past NAMES, PATHS, HINTS, DOC, REQUIRED, etc.
-    my @candidates = ($prog);
+    my @candidates;
+    my @search_dirs;
+    # First positional (if not a keyword) is the program name in shorthand form.
+    if (@$args && $args->[0] !~ /^(NAMES|PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES)$/) {
+        push @candidates, shift @$args;
+    }
     while (@$args) {
         my $kw = shift @$args;
         if ($kw eq 'NAMES') {
             while (@$args && $args->[0] !~ /^(PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES)$/) {
                 push @candidates, shift @$args;
             }
+        } elsif ($kw eq 'HINTS' || $kw eq 'PATHS') {
+            while (@$args && $args->[0] !~ /^(NAMES|PATHS|HINTS|DOC|REQUIRED|NO_DEFAULT_PATH|PATH_SUFFIXES)$/) {
+                my $h = shift @$args;
+                if ($h eq 'ENV') {
+                    my $varname = shift @$args;
+                    next unless defined $varname;
+                    my $val = $ENV{$varname};
+                    next unless defined $val && length $val;
+                    push @search_dirs, split /:/, $val;
+                } else {
+                    push @search_dirs, $h;
+                }
+            }
         } else {
             last if $kw =~ /^(REQUIRED|NO_DEFAULT_PATH)$/;
             # eat arg
         }
     }
+    push @search_dirs, split /:/, $ENV{PATH} // '/usr/bin:/usr/local/bin';
     for my $cand (@candidates) {
-        for my $dir (split /:/, $ENV{PATH} // '/usr/bin:/usr/local/bin') {
+        for my $dir (@search_dirs) {
             if (-x "$dir/$cand") {
                 $scope->{vars}{$out} = "$dir/$cand";
                 return;
@@ -2942,8 +3050,72 @@ $builtins{'install'} = sub {
     # CODE, SCRIPT, EXPORT: unsupported (silently)
 };
 $builtins{'export'} = sub { };           # stub
-$builtins{'enable_testing'} = sub { };   # stub
-$builtins{'add_test'} = sub { };         # stub (we can add later)
+$builtins{'enable_testing'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    $state->{testing_enabled_dirs}{$state->{current_binary_dir}} = 1;
+};
+$builtins{'add_test'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    return unless @$args;
+    my ($name, @cmd, $working_dir, @configurations, $expand_lists);
+    if ($args->[0] eq 'NAME') {
+        # add_test(NAME <name> COMMAND <cmd> [args...] [CONFIGURATIONS ...]
+        #         [WORKING_DIRECTORY <dir>] [COMMAND_EXPAND_LISTS])
+        shift @$args;
+        $name = shift @$args;
+        while (@$args) {
+            my $kw = shift @$args;
+            if ($kw eq 'COMMAND') {
+                while (@$args && $args->[0] !~ /^(CONFIGURATIONS|WORKING_DIRECTORY|COMMAND_EXPAND_LISTS)$/) {
+                    push @cmd, shift @$args;
+                }
+            } elsif ($kw eq 'WORKING_DIRECTORY') {
+                $working_dir = shift @$args;
+            } elsif ($kw eq 'CONFIGURATIONS') {
+                while (@$args && $args->[0] !~ /^(COMMAND|WORKING_DIRECTORY|COMMAND_EXPAND_LISTS)$/) {
+                    push @configurations, shift @$args;
+                }
+            } elsif ($kw eq 'COMMAND_EXPAND_LISTS') {
+                $expand_lists = 1;
+            }
+        }
+    } else {
+        # Old form: add_test(<name> <command> [arg1 ...])
+        $name = shift @$args;
+        @cmd = @$args;
+    }
+    return unless defined $name && @cmd;
+    $state->{tests}{$name} = {
+        command         => [@cmd],
+        working_dir     => $working_dir,
+        configurations  => [@configurations],
+        binary_dir      => $state->{current_binary_dir},
+        source_dir      => $state->{current_source_dir},
+        properties      => {},
+    };
+    push @{$state->{tests_by_dir}{$state->{current_binary_dir}}}, $name;
+};
+$builtins{'set_tests_properties'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    # set_tests_properties(<test1> [<test2>...] PROPERTIES <prop1> <val1> [<prop2> <val2>...])
+    my @names;
+    while (@$args && $args->[0] ne 'PROPERTIES') {
+        push @names, shift @$args;
+    }
+    shift @$args if @$args && $args->[0] eq 'PROPERTIES';
+    my %props;
+    while (@$args >= 2) {
+        my $k = shift @$args;
+        my $v = shift @$args;
+        $props{$k} = $v;
+    }
+    for my $name (@names) {
+        my $t = $state->{tests}{$name} or next;
+        for my $k (keys %props) {
+            $t->{properties}{$k} = $props{$k};
+        }
+    }
+};
 $builtins{'cmake_language'} = sub { };   # stub — complex meta-programming
 $builtins{'include_guard'} = sub { };
 
@@ -3183,6 +3355,7 @@ $builtins{'add_subdirectory'} = sub {
 
     my $saved_src = $state->{current_source_dir};
     my $saved_bin = $state->{current_binary_dir};
+    push @{$state->{subdirs}{$saved_bin}}, $binary_subdir;
     $state->{current_source_dir} = $source_subdir;
     $state->{current_binary_dir} = $binary_subdir;
 
@@ -3257,6 +3430,102 @@ sub generate_makefiles {
     # Emit an install.sh script derived from the install() rules we
     # captured during interp. `smak install` runs it.
     _write_install_script($state);
+
+    # Emit CTestTestfile.cmake hierarchy if any tests were added.
+    _write_ctest_files($state) if $state->{tests} && %{$state->{tests}};
+}
+
+sub _ctest_quote {
+    # Quote a token for CTestTestfile.cmake. Real cmake uses bracket strings
+    # ([==[...]==]) for test names with special chars, and double-quoted strings
+    # for command arguments. We use double-quote with escaping.
+    my ($s) = @_;
+    return '""' unless defined $s && length $s;
+    $s =~ s/\\/\\\\/g;
+    $s =~ s/"/\\"/g;
+    return qq{"$s"};
+}
+
+sub _write_ctest_files {
+    my ($state) = @_;
+    use File::Path qw(make_path);
+    use File::Spec;
+    my $build_dir = $state->{build_dir};
+
+    # Collect every directory that needs a CTestTestfile.cmake: the build_dir
+    # plus every dir reachable via subdirs that contains tests or descendants
+    # with tests. Walk top-down from build_dir.
+    my %dirs_with_tests;
+    for my $name (keys %{$state->{tests}}) {
+        my $d = $state->{tests}{$name}{binary_dir};
+        $dirs_with_tests{$d} = 1;
+    }
+    # Propagate up: a dir "needs" a CTestTestfile.cmake if it or any descendant
+    # has tests. Build a parent map first by inverting subdirs.
+    my %parent;
+    for my $p (keys %{$state->{subdirs} // {}}) {
+        for my $c (@{$state->{subdirs}{$p}}) {
+            $parent{$c} = $p;
+        }
+    }
+    my %needs = %dirs_with_tests;
+    my @worklist = keys %dirs_with_tests;
+    while (@worklist) {
+        my $d = pop @worklist;
+        my $p = $parent{$d};
+        next unless defined $p;
+        next if $needs{$p};
+        $needs{$p} = 1;
+        push @worklist, $p;
+    }
+    $needs{$build_dir} = 1;  # always emit at top
+
+    for my $dir (keys %needs) {
+        make_path($dir);
+        my $path = "$dir/CTestTestfile.cmake";
+        open(my $fh, '>', $path) or do {
+            warn "SmakCMake: cannot write $path: $!\n"; next;
+        };
+        # Find source dir for this binary dir (best effort: any test in this
+        # dir tells us; otherwise use build_dir's source).
+        my $src_dir = $state->{source_dir};
+        for my $tname (@{$state->{tests_by_dir}{$dir} // []}) {
+            my $sd = $state->{tests}{$tname}{source_dir};
+            $src_dir = $sd if defined $sd;
+            last;
+        }
+        print $fh "# CMake generated Testfile for \n";
+        print $fh "# Source directory: $src_dir\n";
+        print $fh "# Build directory: $dir\n";
+        print $fh "# \n";
+        print $fh "# This file includes the relevant testing commands required for \n";
+        print $fh "# testing this directory and lists subdirectories to be tested as well.\n";
+
+        for my $tname (@{$state->{tests_by_dir}{$dir} // []}) {
+            my $t = $state->{tests}{$tname};
+            my @cmd_q = map { _ctest_quote($_) } @{$t->{command}};
+            print $fh "add_test(", _ctest_quote($tname), " ", join(" ", @cmd_q), ")\n";
+            my $props = $t->{properties} // {};
+            if (defined $t->{working_dir}) {
+                $props->{WORKING_DIRECTORY} //= $t->{working_dir};
+            }
+            if (%$props) {
+                my @kv;
+                for my $k (sort keys %$props) {
+                    push @kv, $k, _ctest_quote($props->{$k});
+                }
+                print $fh "set_tests_properties(", _ctest_quote($tname),
+                          " PROPERTIES ", join(" ", @kv), ")\n";
+            }
+        }
+
+        for my $child (@{$state->{subdirs}{$dir} // []}) {
+            next unless $needs{$child};
+            my $rel = File::Spec->abs2rel($child, $dir);
+            print $fh "subdirs(", _ctest_quote($rel), ")\n";
+        }
+        close($fh);
+    }
 }
 
 sub _write_install_script {

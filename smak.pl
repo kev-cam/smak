@@ -72,6 +72,7 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
 
     if ($passthrough) {
         # Explicit passthrough: skip the interp, use the real cmake binary.
+        $ENV{SMAK_CMAKE_REAL} = 1;
         exec('cmake', @ARGV);
         die "Failed to execute cmake: $!\n";
     }
@@ -83,7 +84,7 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
         $initial_vars{$1} = $2;
     }
 
-    my ($interp_ok, $state, $ntargets, @unknowns);
+    my ($interp_ok, $state, $ntargets, $ntests, @unknowns);
     $interp_ok = eval {
         my $source_abs = File::Spec->rel2abs($source_dir);
         my $build_abs  = File::Spec->rel2abs($build_dir);
@@ -93,6 +94,7 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
                                                     \%initial_vars, \@cache_files);
         @unknowns = $state->{unknown_commands} ? @{$state->{unknown_commands}} : ();
         $ntargets = scalar keys %{ $state->{targets} // {} };
+        $ntests   = scalar keys %{ $state->{tests}   // {} };
         1;
     };
     if (!$interp_ok) {
@@ -106,6 +108,7 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
             print STDERR "  $_\n" for sort @uniq;
         }
         print STDERR "SmakCMakeInterp: targets: $ntargets\n";
+        print STDERR "SmakCMakeInterp: tests: $ntests\n" if $ntests;
         if ($ntargets && $ENV{SMAK_CMAKE_DEBUG}) {
             print STDERR "  $_\n" for sort keys %{$state->{targets}};
         }
@@ -113,8 +116,9 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
 
     # Generate build artifacts (CMakeCache.txt, CMakeFiles/*.dir/*) so
     # smak's regular path can drive the compile with no real cmake involved.
+    # Also generate CTestTestfile.cmake for test-only projects.
     my $gen_ok = 0;
-    if ($interp_ok && $ntargets > 0) {
+    if ($interp_ok && ($ntargets > 0 || $ntests > 0)) {
         $gen_ok = eval { SmakCMakeInterp::generate_makefiles($state); 1 };
         if (!$gen_ok) {
             print STDERR "SmakCMakeInterp: generator failed: $@";
@@ -135,7 +139,10 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
 
     # Fallback: the interp/generator couldn't handle this project. Use the
     # real cmake binary so the build still works while we collect gaps.
+    # SMAK_CMAKE_REAL prevents the smak-cmake.pl wrapper from re-entering
+    # the interp when `cmake` on PATH is the wrapper itself (infinite loop).
     print STDERR "SmakCMakeInterp: falling back to real cmake\n";
+    $ENV{SMAK_CMAKE_REAL} = 1;
     exec('cmake', @ARGV);
     die "Failed to execute cmake: $!\n";
 }

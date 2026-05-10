@@ -1261,7 +1261,13 @@ $builtins{'add_executable'} = sub {
 $builtins{'add_library'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
-    my $libtype = 'static';
+    # CMake: when no type keyword is given, add_library() honors
+    # BUILD_SHARED_LIBS (ON → SHARED, otherwise STATIC). We previously
+    # always defaulted to STATIC, which silently turned shared-lib builds
+    # into static-lib builds (e.g. Xyce -DBUILD_SHARED_LIBS=ON still
+    # produced libXyceLib.a, breaking dlopen-style plugin linking).
+    my $bsl = _lookup('BUILD_SHARED_LIBS', $scope);
+    my $libtype = (defined $bsl && _truthy($bsl, $scope)) ? 'shared' : 'static';
     my $imported = 0;
     my $global = 0;
     while (@$args && $args->[0] =~ /^(STATIC|SHARED|MODULE|INTERFACE|OBJECT|IMPORTED|GLOBAL|ALIAS|EXCLUDE_FROM_ALL)$/) {
@@ -1717,7 +1723,12 @@ $builtins{'option'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my ($name, $desc, $default) = @$args;
     $default //= 'OFF';
-    return if exists $scope->{vars}{$name};
+    # CMake `option()` is a no-op if the variable is already set (in any
+    # ancestor scope or the cache). Walk the scope chain so a sub-project's
+    # OPTION(BUILD_SHARED_LIBS "..." OFF) doesn't shadow the user's
+    # -DBUILD_SHARED_LIBS=ON from the root cache.
+    return if defined _lookup($name, $scope);
+    return if defined _lookup_cache($name, $scope);
     $scope->{vars}{$name} = $default;
     # Root scope cache
     my $s = $scope; while ($s->{parent}) { $s = $s->{parent}; }
@@ -3984,11 +3995,16 @@ sub _write_flags_make {
     for my $src (@{$t->{sources}}) {
         $langs{ _src_lang($src) }++;
     }
+    # Shared libraries (libtype=shared) need -fPIC on every object so the
+    # final .so can be linked. Apply at compile time for any target that
+    # itself is a shared library OR contributes (via static archive merge)
+    # to one — for our pattern, that's just the shared-lib targets.
+    my $pic = ($t->{libtype} // '') eq 'shared' ? ' -fPIC' : '';
     for my $lang (sort keys %langs) {
         print $fh "# compile $lang with ", _compiler_for_lang($lang), "\n";
         print $fh "${lang}_DEFINES = ", ($t->{compile_definitions} // ''), "\n";
         print $fh "${lang}_INCLUDES = ", _include_flags($t, $state), "\n";
-        print $fh "${lang}_FLAGS = ", ($t->{compile_options} // ''), "\n\n";
+        print $fh "${lang}_FLAGS = ", ($t->{compile_options} // ''), $pic, "\n\n";
     }
     close($fh);
 }
@@ -4038,12 +4054,43 @@ sub _write_link_txt {
         $s =~ s{^.*/}{};
         "CMakeFiles/$name.dir/$s.o"
     } @{$t->{sources}};
+    # Dedupe object list — sources sometimes get added more than once (e.g.
+    # an inner CMakeLists `APPEND_GLOB SOURCES x.cpp` followed by a sibling
+    # `LIST(APPEND SOURCES x.cpp)` that resolves to the same absolute file).
+    # `ar` tolerates duplicates; `ld -shared` errors with "multiple
+    # definition". Strip duplicates here for both link kinds.
+    {
+        my %seen;
+        @objs = grep { !$seen{$_}++ } @objs;
+    }
 
     my $link_cmd;
     if ($t->{type} eq 'library' && $t->{libtype} eq 'static') {
         my $out = "lib$name.a";
         $link_cmd = "/usr/bin/ar qc $out " . join(' ', @objs) . "\n" .
                     "/usr/bin/ranlib $out";
+    } elsif ($t->{type} eq 'library' && $t->{libtype} eq 'shared') {
+        my $compiler = _compiler_for_lang($lang);
+        my $out = "lib$name.so";
+        my @libs = _resolve_link_libraries($t, $state);
+        my $libs_str = '';
+        if (@libs) {
+            my @static = grep { /\.a$/ } @libs;
+            my @rest = grep { !/\.a$/ } @libs;
+            if (@static) {
+                $libs_str .= ' -Wl,--start-group ' . join(' ', @static) . ' -Wl,--end-group';
+            }
+            $libs_str .= ' ' . join(' ', @rest) if @rest;
+        }
+        # --allow-shlib-undefined: defer symbol resolution between shared
+        # libs to runtime. Smak's TriBits package-deps tracking isn't
+        # complete enough to enumerate every transitive .so a target needs;
+        # ld would otherwise error on symbols defined in some peer .so that
+        # didn't make it into this target's link line. Real cmake reaches
+        # the same effect by passing INTERFACE_LINK_LIBRARIES through.
+        $link_cmd = "$compiler -shared -fPIC -Wl,-soname,$out " .
+                    "-Wl,--allow-shlib-undefined " .
+                    join(' ', @objs) . " -o $out" . $libs_str;
     } elsif ($t->{type} eq 'executable') {
         my $compiler = _compiler_for_lang($lang);
         my @libs = _resolve_link_libraries($t, $state);
@@ -4059,7 +4106,8 @@ sub _write_link_txt {
             }
             $libs_str .= ' ' . join(' ', @rest) if @rest;
         }
-        $link_cmd = "$compiler " . join(' ', @objs) . " -o $name" . $libs_str;
+        $link_cmd = "$compiler -Wl,--allow-shlib-undefined " .
+                    join(' ', @objs) . " -o $name" . $libs_str;
     } else {
         $link_cmd = "# unsupported target type: $t->{type}";
     }
@@ -4099,9 +4147,11 @@ sub _resolve_link_libraries {
             next if $lib =~ /::/;
             next if $lt->{libtype} && $lt->{libtype} eq 'interface';
             next unless @{$lt->{sources} // []};
-            # Our own target — point at where the link will produce the .a
+            # Our own target — point at where the link will produce the
+            # archive/shared lib (depends on libtype).
             my $bin = $lt->{binary_dir} // $state->{build_dir};
-            push @out, "$bin/lib$lib.a";
+            my $ext = ($lt->{libtype} // 'static') eq 'shared' ? 'so' : 'a';
+            push @out, "$bin/lib$lib.$ext";
             next;
         }
         # Starts with /  → filesystem path

@@ -434,6 +434,8 @@ sub start_job_server {
         # Wait for workers to be ready
         my $workers_ready = <$job_server_socket>;
         chomp $workers_ready if defined $workers_ready;
+        die "smak: $1\n" if defined $workers_ready
+                         && $workers_ready =~ /^JOBSERVER_NO_WORKERS\s*(.*)/;
         die "Job-master workers not ready\n" unless $workers_ready eq 'JOBSERVER_WORKERS_READY';
         warn "Job-master and all workers ready\n" if $ENV{SMAK_DEBUG};
     } else {
@@ -443,6 +445,8 @@ sub start_job_server {
         chomp $ack if defined $ack;
         if (!defined $ack) {
             die "smak: Job-master connection lost during worker startup\n";
+        } elsif ($ack =~ /^JOBSERVER_NO_WORKERS\s*(.*)/) {
+            die "smak: $1\n";
         } elsif ($ack ne 'JOBSERVER_WORKERS_READY') {
             # Put it back for later processing if it wasn't the ready message
             # This shouldn't happen, but handle gracefully
@@ -10833,6 +10837,17 @@ sub run_job_master {
         }
     }
 
+    # Every worker failed to start (remote worker binary missing, fork/exec
+    # failure, ...): advancing to the listen loop would leave the job-master
+    # spinning forever on queued jobs it can never run (workers=0, queued>0).
+    # Report and exit so the parent surfaces a clear error instead of hanging.
+    if (@workers == 0 && @worker_assignments > 0) {
+        my $n = scalar @worker_assignments;
+        print $master_socket "JOBSERVER_NO_WORKERS all $n worker(s) failed to start\n"
+            if $master_socket;
+        die "smak: no workers available -- all $n worker(s) failed to start\n";
+    }
+
     vprint "All workers ready. Job-master entering listen loop.\n";
     print $master_socket "JOBSERVER_WORKERS_READY\n";
 
@@ -11413,6 +11428,16 @@ sub run_job_master {
 
         my $remote_port = 30000 + int(rand(10000));
         my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $host);
+
+        # Localhost shares our filesystem: run the real local worker binary
+        # against the actual cwd -- no ~/.cache staging, no sshfs round-trip.
+        if ($host =~ /^(?:localhost|127\.0\.0\.1|::1)$/) {
+            my $cwd = Cwd::getcwd();
+            push @ssh_cmd, "$bin_dir/smak-worker -cd " . quotemeta($cwd)
+                         . " 127.0.0.1:$remote_port";
+            exec(@ssh_cmd);
+            die "Failed to exec SSH worker on $host: $!\n";
+        }
 
         # Build remote command - try SMAK_REMOTE_PATH, then ~/.cache/smak default
         my $remote_worker;

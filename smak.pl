@@ -1126,6 +1126,27 @@ if ($ENV{SMAK_JOB_SERVER}) {
             }
 
             my @deps = @{$info->{deps} || []};
+
+            # Re-express target/deps/siblings relative to exec_dir. Capture keys
+            # are relative to THIS child's cwd, but the job-server forms a job's
+            # path as exec_dir/target. At >=2 levels of nested recursive-make the
+            # key carries a sub-make dir prefix that exec_dir already contains
+            # (e.g. target=src/util.o, exec_dir=.../lib/src) -> the server would
+            # build .../lib/src/src/util.o, whose dep never appears -> the job is
+            # deferred forever -> hang. abs2rel against exec_dir collapses that
+            # and is a no-op for the already-correct single-level case.
+            {
+                my $abs_exec = File::Spec->file_name_is_absolute($exec_dir)
+                             ? $exec_dir : File::Spec->rel2abs($exec_dir, $cwd);
+                my $rerel = sub {
+                    my ($p) = @_;
+                    return $p if File::Spec->file_name_is_absolute($p);
+                    return File::Spec->abs2rel(File::Spec->rel2abs($p, $cwd), $abs_exec);
+                };
+                $target   = $rerel->($target);
+                @deps     = map { $rerel->($_) } @deps;
+                @siblings = map { $rerel->($_) } @siblings;
+            }
             warn "Child smak submitting: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ", siblings=" . scalar(@siblings) . ")\n" if $ENV{SMAK_DEBUG};
             # Use line-count protocol for multi-line commands
             my @cmd_lines = grep { /\S/ } split(/\n/, $rule);

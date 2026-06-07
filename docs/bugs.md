@@ -67,7 +67,18 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 - **Repro:** `cd /usr/local/src/iverilog && make distclean; ./configure && smak -j16 && ls vpi/*.vpi tgt-vvp/*.tgt`
 
 ### Relay double-prefixes paths at 2-level nesting (recursive-make dependency target)
-- [ ] **Symptom (found 2026-06-06):** under `-j`, a 2-level nested build where a
+- [x] **FIXED (2026-06-07):** the relay child (smak.pl, ~line 1128) submitted
+  each captured target by its key (relative to the child's cwd) paired with the
+  recipe's `exec_dir`, but the job-server qualifies a job as `exec_dir/target`.
+  At depth >=2 the key carried a sub-make dir prefix that `exec_dir` already
+  contained -> double. Fix: before SUBMIT_JOB, re-express target/deps/siblings
+  *relative to exec_dir* via `File::Spec->abs2rel(rel2abs($key,$cwd),$exec_dir)`
+  -- a no-op for the correct single-level case, collapses the redundant prefix
+  at depth >=2. (make.pl is a symlink to smak.pl, so covered.) Verified:
+  test_nested_make passes in parallel (re-enabled +x); the doubled path is gone;
+  and NO regression -- smakcomb 9/9, 12-dir chain 12/12, nvc lib bootstrap
+  (run_regr wait1 ok), iverilog vpi+tgt descents all rebuild via smak -j16.
+- [ ] **(original) Symptom (found 2026-06-06):** under `-j`, a 2-level nested build where a
   recursive make is the recipe of a *dependency target* HANGS. Top `app:
   lib/lib.a` with `lib/lib.a:` -> `$(MAKE) -C lib all`, and lib's `lib.a:` ->
   `$(MAKE) -C src all`. The job-server relay accumulates the subdir prefix
@@ -84,10 +95,8 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   target. Cf. the original "double path prefix" gotcha.
 - **Repro:** `mkdir -p t/lib/src; cd t; <build the 3 Makefiles above>; smak -j4 all`
   -> hangs; `smak all` (sequential) works.
-- **Status:** test_dnsmasq + test_nested_make reverted to non-executable for now
-  so the suite stays green; this bug is tracked for a focused relay fix. (The
-  container build -- the acceptance bar -- does not hit this; nvc/iverilog build
-  clean via smak -j16.)
+- **Status:** FIXED (above) -- test_nested_make re-enabled (+x) and passing.
+  test_dnsmasq stays non-executable pending the exit-77 harness fix below.
 
 ### test_dnsmasq exit 77 (skip) miscounted as failure
 - [ ] **Symptom:** with +x, test_dnsmasq exits 77 ("SKIP: dnsmasq dir not found")

@@ -1261,6 +1261,14 @@ $builtins{'add_executable'} = sub {
 $builtins{'add_library'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
+    # ALIAS form: add_library(<alias> ALIAS <target>). Record a lightweight
+    # alias entry so TARGET tests see it and property lookups follow through
+    # to the real target (see _resolve_target).
+    if (@$args >= 2 && $args->[0] eq 'ALIAS') {
+        $state->{targets}{$name} =
+            { type => 'library', libtype => 'alias', alias_of => $args->[1] };
+        return;
+    }
     # CMake: when no type keyword is given, add_library() honors
     # BUILD_SHARED_LIBS (ON → SHARED, otherwise STATIC). We previously
     # always defaulted to STATIC, which silently turned shared-lib builds
@@ -1289,6 +1297,18 @@ $builtins{'add_library'} = sub {
     $t->{global} = $global;
     $state->{targets}{$name} = $t;
 };
+
+# Follow add_library/add_executable ALIAS chains to the real target name.
+sub _resolve_target {
+    my ($state, $name) = @_;
+    my $guard = 0;
+    while (defined $name && $state->{targets}{$name}
+           && $state->{targets}{$name}{alias_of}) {
+        $name = $state->{targets}{$name}{alias_of};
+        last if ++$guard > 50;
+    }
+    return $name;
+}
 
 # Build a new target, inheriting directory-level include_directories
 # and definitions that were in effect at the point of definition.
@@ -1594,6 +1614,34 @@ $builtins{'list'} = sub {
         @list = sort @list;
     } elsif ($op eq 'REVERSE') {
         @list = reverse @list;
+    } elsif ($op eq 'TRANSFORM') {
+        # list(TRANSFORM <list> <ACTION> [<value>...] [<selector>]
+        #      [OUTPUT_VARIABLE <var>])
+        my $action = shift @$args;
+        my ($value, $replace_to);
+        if ($action =~ /^(APPEND|PREPEND|REPLACE)$/) { $value = shift @$args; }
+        if ($action eq 'REPLACE') { $replace_to = shift @$args; }
+        my $sel_regex;
+        if (@$args && $args->[0] eq 'REGEX') { shift @$args; $sel_regex = shift @$args; }
+        elsif (@$args && $args->[0] =~ /^(AT|FOR)$/) {
+            shift @$args; shift @$args while @$args && $args->[0] =~ /^\d+$/;
+        }
+        my $out = $name;
+        if (@$args && $args->[0] eq 'OUTPUT_VARIABLE') { shift @$args; $out = shift @$args; }
+        my @res = map {
+            my $e = $_;
+            if (!defined $sel_regex || $e =~ /$sel_regex/) {
+                if    ($action eq 'APPEND')  { $e .= $value; }
+                elsif ($action eq 'PREPEND') { $e = $value . $e; }
+                elsif ($action eq 'TOLOWER') { $e = lc $e; }
+                elsif ($action eq 'TOUPPER') { $e = uc $e; }
+                elsif ($action eq 'STRIP')   { $e =~ s/^\s+//; $e =~ s/\s+$//; }
+                elsif ($action eq 'REPLACE') { $e =~ s/$value/$replace_to/g; }
+            }
+            $e;
+        } @list;
+        $scope->{vars}{$out} = join(';', @res);
+        return;
     } elsif ($op eq 'POP_FRONT') {
         # list(POP_FRONT <list> [<out-var>...])
         if (@$args) {
@@ -2124,6 +2172,19 @@ $builtins{'configure_file'} = sub {
 
 $builtins{'return'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
+    # return(PROPAGATE <var>...) (CMake 3.25): push each named variable to the
+    # parent scope, like set(<var> <val> PARENT_SCOPE); unset vars are unset
+    # there too. Without this, functions that return results via
+    # `set(${out} ...); return(PROPAGATE ${out})` (e.g. yosys_expand_components)
+    # silently yield nothing in the caller.
+    if (@$args && $args->[0] eq 'PROPAGATE' && $scope->{parent}) {
+        shift @$args;
+        my $p = $scope->{parent};
+        for my $var (@$args) {
+            if (exists $scope->{vars}{$var}) { $p->{vars}{$var} = $scope->{vars}{$var}; }
+            else { delete $p->{vars}{$var}; }
+        }
+    }
     # Signal return by setting a flag in the scope chain — eval_commands
     # checks this after each command and exits the loop if set.
     $scope->{_return} = 1;
@@ -2142,6 +2203,7 @@ $builtins{'continue'} = sub {
 $builtins{'get_target_property'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my ($out, $target, $prop) = @$args;
+    $target = _resolve_target($state, $target);
     my $t = $state->{targets}{$target};
     my $val;
     if ($t) {
@@ -2194,6 +2256,7 @@ $builtins{'get_property'} = sub {
         return;
     }
     if ($scope_kw eq 'TARGET' && $target_name) {
+        $target_name = _resolve_target($state, $target_name);
         my $t = $state->{targets}{$target_name};
         if ($t) {
             if    ($prop eq 'INTERFACE_INCLUDE_DIRECTORIES') {

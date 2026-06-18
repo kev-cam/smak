@@ -1495,6 +1495,19 @@ $builtins{'include'} = sub {
     my $file = $args->[0] or return;
     return if $file eq 'OPTIONAL' || $file eq 'NO_POLICY_SCOPE';
 
+    # include(CTest): the upstream module sets up a CDash dashboard (Testing/
+    # dir, DartConfiguration.tcl) that a pure build never needs and that fails
+    # when no dashboard paths exist. Honor only its build-relevant contract:
+    # define the BUILD_TESTING option and enable testing in this directory.
+    if ($file eq 'CTest') {
+        my $root = $scope; $root = $root->{parent} while $root->{parent};
+        $root->{cache}{BUILD_TESTING} //= 'ON';
+        $scope->{vars}{BUILD_TESTING} //= _lookup('BUILD_TESTING', $scope) // 'ON';
+        $state->{testing_enabled_dirs}{$state->{current_binary_dir}} = 1
+            if _truthy('BUILD_TESTING', $scope);
+        return;
+    }
+
     my $path;
     # 1. Absolute path
     if ($file =~ m{^/} && -f $file) { $path = $file; }
@@ -1581,6 +1594,20 @@ $builtins{'list'} = sub {
         @list = sort @list;
     } elsif ($op eq 'REVERSE') {
         @list = reverse @list;
+    } elsif ($op eq 'POP_FRONT') {
+        # list(POP_FRONT <list> [<out-var>...])
+        if (@$args) {
+            $scope->{vars}{$_} = (@list ? shift(@list) : '') for @$args;
+        } else {
+            shift @list;
+        }
+    } elsif ($op eq 'POP_BACK') {
+        # list(POP_BACK <list> [<out-var>...])
+        if (@$args) {
+            $scope->{vars}{$_} = (@list ? pop(@list) : '') for @$args;
+        } else {
+            pop @list;
+        }
     } elsif ($op eq 'INSERT') {
         my $idx = shift @$args;
         splice(@list, $idx, 0, @$args);
@@ -1603,6 +1630,125 @@ $builtins{'list'} = sub {
         }
     }
     $scope->{vars}{$name} = join(';', @list);
+};
+
+# cmake_path — path manipulation. The <path-var> operand is a *variable name*
+# the command reads/writes itself (not a pre-expanded value). Implements the
+# subset needed so far: GET, APPEND, ABSOLUTE_PATH, SET, NORMAL_PATH,
+# REMOVE_FILENAME.
+$builtins{'cmake_path'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $op = shift @$args;
+
+    my $normalize = sub {
+        my $p = shift;
+        return $p if !defined $p || $p eq '';
+        my $abs = ($p =~ m{^/});
+        my @out;
+        for my $seg (split m{/+}, $p) {
+            next if $seg eq '' || $seg eq '.';
+            if ($seg eq '..') {
+                if (@out && $out[-1] ne '..') { pop @out; next; }
+                next if $abs;            # /.. collapses to /
+            }
+            push @out, $seg;
+        }
+        my $r = ($abs ? '/' : '') . join('/', @out);
+        return $r eq '' ? ($abs ? '/' : '.') : $r;
+    };
+    # Split a filename into (stem, extension) using CMake's default rule:
+    # the extension starts at the first '.' that is not the leading char.
+    my $split_ext = sub {
+        my $fn = shift;
+        $fn =~ s{^.*/}{};
+        if ($fn =~ /^(\.?[^.]*)(\..*)?$/) { return ($1, $2 // ''); }
+        return ($fn, '');
+    };
+
+    if ($op eq 'GET') {
+        my $var   = shift @$args;          # variable NAME holding the path
+        my $field = shift @$args;
+        my $out   = pop @$args;
+        my $path  = _lookup($var, $scope) // '';
+        my $res   = '';
+        if ($field eq 'FILENAME') {
+            ($res = $path) =~ s{^.*/}{};
+        } elsif ($field eq 'PARENT_PATH') {
+            if ($path =~ m{/}) {
+                ($res = $path) =~ s{/[^/]*$}{};
+                $res = '/' if $res eq '' && $path =~ m{^/};
+            }
+        } elsif ($field eq 'STEM') {
+            ($res) = $split_ext->($path);
+        } elsif ($field eq 'EXTENSION') {
+            (undef, $res) = $split_ext->($path);
+        } elsif ($field eq 'ROOT_PATH' || $field eq 'ROOT_DIRECTORY') {
+            $res = ($path =~ m{^/}) ? '/' : '';
+        } elsif ($field eq 'RELATIVE_PART') {
+            ($res = $path) =~ s{^/+}{};
+        } else {
+            $res = $path;                  # ROOT_NAME etc. → empty/passthrough
+        }
+        $scope->{vars}{$out} = $res;
+        return;
+    }
+
+    if ($op eq 'APPEND') {
+        my $var = shift @$args;
+        my $out = $var;
+        my @inputs;
+        while (@$args) {
+            my $a = shift @$args;
+            if ($a eq 'OUTPUT_VARIABLE') { $out = shift @$args; last; }
+            push @inputs, $a;
+        }
+        my $res = _lookup($var, $scope) // '';
+        for my $seg (@inputs) {
+            next if $seg eq '';
+            if ($res eq '' || $seg =~ m{^/}) { $res = $seg; }
+            else { $res =~ s{/+$}{}; $res .= "/$seg"; }
+        }
+        $scope->{vars}{$out} = $res;
+        return;
+    }
+
+    if ($op eq 'ABSOLUTE_PATH') {
+        my $var = shift @$args;
+        my ($base, $out, $do_norm) = (undef, $var, 0);
+        while (@$args) {
+            my $a = shift @$args;
+            if    ($a eq 'BASE_DIRECTORY')  { $base = shift @$args; }
+            elsif ($a eq 'OUTPUT_VARIABLE') { $out  = shift @$args; }
+            elsif ($a eq 'NORMALIZE')       { $do_norm = 1; }
+        }
+        $base = _lookup('CMAKE_CURRENT_SOURCE_DIR', $scope) // '' unless defined $base;
+        my $path = _lookup($var, $scope) // '';
+        my $res  = ($path =~ m{^/}) ? $path : ($path eq '' ? $base : "$base/$path");
+        $res = $normalize->($res) if $do_norm;
+        $scope->{vars}{$out} = $res;
+        return;
+    }
+
+    if ($op eq 'SET') {
+        my $var = shift @$args;
+        my $do_norm = (@$args && $args->[0] eq 'NORMALIZE') ? (shift(@$args), 1)[1] : 0;
+        my $val = shift(@$args) // '';
+        $scope->{vars}{$var} = $do_norm ? $normalize->($val) : $val;
+        return;
+    }
+
+    if ($op eq 'NORMAL_PATH' || $op eq 'REMOVE_FILENAME') {
+        my $var = shift @$args;
+        my $out = $var;
+        while (@$args) { my $a = shift @$args; $out = shift @$args if $a eq 'OUTPUT_VARIABLE'; }
+        my $r = _lookup($var, $scope) // '';
+        if ($op eq 'NORMAL_PATH') { $r = $normalize->($r); }
+        else { $r =~ s{[^/]*$}{}; }        # REMOVE_FILENAME keeps trailing slash
+        $scope->{vars}{$out} = $r;
+        return;
+    }
+
+    warn "SmakCMake: cmake_path subcommand '$op' not implemented\n" if $ENV{SMAK_CMAKE_DEBUG};
 };
 
 $builtins{'string'} = sub {
@@ -1800,7 +1946,12 @@ $builtins{'file'} = sub {
         }
     } elsif ($op eq 'MAKE_DIRECTORY') {
         use File::Path qw(make_path);
-        for my $d (@$args) { make_path($d); }
+        for my $d (@$args) {
+            next if !defined $d || $d eq '';
+            unless (eval { make_path($d); 1 }) {
+                warn "file(MAKE_DIRECTORY) failed for '$d': $@" if $ENV{SMAK_CMAKE_DEBUG};
+            }
+        }
     } elsif ($op eq 'CHMOD' || $op eq 'CHMOD_RECURSE') {
         # file(CHMOD <files>... PERMISSIONS <perm>...
         #      [FILE_PERMISSIONS ...] [DIRECTORY_PERMISSIONS ...])

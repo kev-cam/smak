@@ -4222,11 +4222,37 @@ sub _write_flags_make {
     # itself is a shared library OR contributes (via static archive merge)
     # to one — for our pattern, that's just the shared-lib targets.
     my $pic = ($t->{libtype} // '') eq 'shared' ? ' -fPIC' : '';
+    # flags.make holds shell command-line fragments, so any CMake-list ';'
+    # separators (e.g. a genex that expanded to "-Wall;-Wextra;-Werror=unused"
+    # as a single element) must become spaces, or the shell treats ';' as a
+    # command separator and the compile loses its source file.
+    my $flagify = sub {
+        my $s = shift // '';
+        $s =~ tr/;/ /;
+        $s =~ s/\s+/ /g;
+        $s =~ s/^\s+|\s+$//g;
+        return $s;
+    };
+    my $rv = $state->{root_scope} ? $state->{root_scope}{vars} : {};
     for my $lang (sort keys %langs) {
+        # Language standard: target CXX_STANDARD property, else CMAKE_CXX_STANDARD.
+        # CXX_EXTENSIONS (default ON) selects gnu++NN vs c++NN.
+        my $std = '';
+        if ($lang eq 'CXX') {
+            my $n = $t->{properties}{CXX_STANDARD} // $rv->{CMAKE_CXX_STANDARD};
+            if (defined $n && $n =~ /^\d+$/) {
+                my $ext = $t->{properties}{CXX_EXTENSIONS} // $rv->{CMAKE_CXX_EXTENSIONS};
+                my $dialect = (defined $ext && $ext =~ /^(off|no|false|0)$/i) ? 'c++' : 'gnu++';
+                $std = " -std=$dialect$n";
+            }
+        } elsif ($lang eq 'C') {
+            my $n = $t->{properties}{C_STANDARD} // $rv->{CMAKE_C_STANDARD};
+            $std = " -std=gnu$n" if defined $n && $n =~ /^\d+$/;
+        }
         print $fh "# compile $lang with ", _compiler_for_lang($lang), "\n";
-        print $fh "${lang}_DEFINES = ", ($t->{compile_definitions} // ''), "\n";
-        print $fh "${lang}_INCLUDES = ", _include_flags($t, $state), "\n";
-        print $fh "${lang}_FLAGS = ", ($t->{compile_options} // ''), $pic, "\n\n";
+        print $fh "${lang}_DEFINES = ", $flagify->($t->{compile_definitions}), "\n";
+        print $fh "${lang}_INCLUDES = ", $flagify->(_include_flags($t, $state)), "\n";
+        print $fh "${lang}_FLAGS = ", $flagify->(($t->{compile_options} // '') . $pic . $std), "\n\n";
     }
     close($fh);
 }
@@ -4484,6 +4510,7 @@ sub interpret_project {
 
     my $root_scope = new_scope(undef);
     $root_scope->{_state} = $state;  # for predicates like TARGET that need state access
+    $state->{root_scope} = $root_scope;  # generator reads globals (CMAKE_CXX_STANDARD, …)
     # Predefined CMake variables
     $root_scope->{vars}{CMAKE_SOURCE_DIR} = $source_dir;
     $root_scope->{vars}{CMAKE_BINARY_DIR} = $build_dir;

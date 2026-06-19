@@ -100,8 +100,10 @@ sub parse_makefile2 {
 
     while (<$fh>) {
         chomp;
-        # target.dir/all: dep.dir/all
-        if (m{^(\S+/CMakeFiles/(\w+)\.dir/all):\s*(\S+/CMakeFiles/(\w+)\.dir/all)?\s*$}) {
+        # target.dir/all: dep.dir/all  (dir prefix optional — a target in the
+        # top build dir is written "CMakeFiles/foo.dir/all" with no prefix,
+        # e.g. the yosys executable / libyosys built from OBJECT libraries)
+        if (m{^((?:\S+/)?CMakeFiles/(\w+)\.dir/all):\s*((?:\S+/)?CMakeFiles/(\w+)\.dir/all)?\s*$}) {
             my ($target_path, $target_name, $dep_path, $dep_name) = ($1, $2, $3, $4);
             $target_deps{$target_name} //= [];
             push @{$target_deps{$target_name}}, $dep_name if defined $dep_name;
@@ -390,9 +392,17 @@ sub generate_smak_rules {
 
         for my $dep_name (@{$target_deps->{$name}}) {
             my $dep_output = $target_output{$dep_name};
-            next unless $dep_output;
-            # Add as order-only dep (must exist, doesn't trigger rebuild)
-            push @$existing, $dep_output unless grep { $_ eq $dep_output } @$existing;
+            if ($dep_output) {
+                # Add as order-only dep (must exist, doesn't trigger rebuild)
+                push @$existing, $dep_output unless grep { $_ eq $dep_output } @$existing;
+            } elsif ($targets->{$dep_name} && @{$targets->{$dep_name}{objects} // []}) {
+                # OBJECT library: produces no archive — the consumer links its
+                # .o files directly. Depend on each object so they are compiled
+                # before this target's link runs.
+                for my $o (@{$targets->{$dep_name}{objects}}) {
+                    push @$existing, $o unless grep { $_ eq $o } @$existing;
+                }
+            }
         }
         $fixed_deps->{$dep_key} = $existing;
     }

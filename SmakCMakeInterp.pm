@@ -1251,10 +1251,7 @@ $builtins{'project'} = sub {
 $builtins{'add_executable'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
-    my @sources = grep {
-        !/^(IMPORTED|ALIAS|GLOBAL|EXCLUDE_FROM_ALL|WIN32|MACOSX_BUNDLE)$/
-        && !/\.(h|hh|hpp|hxx|H)$/
-    } @$args;
+    my @sources = grep { _is_source_file($_) } @$args;
     $state->{targets}{$name} = _new_target($state, 'executable', \@sources);
 };
 
@@ -1290,7 +1287,7 @@ $builtins{'add_library'} = sub {
     }
     # Filter out header files (CMake source lists often include the header
     # via bison output; they're not compile targets)
-    my @sources = grep { !/\.(h|hh|hpp|hxx|H)$/ } @$args;
+    my @sources = grep { _is_source_file($_) } @$args;
     my $t = _new_target($state, 'library', \@sources);
     $t->{libtype} = $libtype;
     $t->{imported} = $imported;
@@ -1308,6 +1305,14 @@ sub _resolve_target {
         last if ++$guard > 50;
     }
     return $name;
+}
+
+# Is this a compilable source file (vs a header/.inc/.def/other)? CMake only
+# compiles files whose extension maps to an enabled language; everything else
+# (headers, .inc snippets that are #included, etc.) is ignored for building.
+sub _is_source_file {
+    my $f = shift;
+    return $f =~ /\.(?:c|cc|cpp|cxx|cp|c\+\+|m|mm|f|f77|f90|f95|f03|f08|for|s|asm)$/i;
 }
 
 # Build a new target, inheriting directory-level include_directories
@@ -1459,7 +1464,7 @@ $builtins{'target_sources'} = sub {
     my $curdir = $state->{current_source_dir};
     for my $a (@$args) {
         next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|FILE_SET|BASE_DIRS|TYPE|HEADERS|FILES)$/;
-        next if $a =~ /\.(h|hh|hpp|hxx|H)$/;  # headers aren't compile sources
+        next unless _is_source_file($a);  # skip headers/.inc/etc.
         my $src = $a =~ m{^/} ? $a : File::Spec->catfile($curdir, $a);
         push @{$t->{sources}}, $src;
     }
@@ -2552,7 +2557,7 @@ $builtins{'add_custom_command'} = sub {
         my $kw = $args->[$i];
         if ($kw eq 'OUTPUT') {
             $i++;
-            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
                 push @{$custom{output}}, $args->[$i++];
             }
         } elsif ($kw eq 'TARGET') {
@@ -2561,7 +2566,7 @@ $builtins{'add_custom_command'} = sub {
         } elsif ($kw eq 'COMMAND') {
             $i++;
             my @parts;
-            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|ARGS|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|ARGS|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
                 push @parts, $args->[$i++];
             }
             push @{$custom{commands}}, join(' ', @parts);
@@ -2569,14 +2574,14 @@ $builtins{'add_custom_command'} = sub {
             if ($i < @$args && $args->[$i] eq 'ARGS') {
                 $i++;
                 my @extra;
-                while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+                while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
                     push @extra, $args->[$i++];
                 }
                 $custom{commands}[-1] .= ' ' . join(' ', @extra) if @extra;
             }
         } elsif ($kw eq 'DEPENDS' || $kw eq 'MAIN_DEPENDENCY') {
             $i++;
-            while ($i < @$args && $args->[$i] !~ /^(COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
                 push @{$custom{depends}}, $args->[$i++];
             }
         } elsif ($kw eq 'WORKING_DIRECTORY') {
@@ -2765,7 +2770,7 @@ sub _check_include {
     }
     for my $p (@paths) {
         if (-f "$p/$header") {
-            $scope->{vars}{$var} = 1;
+            _cache_set($scope, $var, 1);
             return;
         }
     }
@@ -2776,10 +2781,10 @@ sub _check_include {
         limits.h ctype.h math.h assert.h signal.h fcntl.h
     );
     if ($standard{$header} && -f "/usr/include/$header") {
-        $scope->{vars}{$var} = 1;
+        _cache_set($scope, $var, 1);
         return;
     }
-    $scope->{vars}{$var} = '';  # not found
+    _cache_set($scope, $var, '');  # not found
 }
 
 $builtins{'check_include_file'} = sub {
@@ -2800,52 +2805,52 @@ $builtins{'check_include_files'} = sub {
     # All headers must be found
     for my $h (split /;/, $headers) {
         _check_include($h, $var, 'C', $scope);
-        return unless $scope->{vars}{$var};
+        return unless _lookup($var, $scope);
     }
 };
 
-# Symbol check — we only verify header exists, not the symbol.
-# Most cmake projects use these for optional features; being permissive
-# (symbol found if header exists) is safer than conservatively saying no.
-$builtins{'check_symbol_exists'} = sub {
-    my ($state, $args, $cmd, $scope) = @_;
-    my ($symbol, $files, $var) = @$args;
-    my @headers = split /;/, ($files // '');
-    my $found = 1;
-    for my $h (@headers) {
-        my $exists;
-        _check_include($h, "_tmp_check_$var", 'C', $scope);
-        $exists = $scope->{vars}{"_tmp_check_$var"};
-        delete $scope->{vars}{"_tmp_check_$var"};
-        unless ($exists) { $found = 0; last; }
+# Set a check result as a cache variable (root cache + root normal var), the
+# way CMake's Check* modules do (set(<var> <val> CACHE INTERNAL ...)). Results
+# set inside a check_*() function must be globally visible — many such helpers
+# (e.g. yosys's check_system) set the result with no return(PROPAGATE).
+sub _cache_set {
+    my ($scope, $var, $val) = @_;
+    my $root = $scope;
+    $root = $root->{parent} while $root->{parent};
+    $root->{cache}{$var} = $val;
+    $root->{vars}{$var}  = $val;
+}
+
+# Extra compile/link args from the CMAKE_REQUIRED_* state the Check* modules
+# manage (via cmake_push_check_state).
+sub _required_args {
+    my ($scope) = @_;
+    my @a;
+    if (my $f = _lookup('CMAKE_REQUIRED_FLAGS', $scope)) { push @a, $f; }
+    for my $d (split /;/, (_lookup('CMAKE_REQUIRED_DEFINITIONS', $scope) // '')) {
+        push @a, $d if $d ne '';
     }
-    $scope->{vars}{$var} = $found ? 1 : '';
-};
+    for my $i (split /;/, (_lookup('CMAKE_REQUIRED_INCLUDES', $scope) // '')) {
+        push @a, "-I$i" if $i ne '';
+    }
+    return @a;
+}
+sub _required_libs {
+    my ($scope) = @_;
+    my @l;
+    for my $x (split /;/, (_lookup('CMAKE_REQUIRED_LIBRARIES', $scope) // '')) {
+        next if $x eq '';
+        push @l, ($x =~ m{^[-/]} ? $x : "-l$x");
+    }
+    return @l;
+}
 
-$builtins{'check_cxx_symbol_exists'} = $builtins{'check_symbol_exists'};
-$builtins{'check_function_exists'} = sub {
-    my ($state, $args, $cmd, $scope) = @_;
-    my ($fn, $var) = @$args;
-    # Permissive: assume yes for common POSIX functions
-    $scope->{vars}{$var} = 1;
-};
-$builtins{'check_cxx_source_compiles'} = sub {
-    my ($state, $args, $cmd, $scope) = @_;
-    my ($source, $var) = @$args;
-    $scope->{vars}{$var} = _try_compile($source, 'CXX', $scope) ? 1 : '';
-};
-
-$builtins{'check_c_source_compiles'} = sub {
-    my ($state, $args, $cmd, $scope) = @_;
-    my ($source, $var) = @$args;
-    $scope->{vars}{$var} = _try_compile($source, 'C', $scope) ? 1 : '';
-};
-
+# Compile (and link) a test program. Returns true on success. lang ∈ C|CXX.
 sub _try_compile {
     my ($source, $lang, $scope) = @_;
     my $cc = $lang eq 'CXX'
-        ? ($scope->{vars}{CMAKE_CXX_COMPILER} // 'c++')
-        : ($scope->{vars}{CMAKE_C_COMPILER}  // 'cc');
+        ? (_lookup('CMAKE_CXX_COMPILER', $scope) // 'c++')
+        : (_lookup('CMAKE_C_COMPILER',  $scope) // 'cc');
     my $ext = $lang eq 'CXX' ? '.cc' : '.c';
     require File::Temp;
     my $tmpdir = $ENV{TMPDIR} || '/tmp';
@@ -2853,12 +2858,106 @@ sub _try_compile {
         DIR => $tmpdir, SUFFIX => $ext, UNLINK => 1);
     print $fh $source;
     close $fh;
-    my $flags = $scope->{vars}{CMAKE_REQUIRED_FLAGS} // '';
-    my $obj = "$path.o";
-    my $rc = system("$cc $flags -c $path -o $obj >/dev/null 2>&1");
-    unlink $obj;
+    my $exe = "$path.out";
+    my $cmd = join(' ', $cc, _required_args($scope), $path, '-o', $exe,
+                   _required_libs($scope)) . ' >/dev/null 2>&1';
+    my $rc = system($cmd);
+    unlink $exe;
     return $rc == 0;
 }
+
+# check_symbol_exists(<symbol> <headers> <var>): compile+link a probe that
+# references the symbol. CMake's exact trick works for both macros and
+# functions/globals.
+sub _check_symbol {
+    my ($symbol, $files, $var, $lang, $scope) = @_;
+    my $inc = join("\n", map { "#include <$_>" }
+                        grep { $_ ne '' } split /;/, ($files // ''));
+    my $src = <<"EOF";
+$inc
+int main(int argc, char** argv) {
+  (void)argv;
+#ifndef $symbol
+  return ((int*)(&$symbol))[argc];
+#else
+  (void)argc;
+  return 0;
+#endif
+}
+EOF
+    _cache_set($scope, $var, _try_compile($src, $lang, $scope) ? 1 : '');
+}
+
+$builtins{'check_symbol_exists'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($symbol, $files, $var) = @$args;
+    _check_symbol($symbol, $files, $var, 'C', $scope);
+};
+$builtins{'check_cxx_symbol_exists'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($symbol, $files, $var) = @$args;
+    _check_symbol($symbol, $files, $var, 'CXX', $scope);
+};
+$builtins{'check_function_exists'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($fn, $var) = @$args;
+    my $src = "char $fn();\n"
+            . "int main(int argc, char** argv){ (void)argv; return ((int*)(&$fn))[argc]; }\n";
+    _cache_set($scope, $var, _try_compile($src, 'C', $scope) ? 1 : '');
+};
+
+# Source-compile checks (generic + per-language). All cache their result.
+$builtins{'check_source_compiles'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($lang, $source, $var) = @$args;   # check_source_compiles(<lang> <code> <var> ...)
+    _cache_set($scope, $var,
+        _try_compile($source, ($lang =~ /^CXX$/i ? 'CXX' : 'C'), $scope) ? 1 : '');
+};
+$builtins{'check_cxx_source_compiles'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($source, $var) = @$args;
+    _cache_set($scope, $var, _try_compile($source, 'CXX', $scope) ? 1 : '');
+};
+$builtins{'check_c_source_compiles'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($source, $var) = @$args;
+    _cache_set($scope, $var, _try_compile($source, 'C', $scope) ? 1 : '');
+};
+
+# Compiler-flag checks: does the compiler accept <flag>?  -Werror so an
+# "unrecognized option" warning fails the probe, matching cmake.
+sub _check_flag {
+    my ($flag, $var, $lang, $scope) = @_;
+    my $cc = $lang eq 'CXX'
+        ? (_lookup('CMAKE_CXX_COMPILER', $scope) // 'c++')
+        : (_lookup('CMAKE_C_COMPILER',  $scope) // 'cc');
+    my $ext = $lang eq 'CXX' ? '.cc' : '.c';
+    require File::Temp;
+    my $tmpdir = $ENV{TMPDIR} || '/tmp';
+    my ($fh, $path) = File::Temp::tempfile("smakflagXXXXXX",
+        DIR => $tmpdir, SUFFIX => $ext, UNLINK => 1);
+    print $fh "int main(void){return 0;}\n";
+    close $fh;
+    my $obj = "$path.o";
+    my $rc = system("$cc -Werror $flag -c $path -o $obj >/dev/null 2>&1");
+    unlink $obj;
+    _cache_set($scope, $var, $rc == 0 ? 1 : '');
+}
+$builtins{'check_compiler_flag'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($lang, $flag, $var) = @$args;
+    _check_flag($flag, $var, ($lang =~ /^CXX$/i ? 'CXX' : 'C'), $scope);
+};
+$builtins{'check_cxx_compiler_flag'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($flag, $var) = @$args;
+    _check_flag($flag, $var, 'CXX', $scope);
+};
+$builtins{'check_c_compiler_flag'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($flag, $var) = @$args;
+    _check_flag($flag, $var, 'C', $scope);
+};
 
 $builtins{'site_name'} = sub {
     my ($state, $args, $cmd, $scope) = @_;

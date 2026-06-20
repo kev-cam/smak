@@ -490,6 +490,13 @@ sub _resolve_genex {
             my @parts = _split_genex_args($rest, 3);
             return $parts[0] ? $parts[1] : $parts[2];
         }
+        if ($kw eq 'BOOL') {
+            # CMake false constants → 0, anything else non-empty → 1.
+            return 0 if !defined $rest || $rest eq '';
+            return 0 if $rest =~ /^(0|OFF|NO|FALSE|N|IGNORE|NOTFOUND)$/i;
+            return 0 if $rest =~ /-NOTFOUND$/;
+            return 1;
+        }
         if ($kw eq 'NOT') {
             return $rest ? 0 : 1;
         }
@@ -2575,7 +2582,7 @@ $builtins{'add_custom_command'} = sub {
         my $kw = $args->[$i];
         if ($kw eq 'OUTPUT') {
             $i++;
-            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|COMMAND_EXPAND_LISTS|DEPFILE|JOB_SERVER_AWARE|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
                 push @{$custom{output}}, $args->[$i++];
             }
         } elsif ($kw eq 'TARGET') {
@@ -2584,22 +2591,27 @@ $builtins{'add_custom_command'} = sub {
         } elsif ($kw eq 'COMMAND') {
             $i++;
             my @parts;
-            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|ARGS|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|COMMAND_EXPAND_LISTS|DEPFILE|JOB_SERVER_AWARE|TARGET|ARGS|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
                 push @parts, $args->[$i++];
             }
-            push @{$custom{commands}}, join(' ', @parts);
+            # A ';' inside an argument is a CMake list separator (the argument
+            # was a list, e.g. a genex expanding to "-p;peepopt"). On the shell
+            # ';' is a command separator, so split such elements into separate
+            # words — equivalent to COMMAND_EXPAND_LISTS / how CMake builds argv.
+            @parts = map { split /;/, $_ } @parts;
+            push @{$custom{commands}}, join(' ', grep { defined && $_ ne '' } @parts);
             # ARGS is deprecated but legal
             if ($i < @$args && $args->[$i] eq 'ARGS') {
                 $i++;
                 my @extra;
-                while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+                while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|COMMAND_EXPAND_LISTS|DEPFILE|JOB_SERVER_AWARE|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
                     push @extra, $args->[$i++];
                 }
                 $custom{commands}[-1] .= ' ' . join(' ', @extra) if @extra;
             }
         } elsif ($kw eq 'DEPENDS' || $kw eq 'MAIN_DEPENDENCY') {
             $i++;
-            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
+            while ($i < @$args && $args->[$i] !~ /^(OUTPUT|COMMAND|DEPENDS|MAIN_DEPENDENCY|BYPRODUCTS|WORKING_DIRECTORY|COMMENT|VERBATIM|APPEND|USES_TERMINAL|JOB_POOL|COMMAND_EXPAND_LISTS|DEPFILE|JOB_SERVER_AWARE|TARGET|PRE_BUILD|PRE_LINK|POST_BUILD)$/) {
                 push @{$custom{depends}}, $args->[$i++];
             }
         } elsif ($kw eq 'WORKING_DIRECTORY') {
@@ -2608,7 +2620,7 @@ $builtins{'add_custom_command'} = sub {
         } elsif ($kw eq 'COMMENT') {
             $custom{comment} = $args->[++$i];
             $i++;
-        } elsif ($kw =~ /^(VERBATIM|APPEND|USES_TERMINAL)$/) {
+        } elsif ($kw =~ /^(VERBATIM|APPEND|USES_TERMINAL|COMMAND_EXPAND_LISTS|JOB_SERVER_AWARE)$/) {
             $i++;
         } else {
             $i++;  # skip unknown

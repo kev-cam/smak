@@ -1465,7 +1465,16 @@ $builtins{'target_sources'} = sub {
     for my $a (@$args) {
         next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|FILE_SET|BASE_DIRS|TYPE|HEADERS|FILES)$/;
         next unless _is_source_file($a);  # skip headers/.inc/etc.
-        my $src = $a =~ m{^/} ? $a : File::Spec->catfile($curdir, $a);
+        my $src;
+        if ($a =~ m{^/}) {
+            $src = $a;
+        } else {
+            # A relative source already present in the build tree is a
+            # generated source (configure_file/custom_command output, e.g.
+            # kernel/version.cc) — resolve it there, not the source tree.
+            my $bin = File::Spec->catfile($state->{current_binary_dir}, $a);
+            $src = -e $bin ? $bin : File::Spec->catfile($curdir, $a);
+        }
         push @{$t->{sources}}, $src;
     }
 };
@@ -2186,8 +2195,17 @@ $builtins{'return'} = sub {
         shift @$args;
         my $p = $scope->{parent};
         for my $var (@$args) {
-            if (exists $scope->{vars}{$var}) { $p->{vars}{$var} = $scope->{vars}{$var}; }
-            else { delete $p->{vars}{$var}; }
+            if (exists $scope->{vars}{$var}) {
+                $p->{vars}{$var} = $scope->{vars}{$var};
+            } else {
+                # Not in the function's local scope, but it may be visible via
+                # the chain (a cache/root var — e.g. a check_*() result cached
+                # at root). Propagate that value rather than unsetting it; only
+                # a genuinely-undefined variable unsets in the parent.
+                my $v = _lookup($var, $scope);
+                if (defined $v) { $p->{vars}{$var} = $v; }
+                else { delete $p->{vars}{$var}; }
+            }
         }
     }
     # Signal return by setting a flag in the scope chain — eval_commands

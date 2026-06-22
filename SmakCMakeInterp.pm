@@ -3065,6 +3065,22 @@ $builtins{'enable_testing'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     $state->{testing_enabled_dirs}{$state->{current_binary_dir}} = 1;
 };
+# Open MPI 5 (PRRTE) dropped the single-dash spellings of its long placement
+# options, so a test command hardcoding the OMPI-4 form -- e.g.
+# 'mpiexec -bind-to none ...', as the Xyce regression suite does in ~430
+# CMakeLists -- fails to launch ("prun: exe-not-found") under OMPI 5. When an
+# add_test() command is an MPI launcher, normalize those options to the '--'
+# spelling, which is valid on both OMPI 4 and 5. This keeps MPI test suites
+# portable across MPI versions without per-suite patching.
+sub _mpi_launcher_compat {
+    my @cmd = @_;
+    return @cmd unless @cmd;
+    (my $exe = $cmd[0]) =~ s{.*/}{};
+    return @cmd unless $exe =~ /^(?:mpiexec|mpirun|orterun|prun|prterun)$/;
+    my %fix = map { $_ => "-$_" } qw(-bind-to -map-by -rank-by);
+    return map { $fix{$_} // $_ } @cmd;
+}
+
 $builtins{'add_test'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     return unless @$args;
@@ -3096,6 +3112,7 @@ $builtins{'add_test'} = sub {
         @cmd = @$args;
     }
     return unless defined $name && @cmd;
+    @cmd = _mpi_launcher_compat(@cmd);
     $state->{tests}{$name} = {
         command         => [@cmd],
         working_dir     => $working_dir,

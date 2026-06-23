@@ -4009,6 +4009,41 @@ sub _target_name_from_dir {
     return 'unknown';
 }
 
+# Global per-language compile flags: CMAKE_<LANG>_FLAGS plus the build-type
+# optimization flags (CMAKE_<LANG>_FLAGS_<BUILD_TYPE>). Real cmake appends both
+# to every compile; SmakCMakeInterp previously emitted neither, so every build
+# defaulted to g++ -O0 (debug) regardless of -DCMAKE_BUILD_TYPE=Release. Honors
+# an explicit -DCMAKE_<LANG>_FLAGS_<TYPE>; else falls back to cmake's standard
+# GCC/Clang defaults per build type.
+sub _lang_global_flags {
+    my ($lang, $state) = @_;
+    return '' unless $state && $state->{root_scope};
+    my $rs = $state->{root_scope};
+    my $get = sub {
+        my $k = shift;
+        my $v = $rs->{vars}{$k} // $rs->{cache}{$k};
+        return (defined $v && $v ne '') ? $v : undef;
+    };
+    my @parts;
+    if (my $g = $get->("CMAKE_${lang}_FLAGS")) { push @parts, $g; }
+    my $bt = $get->('CMAKE_BUILD_TYPE');
+    if (defined $bt && $bt ne '') {
+        my $key = "CMAKE_${lang}_FLAGS_" . uc($bt);
+        if (my $explicit = $get->($key)) {
+            push @parts, $explicit;
+        } else {
+            my %def = (
+                RELEASE        => '-O3 -DNDEBUG',
+                RELWITHDEBINFO => '-O2 -g -DNDEBUG',
+                MINSIZEREL     => '-Os -DNDEBUG',
+                DEBUG          => '-g',
+            );
+            push @parts, $def{uc $bt} if exists $def{uc $bt};
+        }
+    }
+    return join(' ', @parts);
+}
+
 sub _write_flags_make {
     my ($t, $tdir, $state, $name) = @_;
     open(my $fh, '>', "$tdir/flags.make") or die "write $tdir/flags.make: $!";
@@ -4029,7 +4064,10 @@ sub _write_flags_make {
         print $fh "# compile $lang with ", _compiler_for_lang($lang, $state), "\n";
         print $fh "${lang}_DEFINES = ", ($t->{compile_definitions} // ''), "\n";
         print $fh "${lang}_INCLUDES = ", _include_flags($t, $state), "\n";
-        print $fh "${lang}_FLAGS = ", ($t->{compile_options} // ''), $pic, "\n\n";
+        my $gflags = _lang_global_flags($lang, $state);
+        my $allflags = join(' ', grep { defined && length }
+                            (($t->{compile_options} // ''), $gflags)) . $pic;
+        print $fh "${lang}_FLAGS = ", $allflags, "\n\n";
     }
     close($fh);
 }

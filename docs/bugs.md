@@ -5,6 +5,28 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 
 ## Open
 
+### CMake interp: `if(X EQUAL Y)` warns on non-numeric operands; `-D` define not honored
+- [ ] **Symptom (2026-06-17):** `smak -cmake ../yosys -DCMAKE_BUILD_TYPE=Release
+  -DBUILD_SHARED_LIBS=ON -DYOSYS_WITHOUT_ABC=ON` on yosys 0.66 produced no
+  CMakeCache/Makefile. Emits `Argument "git_result" isn't numeric in numeric eq
+  (==) at SmakCMakeInterp.pm line 752`, and still tripped yosys's `abc is not
+  configured as a git submodule` check *despite* `-DYOSYS_WITHOUT_ABC=ON`.
+- **Where:** `SmakCMakeInterp.pm:752` — the `EQUAL` predicate evaluates a Perl
+  numeric `==` on the dereferenced operands. yosys compares a git-describe result
+  variable that is unset/"UNKNOWN" against a number; real CMake handles a
+  non-numeric `EQUAL` operand gracefully (no error), Perl warns and coerces to 0,
+  giving the wrong branch. Separately the `-DYOSYS_WITHOUT_ABC=ON` command-line
+  define did not reach the `if(NOT YOSYS_WITHOUT_ABC)` branch (option default
+  still in effect).
+- **Workaround used:** smak's bundled real cmake
+  (`/usr/local/share/smak/cmake-3.31.4-linux-x86_64/bin/cmake`) configured +
+  built yosys cleanly (rc=0). This is the shim's intended `SMAK_CMAKE_REAL`
+  fallback path.
+- **Hypothesis:** (1) `EQUAL`/`LESS`/`GREATER` should detect non-numeric operands
+  and follow CMake semantics (string/zero, no Perl numeric warning); (2) `-D<var>`
+  command-line defines must be seeded into the variable/cache scope *before* the
+  `if()` conditions referencing them are evaluated.
+
 ### nvc build: generated VHDL bootstrap libraries left incomplete
 - [x] **VERIFIED FIXED (2026-06-06):** `cd /usr/local/src/nvc-build && rm -rf lib
   && smak -j16` now produces the COMPLETE lib (all `lib/std` packages incl.
@@ -179,3 +201,21 @@ Tests need these Perl/system packages installed:
 - 2026-04-25 — Worker-drain `while (my $line = <$socket>)` loop wrapped in
   `no warnings 'closed'` so a mid-drain disconnect doesn't emit
   `readline() on closed filehandle` to STDERR.
+
+## 2026-07-01 — Deadlock: 515 jobs queued, all workers ready, nothing running (accel .so build)
+
+`regress run nvc/regr-accel` (dispatch via smak `-j12 -f run.mk`) deadlocks in
+the intermittent check with `current_dispatch_layer=0, max_dispatch_layer=0`,
+515 jobs queued at layer 0, 12 workers ready, but nothing dispatched. First
+queued job is an nvc accel `.so` build whose recipe is a two-step shell:
+
+    cd /home/claude && gen_statemachine <in.v> <top> <out.so> \
+      && gcc -O2 -shared -fPIC -o <out.so> <out.so>_nvc.c
+
+i.e. a large fan-out of independent same-layer leaf jobs (one per accel module),
+each a `A && B` compound. smak enqueues all 515 but never dispatches — layer-0
+jobs sit "ready" with idle workers. Reproduces every run; `regress` auto-detects
+(`smak dispatcher exited rc=32512`) and falls back to `make -j12`, which
+completes fine — so it's a smak dispatch-loop bug on a wide single-layer job set
+with compound `&&` recipes, not a build-correctness issue. Same family as the
+recursive/generated-build incompleteness already noted for nvc-accel/iverilog.

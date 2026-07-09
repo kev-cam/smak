@@ -4358,6 +4358,22 @@ sub interpret_project {
         $root_scope->{cache}{$k} = $cli_defines->{$k};
     }
 
+    # Seed CMAKE_<LANG>_FLAGS from the environment (CFLAGS/CXXFLAGS/FFLAGS) the
+    # way real cmake does on first configure, so an env-driven build gets its
+    # flags honored (e.g. optimization) instead of silently dropped. A value
+    # already set via -D (or a -C cache file) takes precedence and is left
+    # untouched; env only fills an otherwise-empty flag var.
+    my %env_flag = (C => 'CFLAGS', CXX => 'CXXFLAGS', Fortran => 'FFLAGS');
+    for my $lang (sort keys %env_flag) {
+        my $var = "CMAKE_${lang}_FLAGS";
+        my $cur = $root_scope->{vars}{$var} // $root_scope->{cache}{$var};
+        next if defined $cur && $cur ne '';
+        my $ev = $ENV{ $env_flag{$lang} };
+        next unless defined $ev && $ev ne '';
+        $root_scope->{vars}{$var}  = $ev;
+        $root_scope->{cache}{$var} = $ev;
+    }
+
     my $commands = parse_file("$source_dir/CMakeLists.txt");
     eval_commands($commands, $state, $root_scope);
 

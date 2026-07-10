@@ -4352,11 +4352,22 @@ sub interpret_project {
     # interp (no bundled cmake binary required).
     $root_scope->{vars}{CMAKE_COMMAND} = 'cmake';
 
-    # Initial cache files from cmake -C
+    # Initial cache files from cmake -C. While evaluating each, point
+    # CMAKE_CURRENT_LIST_DIR/FILE at the cache file's own location (as include()
+    # does) so a cache that does include(${CMAKE_CURRENT_LIST_DIR}/other.cmake)
+    # resolves relative to itself — e.g. the authoritative
+    # trilinos-MPI-base.cmake including trilinos-base.cmake from its own dir.
     for my $cache (@$cache_files) {
         next unless -f $cache;
-        my $cmds = parse_file($cache);
+        my $abs = File::Spec->rel2abs($cache);
+        my $cmds = parse_file($abs);
+        my $saved_dir  = $root_scope->{vars}{CMAKE_CURRENT_LIST_DIR};
+        my $saved_file = $root_scope->{vars}{CMAKE_CURRENT_LIST_FILE};
+        $root_scope->{vars}{CMAKE_CURRENT_LIST_DIR}  = dirname($abs);
+        $root_scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $abs;
         eval_commands($cmds, $state, $root_scope);
+        $root_scope->{vars}{CMAKE_CURRENT_LIST_DIR}  = $saved_dir;
+        $root_scope->{vars}{CMAKE_CURRENT_LIST_FILE} = $saved_file;
     }
     # CLI -D overrides (seed as top-scope vars + cache)
     for my $k (sort keys %$cli_defines) {

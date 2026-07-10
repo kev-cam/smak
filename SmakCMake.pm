@@ -255,6 +255,19 @@ sub parse_flags {
     close($fh);
 }
 
+# Parse a gcc -MD/-MF depfile ("target: dep1 dep2 \<newline> dep3 ...") and
+# return the list of prerequisites (everything after the first colon). Used to
+# add header dependencies to an object's rule so a header change rebuilds it.
+sub _parse_cc_depfile {
+    my ($file) = @_;
+    open(my $fh, '<', $file) or return ();
+    local $/; my $c = <$fh>; close($fh);
+    return () unless defined $c;
+    $c =~ s/\\\n/ /g;        # splice line continuations
+    $c =~ s/^[^:]*:\s*//;    # drop the "target:" prefix (first colon)
+    return grep { length } split /\s+/, $c;
+}
+
 # Generate smak rules from parsed CMake data.
 # Populates the caller's %fixed_deps, %fixed_rule, %MV tables.
 #
@@ -339,7 +352,34 @@ sub generate_smak_rules {
                     join(' ', grep { $_ ne '' } @parts);
 
                 my $dep_key = "$makefile_key\t$obj";
-                $fixed_deps->{$dep_key} = [$src];
+                # Augment the object's prerequisites with the headers listed in
+                # the compiler-generated .d depfile (from a prior build), the way
+                # `make` -includes the .d. Without this a header-only change
+                # (e.g. a regenerated configure_file output like Teuchos_config.h,
+                # or a device .h struct edit) leaves the object stale -> silent
+                # wrong results / ABI mismatch. Only existing files: a deleted
+                # header can't leave a still-valid object, and a missing prereq
+                # with no rule would otherwise wedge the build.
+                my @deps = ($src);
+                if (-f $abs_depfile) {
+                    # Scope tracked headers to the project's own source and build
+                    # trees — where iterative edits and configure_file
+                    # regenerations happen (the cases that leave objects stale).
+                    # Installed/system headers (Trilinos, libc) are the bulk of a
+                    # .d — ~450 of ~460 per Xyce object — and never change in a
+                    # dev cycle, so tracking them only bloats the dep graph (and
+                    # its stat pass) 10x. If an installed header does change
+                    # (a dependency reinstall), a clean rebuild is the norm.
+                    my $sdir = $cmake_info->{source_dir} // '';
+                    my %seen = ($src => 1);
+                    for my $h (_parse_cc_depfile($abs_depfile)) {
+                        next if $seen{$h}++;
+                        next unless index($h, $build_dir) == 0
+                                 || ($sdir ne '' && index($h, $sdir) == 0);
+                        push @deps, $h if -f $h;
+                    }
+                }
+                $fixed_deps->{$dep_key} = \@deps;
                 $fixed_rule->{$dep_key} = $compile_cmd;
             }
         }

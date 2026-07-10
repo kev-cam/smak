@@ -4130,7 +4130,13 @@ sub _write_link_txt {
     my $link_cmd;
     if ($t->{type} eq 'library' && $t->{libtype} eq 'static') {
         my $out = "lib$name.a";
-        $link_cmd = "/usr/bin/ar qc $out " . join(' ', @objs) . "\n" .
+        # rm -f first, exactly like CMake's static-lib link rule. `ar qc`
+        # APPENDS: re-running the rule on an existing archive (any incremental
+        # rebuild) would add every member a second time -> duplicate .o's ->
+        # "multiple definition" at final link. Removing the stale archive first
+        # also drops members whose sources were deleted.
+        $link_cmd = "rm -f $out\n" .
+                    "/usr/bin/ar qc $out " . join(' ', @objs) . "\n" .
                     "/usr/bin/ranlib $out";
     } elsif ($t->{type} eq 'library' && $t->{libtype} eq 'shared') {
         my $compiler = _compiler_for_lang($lang, $state);

@@ -262,3 +262,26 @@ jobs sit "ready" with idle workers. Reproduces every run; `regress` auto-detects
 completes fine — so it's a smak dispatch-loop bug on a wide single-layer job set
 with compound `&&` recipes, not a build-correctness issue. Same family as the
 recursive/generated-build incompleteness already noted for nvc-accel/iverilog.
+
+## Out-of-tree (VPATH) builds: core target-existence not VPATH-aware
+
+Found building Verilator out-of-tree (configure run from a separate build dir,
+`VPATH = $(srcdir)`).
+
+1. **obj_dbg recursive-capture chdir** — FIXED (create -C subdir if missing during
+   dry-run capture).
+2. **missing-intermediate check ignored VPATH** — FIXED (resolve_vpath before
+   deciding a dep is missing).
+3. **core target build still ignores VPATH (OPEN)** — smak's normal
+   existence/needs_rebuild checks test `-e "$dir/$target"` only. A prerequisite
+   that lives on the VPATH (e.g. `configure`, up-to-date in `$(srcdir)`) is seen
+   as absent and rebuilt — `config.status: configure` triggers `autoconf` in the
+   build dir → "no input file" → build aborts. Fix needs resolve_vpath threaded
+   through the target-existence + needs_rebuild path (and their timestamp reads),
+   not just the missing-intermediate check.
+4. **man-page tasks fail (OPEN)** — `help2man`/`pod2man` for verilator.1 etc.
+   fail (exit 127 / exit 2) under smak's recipe-exec env though they succeed
+   under make. Non-fatal to verilator_bin but aborts the default `all` goal.
+
+Verilator itself builds fine with plain `make` out-of-tree; these are smak VPATH
+gaps.

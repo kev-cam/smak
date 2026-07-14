@@ -5663,6 +5663,17 @@ sub build_target {
 
                     # Check if dependency file exists (relative to current working directory)
                     if (!-e $dep) {
+                        # A dep present via VPATH is NOT missing. In an out-of-tree
+                        # build (e.g. Verilator configured from a separate build dir),
+                        # `configure`/`configure.ac` live in $(srcdir) and are found
+                        # by make through `vpath %`/VPATH. Without this check smak
+                        # thought `configure` was a missing intermediate and ran
+                        # `autoconf` in the build dir ("autoconf: error: no input
+                        # file"), aborting the build. Match make: resolve via vpath
+                        # first and skip if it exists there.
+                        my $vp = resolve_vpath($dep, '.');
+                        next if $vp ne $dep && -e $vp;
+
                         # Check if dependency has a rule (is an intermediate, not a source file)
                         my $dep_key = "$makefile\t$dep";
                         my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};
@@ -12269,6 +12280,14 @@ sub run_job_master {
                                 # Check if dependency file exists (relative to working directory)
                                 my $dep_path = $dep =~ m{^/} ? $dep : "$dir/$dep";
                                 if (!-e $dep_path) {
+                                    # A dep present via VPATH is NOT missing (out-of-tree
+                                    # build: configure/configure.ac live in $(srcdir) and
+                                    # are found through VPATH). Without this, smak queued a
+                                    # rebuild of `configure` and ran autoconf in the build
+                                    # dir ("no input file"), aborting the build. Match make.
+                                    my $vp = resolve_vpath($dep, $dir);
+                                    next if $vp ne $dep && (-e $vp || -e "$dir/$vp");
+
                                     # Check if dependency has a rule (is an intermediate, not a source file)
                                     my $dep_key = "$makefile\t$dep";
                                     my $has_rule = exists $fixed_rule{$dep_key} || exists $pattern_rule{$dep_key};

@@ -183,6 +183,49 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
      just SSH.) Verified: `smak --ssh=localhost -j2` builds (2/2 workers),
      test_ssh_localhost.sh -> SUCCESS.
 
+### Executable links before its static-library dependency is archived
+- [ ] **Symptom (found 2026-07-10, while testing the ar `rm -f` fix):** a clean
+  build of a project with a static library + an executable that links it returns
+  **exit 1**, even though both artifacts are built correctly. smak dispatches the
+  exe's link rule *before* the static lib's archive rule has completed: the first
+  link fails (`libX.a` doesn't exist yet), the archive then runs, the exe
+  re-links and succeeds — but the failed first attempt's nonzero status leaks
+  into the overall run exit code.
+- **Surfaces in:** any CMake-interp project with `add_library(<n> STATIC …)` +
+  `add_executable` + `target_link_libraries(app <n>)`. Deterministic at `-j1`
+  (rc=1 every run); at `-j4` it can pass (rc=0) by timing luck when the archive
+  finishes before the link is attempted. NOT caused by the `rm -f` archive fix —
+  reproduced identically with old code (`git stash`) at `-j1`.
+- **Hypothesis:** the exe→`lib.a` edge is added as an *order-only* dep
+  (`SmakCMake::generate_smak_rules`, ~L386-397 "Add as order-only dep"), which
+  doesn't force the archive recipe to fully complete before the exe link is
+  dispatched on the first build. Real make orders the exe link strictly after
+  `lib.a`'s recipe (a normal prerequisite, not order-only).
+- **Workaround:** re-run smak (2nd invocation: `lib.a` exists → exe links clean,
+  rc=0), or ignore rc=1 when the expected artifacts exist.
+- **Repro:** `add_library(mylib STATIC a.cpp b.cpp); add_executable(app main.cpp);
+  target_link_libraries(app mylib)` → interpret+generate → `smak -j1` → rc=1,
+  `app` present.
+
+### No-op rebuild does not complete on large trees (rule re-derivation each run)
+- [ ] **Symptom (found 2026-07-10):** running smak on an already-built large
+  CMake tree with nothing changed does not finish within 120–300s and recompiles
+  nothing (`rc=124` timeout, 0 compiles). Xyce = 98 targets / ~462 objects.
+- **Surfaces in:** `/usr/local/src/xyce-build` over the 9p `/mnt/c` Windows mount
+  (WSL). Pre-existing — reproduced with AND without the `.d` header-dep feature
+  (gap 4), so not caused by it.
+- **Hypothesis:** every smak invocation re-derives all rules (`try_cmake_project`
+  re-parses CMakeCache/Makefile2/DependInfo/flags.make/link.txt for all targets)
+  and re-runs the full staleness pass with no caching between runs — O(targets ×
+  deps) of `stat()`, pathological when `stat` is slow (9p mount). The `.d`
+  header-dep feature adds ~49s of depfile reads on 9p (file-read bound;
+  negligible on native ext4, and scoped to in-tree headers).
+- **Workaround:** build on native ext4 (e.g. `/home/claude`), NOT the 9p
+  `/mnt/c` mount — already the documented guidance. A persistent
+  rules/staleness cache across invocations would be the real fix.
+- **Repro:** `cd /usr/local/src/xyce-build` (fully built) `&& time smak -j8` →
+  does not complete.
+
 ## Container deps (cross-distro)
 Tests need these Perl/system packages installed:
 - `perl-IO-Tty` (Tumbleweed) / `libio-pty-perl` (Debian/Ubuntu): for the

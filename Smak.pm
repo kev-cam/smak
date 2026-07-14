@@ -869,6 +869,20 @@ sub execute_builtin {
                 }
             }
 
+            # A recursive `make -C <subdir>` may target a build directory that a
+            # prerequisite rule creates at build time (e.g. Verilator's
+            #   obj_dbg: ; mkdir -p $@
+            #   .../verilator_bin_dbg: obj_dbg ... ; $(MAKE) -C obj_dbg ...).
+            # Real make builds the obj_dbg prerequisite (the mkdir) before running
+            # the recipe, so the dir exists by the time it recurses. smak captures
+            # the recursion during dry-run PLANNING — before any prereq has run —
+            # so the dir does not exist yet and chdir would fail (breaking the
+            # capture and hence the whole build). Create it so the sub-makefile
+            # can be parsed; the real build re-uses the same directory.
+            unless (-d $sub_directory) {
+                require File::Path;
+                File::Path::make_path($sub_directory);
+            }
             chdir($sub_directory) or do {
                 warn "Warning: Could not chdir to '$sub_directory': $!\n";
                 exit(1);
@@ -1807,7 +1821,9 @@ sub expand_vars {
                 # $(shell command)
                 if (@args >= 1) {
                     my $cmd = $args[0];
+                    # A failed/empty $(shell ...) returns undef; make yields "".
                     $replacement = `$cmd`;
+                    $replacement = '' unless defined $replacement;
                     chomp $replacement;
                 }
             } elsif ($func eq 'foreach') {

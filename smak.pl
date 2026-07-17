@@ -170,6 +170,7 @@ my $retries;  # Max retry count for failed jobs (undef = auto-detect based on -j
 my $check = '';  # Check mode - validate smak -n matches make -n ('' = off, '1' = on, 'quiet' = quiet)
 my $test = '';   # Test mode - full regression: -test=clean,all (target1=clean, target2=build)
 my $keep_going = 0;  # Keep going after failures (like make -k)
+my $fail_fast = 0;   # Abort the run after N job failures (0 = disabled)
 my $test_worker = 0;  # Test worker protocol mode
 
 # Check for -norc early (before reading .smak.rc)
@@ -366,6 +367,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'yes' => \$yes,
         'j|jobs:i' => sub { $jobs = $_[1]; $jobs_specified = 1; },
         'k|keep-going' => \$keep_going,
+        'fail-fast:i' => sub { $fail_fast = ($_[1] && $_[1] > 0) ? $_[1] : 1; },
         'cli' => \$cli,
         'v|verbose' => \$verbose,
         'ssh=s' => \$ssh_host,
@@ -395,6 +397,7 @@ GetOptions(
     'yes' => \$yes,
     'j|jobs:i' => sub { $jobs = $_[1]; $jobs_specified = 1; },
     'k|keep-going' => \$keep_going,
+    'fail-fast:i' => sub { $fail_fast = ($_[1] && $_[1] > 0) ? $_[1] : 1; },
     'cli' => \$cli,
     'v|verbose' => \$verbose,
     'ssh=s' => \$ssh_host,
@@ -657,6 +660,12 @@ Options:
   --dry-run, --recon          Same as -n
   -s, --silent, --quiet       Don't print commands being executed
   -j, --jobs [N]              Run N jobs in parallel (default: 1, -j = CPU count)
+  -k, --keep-going            Continue building other targets after a failure
+  --fail-fast[=N]             Abort the run once N jobs have failed (default 1).
+                              Overrides -k: keeps going below the threshold,
+                              tears down at it. Use for long sweeps where a few
+                              failures are tolerable but a pile-up means the
+                              change is bad and the rest of the run is waste.
   -cli                        Enter CLI mode (interactive shell for building)
   -h, --help                  Display this help message
   --yes                       Auto-answer yes to prompts (for -Kreport)
@@ -950,6 +959,9 @@ set_max_retries($retries);
 
 # Set keep-going mode (continue after failures)
 set_keep_going($keep_going);
+
+# Fail-fast: abort the run once N jobs have failed (bounded keep-going)
+set_fail_fast($fail_fast);
 
 # Set verbose mode via environment variable so Smak.pm can access it
 # SMAK_DEBUG implies verbose mode, -cli defaults to wheel mode

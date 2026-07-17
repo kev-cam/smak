@@ -83,6 +83,7 @@ our @EXPORT_OK = qw(
     set_jobs
     set_max_retries
     set_keep_going
+    set_fail_fast
     start_job_server
     stop_job_server
     tee_print
@@ -317,6 +318,8 @@ our $project_root;  # Root directory of project (set by job-master at startup)
 our $job_server_idle_timeout = 600;  # Idle timeout in seconds (0 = no timeout, default 10 min)
 our $detached_server_pid;  # PID of detached job-master (skip in wait_for_jobs)
 our $keep_going = 0;  # If true, continue building other targets after a failure (like make -k)
+our $fail_fast = 0;   # If >0, abort the run once this many jobs have failed
+our $failed_job_count = 0;  # Running tally of failed jobs (for fail-fast + reporting)
 
 # Output control
 our $stomp_prompt = "\r        \r";  # Clear spinner area (8 chars) before printing
@@ -350,6 +353,32 @@ sub set_max_retries {
 sub set_keep_going {
     my ($enabled) = @_;
     $keep_going = $enabled;
+}
+
+# Abort the run once N jobs have failed (0 disables). This is a BOUNDED
+# keep-going: dispatch continues through the first N-1 failures (so a regression
+# sweep still gathers results) and tears down on the Nth, instead of running the
+# whole job set only to report a pile of failures at the end.
+sub set_fail_fast {
+    my ($n) = @_;
+    $fail_fast = $n // 0;
+}
+
+# Record a single job failure and decide whether dispatch should stop NOW.
+# Call exactly once per failed job. With fail-fast active it overrides
+# keep-going: keep going below the threshold, stop at or past it. Without it,
+# the legacy rule -- stop on the first failure unless keep-going -- applies.
+sub note_job_failure {
+    $failed_job_count++;
+    if ($fail_fast) {
+        if ($failed_job_count >= $fail_fast) {
+            print STDERR "smak: fail-fast: aborting after $failed_job_count "
+                . "job failure(s) (threshold $fail_fast)\n";
+            return 1;
+        }
+        return 0;   # below threshold: bounded keep-going, press on
+    }
+    return !$keep_going;
 }
 
 sub start_job_server {
@@ -15027,7 +15056,7 @@ sub run_job_master {
                                 print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 
                                 # Stop on failure unless keep_going is set
-                                if (!$keep_going && !$stop_requested) {
+                                if (!$stop_requested && note_job_failure()) {
                                     $stop_requested = 1;
                                     @job_queue = ();  # Clear job queue
                                     # Silently fail all pending composite targets (don't notify client)
@@ -16654,7 +16683,7 @@ sub run_job_master {
                     print STDERR "Builtin fork group '$bf_group': $grp->{completed}/$grp->{total} done (max_exit=$grp->{max_exit})\n" if $ENV{SMAK_DEBUG};
 
                     # If one failed and not keep_going, request stop
-                    if ($bf_exit_code != 0 && !$keep_going && !$stop_requested) {
+                    if ($bf_exit_code != 0 && !$stop_requested && note_job_failure()) {
                         $stop_requested = 1;
                         @job_queue = ();
                         print STDERR "smak: *** [$bf_target] Error $bf_exit_code\n";
@@ -16695,7 +16724,7 @@ sub run_job_master {
                     print $master_socket "JOB_COMPLETE $bf_target $bf_exit_code\n" if $master_socket;
                     check_child_completion($bf_target, $bf_exit_code);
 
-                    if (!$keep_going && !$stop_requested) {
+                    if (!$stop_requested && note_job_failure()) {
                         $stop_requested = 1;
                         @job_queue = ();
                         print STDERR "smak: *** [$bf_target] Error $bf_exit_code\n";
@@ -17556,7 +17585,7 @@ sub run_job_master {
                             print STDERR "Task $task_id FAILED: $job->{target} (exit code $exit_code)\n";
 
                             # Stop on failure unless keep_going is set
-                            if (!$keep_going && !$stop_requested) {
+                            if (!$stop_requested && note_job_failure()) {
                                 $stop_requested = 1;
                                 @job_queue = ();  # Clear job queue
                                 # Silently fail all pending composite targets (don't notify client)

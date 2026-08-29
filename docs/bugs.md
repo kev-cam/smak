@@ -825,3 +825,25 @@ Found building Verilator out-of-tree (configure run from a separate build dir,
 
 Verilator itself builds fine with plain `make` out-of-tree; these are smak VPATH
 gaps.
+
+## cmake-shim: ramulator FetchContent fails under smak cmake (2026-08-24)
+Vortex third_party/ramulator (`cmake ..`, cmake 3.x FetchContent for
+argparse + ext/ spdlog/yaml-cpp): under the /usr/local/bin/cmake smak
+shim configure dies with "CMake Error: No content details recorded for
+argparse / No details have been set for content: argparse".  With
+SMAK_CMAKE_REAL=1 the identical invocation configures clean (4.6s) and
+builds.  Suspect the shim drops/reorders FetchContent_Declare state
+(project re-entry?).  Repro: /home/claude/vortex/third_party/ramulator,
+rm -rf build && mkdir build && cd build && cmake ..
+
+### Pattern rules with no prerequisites skipped in job-server mode
+- 2026-08-29.  A Makefile rule `out.%:` (recipe, no prerequisite) builds
+  fine under GNU make and under smak's sequential in-process path, but the
+  job-server path skips it: "Skipping pattern rule 'out.%' for target
+  'out.1' (stem='1', no source file exists)" -> "No rule for target,
+  assuming it exists" -> 0 jobs queued, exit 0 with nothing built.
+  GNU make semantics: a pattern rule with an empty prerequisite list is
+  applicable regardless of any source file existing.  The sequential path
+  agreeing with make while the job-server path silently no-ops is the
+  dangerous part (exit 0, no artifacts).  Repro: fsmspec/spansmoke history;
+  workaround: explicit per-target rules.

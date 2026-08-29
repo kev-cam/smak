@@ -12201,9 +12201,11 @@ sub run_job_master {
     $ENV{SMAK_JOB_SERVER} = "127.0.0.1:$master_port";
 
     # Create socket server for workers
+    # SMAK_WORKER_BIND / SMAK_WORKER_PORT: LAN-facing worker listener so
+    # remote workers (e.g. --ssh hosts without tunnels) can dial in directly.
     our $worker_server = IO::Socket::INET->new(
-        LocalAddr => '127.0.0.1',
-        LocalPort => 0,  # Let OS assign port
+        LocalAddr => $ENV{SMAK_WORKER_BIND} || '127.0.0.1',
+        LocalPort => $ENV{SMAK_WORKER_PORT} || 0,
         Proto     => 'tcp',
         Listen    => $num_workers,
         Reuse     => 1,
@@ -13131,14 +13133,23 @@ sub run_job_master {
         my ($host, $worker_port, $mount_dir) = @_;
 
         my $remote_port = 30000 + int(rand(10000));
-        my @ssh_cmd = ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $host);
+        # SMAK_WORKER_CONNECT=addr:port — the remote worker dials this address
+        # directly (job-master exposed via SMAK_WORKER_BIND); skip the -R
+        # tunnel.  For hosts whose sshd lands in a jump environment (e.g. a
+        # Cygwin front-end with the worker in WSL behind NAT), tunnels bound
+        # on the front-end loopback are unreachable from the worker anyway.
+        my $direct = $ENV{SMAK_WORKER_CONNECT};
+        my @ssh_cmd = $direct
+            ? ('ssh', '-n', $host)
+            : ('ssh', '-n', '-R', "$remote_port:127.0.0.1:$worker_port", $host);
+        my $connect_addr = $direct || "127.0.0.1:$remote_port";
 
         # Localhost shares our filesystem: run the real local worker binary
         # against the actual cwd -- no ~/.cache staging, no sshfs round-trip.
         if ($host =~ /^(?:localhost|127\.0\.0\.1|::1)$/) {
             my $cwd = Cwd::getcwd();
             push @ssh_cmd, "$bin_dir/smak-worker -cd " . quotemeta($cwd)
-                         . " 127.0.0.1:$remote_port";
+                         . " $connect_addr";
             exec(@ssh_cmd);
             die "Failed to exec SSH worker on $host: $!\n";
         }
@@ -13152,7 +13163,7 @@ sub run_job_master {
         }
 
         if ($mount_dir) {
-            push @ssh_cmd, "$remote_worker -cd $mount_dir 127.0.0.1:$remote_port";
+            push @ssh_cmd, "$remote_worker -cd $mount_dir $connect_addr";
         } else {
             # No mount specified — auto-mount via sshfs through forwarded SSH port.
             # Mount the PARENT directory so the project dir name is preserved
@@ -13179,7 +13190,7 @@ sub run_job_master {
                 "fi; " .
                 "mountpoint -q \$MNT 2>/dev/null || " .
                 "sshfs $sshfs_opts $sshfs_src \$MNT; ";
-            push @ssh_cmd, "${setup}$remote_worker -cd \$MNT/$project_name 127.0.0.1:$remote_port";
+            push @ssh_cmd, "${setup}$remote_worker -cd \$MNT/$project_name $connect_addr";
         }
         exec(@ssh_cmd);
         die "Failed to exec SSH worker on $host: $!\n";

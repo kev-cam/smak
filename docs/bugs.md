@@ -847,3 +847,13 @@ rm -rf build && mkdir build && cd build && cmake ..
   agreeing with make while the job-server path silently no-ops is the
   dangerous part (exit 0, no artifacts).  Repro: fsmspec/spansmoke history;
   workaround: explicit per-target rules.
+
+### Recipe $$(...) substitution empty + failure exit not propagated
+- 2026-08-29, fused-VeeR pipeline Makefile.  A recipe line of the form
+  `out=$$(cmd | grep ...); echo "$$b: $$out"; ... || exit 1` (backslash-
+  continued for-loop) ran under the job-server with the command
+  substitution EMPTY (binary runs fine by hand) — some $$ / $( )
+  expansion path mangles it.  Worse: the recipe's `exit 1` fired
+  ("CERT FAIL" printed) but smak exited 0 overall — build failures in
+  phony-target recipes are not propagated.  Workaround: put shell logic
+  in a script, call it as a plain recipe line.

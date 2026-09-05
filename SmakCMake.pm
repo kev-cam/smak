@@ -448,6 +448,46 @@ sub generate_smak_rules {
         $fixed_rule->{$dep_key} = '';  # no recipe — just deps
     }
 
+    # CMake's special targets.  The generated Makefile provides these on top
+    # of the per-target build rules; reading the metadata instead of the
+    # Makefile lost them, so `smak install` silently did nothing (Trilinos
+    # for Xyce, 2026-09-05).  Same recipes cmake emits:
+    #   install:        preinstall(all) ; cmake -P cmake_install.cmake
+    #   install/fast:   no deps          ; cmake -P cmake_install.cmake
+    #   install/local:  -DCMAKE_INSTALL_LOCAL_ONLY=1
+    #   install/strip:  -DCMAKE_INSTALL_DO_STRIP=1
+    #   test:           ctest --force-new-ctest-process
+    #   clean:          remove every object and output smak knows about
+    my $cmake = $cmake_info->{cmake_command} // 'cmake';
+    my $cd = "cd $build_dir && ";
+    my %special = (
+        'install'       => [['all'], "${cd}$cmake -P cmake_install.cmake"],
+        'install/fast'  => [[],      "${cd}$cmake -P cmake_install.cmake"],
+        'install/local' => [['all'], "${cd}$cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake"],
+        'install/strip' => [['all'], "${cd}$cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake"],
+        'preinstall'    => [['all'], ''],
+    );
+    my $ctest = $cmake;
+    $ctest =~ s{cmake([^/]*)$}{ctest$1};
+    $special{'test'} = [[], "${cd}$ctest --force-new-ctest-process"] if -x $ctest;
+    if (-f "$build_dir/cmake_install.cmake") {
+        for my $name (sort keys %special) {
+            my $dep_key = "$makefile_key\t$name";
+            next if exists $fixed_rule->{$dep_key};     # a real rule wins
+            $fixed_deps->{$dep_key} = $special{$name}[0];
+            $fixed_rule->{$dep_key} = $special{$name}[1];
+        }
+    }
+    my @clean_files;
+    for my $name (sort keys %$targets) {
+        push @clean_files, map { m{^/} ? $_ : "$build_dir/$_" } @{$targets->{$name}{objects} // []};
+    }
+    push @clean_files, map { "$build_dir/$_" } values %target_output;
+    if (@clean_files && !exists $fixed_rule->{"$makefile_key\tclean"}) {
+        $fixed_deps->{"$makefile_key\tclean"} = [];
+        $fixed_rule->{"$makefile_key\tclean"} = "rm -f " . join(' ', @clean_files);
+    }
+
     return \%target_output;
 }
 

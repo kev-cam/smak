@@ -5,6 +5,53 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 
 ## Open
 
+### `smak <goal>` with no rule for the goal exits 0 silently
+- [x] **FIXED (2026-09-05):** `Smak::goal_has_rule` (Smak.pm) + a pre-build check
+  in smak.pl over the command-line goals: a goal with no explicit rule (incl.
+  variable-expanded keys like `$(EXE)$(EXEEXT)`), no matching pattern/suffix/
+  built-in implicit rule, no VPATH hit and no file behind it now stops with
+  `smak: *** No rule to make target 'X'.  Stop.` (non-zero). Dependencies keep
+  the existing leniency (assumed to exist). Test: `test/test_no_rule_goal.sh`.
+- **Symptom:** `smak nosuchtarget` and `smak -n nosuchtarget` printed nothing
+  and exited 0 (GNU make: error, exit 2). Surfaced as `smak install` in a
+  cmake-metadata build dir "succeeding" in 5 s having installed nothing
+  (Trilinos 14.4 for Xyce).
+- **Cause:** the job-master's queue path treats a target with no rule, no
+  deps and no file as "assume it exists" (Smak.pm, `No rule for target ...
+  assuming it exists`), which is meant for source-file dependencies but was
+  applied to top-level goals too.
+
+### SmakCMake (cmake-metadata mode): no `install` / `clean` / `test` targets
+- [x] **FIXED (2026-09-05):** `generate_smak_rules` now synthesizes CMake's
+  special targets from the metadata when `cmake_install.cmake` exists:
+  `install` (deps `all`), `install/fast`, `install/local`, `install/strip`,
+  `preinstall`, `test` (ctest, if found next to cmake) and `clean` (rm of all
+  known objects/outputs). Verified: `smak install` installed Trilinos 14.4
+  (48 libs, 3257 headers, TrilinosConfig.cmake) in 65 s. Test:
+  `test/test_cmake_special_targets.pl`.
+- **Symptom:** SmakCMake only generated per-target compile/link rules and
+  `all`; the top-level Makefile's `install: preinstall ; cmake -P
+  cmake_install.cmake` was never read, and (bug above) the missing goal was
+  silently accepted.
+
+### CMake interp: install/packaging commands report errors that are not errors
+- [ ] **Symptom (2026-09-05, Xyce 7.11 CMakeLists via `smak -cmake`):** the
+  interpreter prints `CMake Error: Bad COMPATIBILITY value used for
+  WRITE_BASIC_CONFIG_VERSION_FILE(): "AnyNewerVersion"`, `No VERSION specified
+  for WRITE_BASIC_CONFIG_VERSION_FILE()`, `INSTALL_PREFIX must be an absolute
+  path` and `CPack welcome resource file ... could not be found`, yet exits 0
+  and generates a complete build (147 targets). Real cmake accepts all of
+  these. Cosmetic for building (install/export/CPack are documented no-ops)
+  but alarming; `write_basic_package_version_file` should accept
+  `AnyNewerVersion|SameMajorVersion|SameMinorVersion|ExactVersion` and take
+  VERSION from `PROJECT_VERSION`, and CPack `include(CPack)` should be a quiet
+  no-op.
+- **Also:** `Argument "CMAKE_PROJECT_VERSION_MAJOR" isn't numeric in numeric
+  ge (>=) at SmakCMakeInterp.pm line 756` x4 — same class as the open
+  `EQUAL` entry below (unset/unexpanded operand in a numeric comparison);
+  `GREATER_EQUAL` needs the same treatment.
+
+
 ### CMake interp: `if(X EQUAL Y)` warns on non-numeric operands; `-D` define not honored
 - [ ] **Symptom (2026-06-17):** `smak -cmake ../yosys -DCMAKE_BUILD_TYPE=Release
   -DBUILD_SHARED_LIBS=ON -DYOSYS_WITHOUT_ABC=ON` on yosys 0.66 produced no

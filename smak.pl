@@ -1357,7 +1357,12 @@ if (!$debug) {
                 die "smak: *** No targets. Stop.\n";
             }
         } else {
-            # Build specified targets
+            # Build specified targets.  Refuse up front what make would refuse:
+            # a goal with no rule of any kind and no file behind it.
+            foreach my $target (@targets) {
+                die "smak: *** No rule to make target '$target'.  Stop.\n"
+                    unless Smak::goal_has_rule($target);
+            }
             foreach my $target (@targets) {
                 build_target($target);
             }

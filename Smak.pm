@@ -1489,6 +1489,47 @@ sub find_matching_patterns {
     return @matches;
 }
 
+# Can this explicitly requested goal be made at all?  GNU make stops with
+# "No rule to make target 'X'.  Stop." (exit 2) when a command-line goal has
+# no explicit rule, no matching pattern/suffix/built-in implicit rule, and
+# does not exist as a file.  smak's job path deliberately assumes such names
+# exist when they appear as *dependencies* (source files, .git metadata), so
+# the check has to happen at the goal level.  Conservative: any plausible way
+# to build the target returns true; only a definitely unmakeable goal fails.
+sub goal_has_rule {
+    my ($target) = @_;
+    return 1 if -e $target;
+    my $key = "$makefile\t$target";
+    for my $h (\%fixed_deps, \%fixed_rule, \%pseudo_deps, \%pseudo_rule) {
+        return 1 if exists $h->{$key};
+    }
+    # Rule keys may carry unexpanded variables (e.g. prog$(EXEEXT)).
+    for my $h (\%fixed_deps, \%pseudo_deps) {
+        for my $stored_key (keys %$h) {
+            next unless $stored_key =~ /^\Q$makefile\E\t(.+)$/;
+            my $expanded = transform_make_vars($1);
+            while ($expanded =~ /\$MV\{([^}]+)\}/) {
+                my $var = $1;
+                my $val = $MV{$var} // '';
+                $expanded =~ s/\$MV\{\Q$var\E\}/$val/;
+            }
+            return 1 if $expanded eq $target;
+        }
+    }
+    return 1 if find_matching_patterns($target);
+    return 1 if can_build_from_suffix_rule($target, $makefile);
+    # Built-in implicit rules: X.o from X.{c,cc,cpp,C,cxx,c++}; X from X.c etc.
+    my $base = $target =~ /^(.+)\.o$/ ? $1 : $target;
+    for my $ext ('c', 'cc', 'cpp', 'C', 'cxx', 'c++') {
+        return 1 if -f "$base.$ext";
+    }
+    # VPATH may supply the file.
+    use Cwd 'getcwd';
+    my $resolved = eval { resolve_vpath($target, getcwd()) };
+    return 1 if defined $resolved && $resolved ne $target && -e $resolved;
+    return 0;
+}
+
 # Apply target-specific variables to %MV in an ephemeral context.
 # Returns a hashref of saved original values (pass to restore_target_specific_vars).
 # GNU make propagates target-specific variables to prerequisites, so this should

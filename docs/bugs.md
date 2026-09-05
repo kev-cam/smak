@@ -34,6 +34,18 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   cmake_install.cmake` was never read, and (bug above) the missing goal was
   silently accepted.
 
+### CMake interp: linked executables/shared libs get no build-tree RPATH
+- [ ] **Symptom (2026-09-05, Xyce 7.11 via `smak -cmake`, BUILD_SHARED_LIBS=ON):**
+  `src/Xyce` links fine but fails to start: `libXyceLib.so: cannot open shared
+  object file`. The generated link.txt has no `-Wl,-rpath,<build dirs>`; real
+  cmake adds the build-tree RPATH by default (CMAKE_SKIP_BUILD_RPATH=OFF) and
+  only strips it at install time. Workaround: LD_LIBRARY_PATH wrapper
+  (`~/tools/xyce/bin/Xyce`).
+- **Hypothesis:** the link-command generator in SmakCMakeInterp should append
+  `-Wl,-rpath,<dir>` for every in-project shared library the target links
+  (plus CMAKE_INSTALL_RPATH / `$ORIGIN` entries when set), unless
+  CMAKE_SKIP_BUILD_RPATH is ON.
+
 ### CMake interp: install/packaging commands report errors that are not errors
 - [ ] **Symptom (2026-09-05, Xyce 7.11 CMakeLists via `smak -cmake`):** the
   interpreter prints `CMake Error: Bad COMPATIBILITY value used for

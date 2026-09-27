@@ -455,6 +455,7 @@ if ($test_mode) {
 
         # Enter unified CLI
         my $prompt = 'smak-attach> ';
+        $ENV{TERM} ||= q(dumb);  # Term::ReadLine dies when TERM is unset (containers, cron, CI)
         my $term = Term::ReadLine->new($prompt);
 
         Smak::unified_cli(
@@ -504,6 +505,7 @@ if ($test_mode) {
 } else {
     # Enter unified CLI in attached mode
     my $prompt = 'smak-attach> ';
+    $ENV{TERM} ||= q(dumb);  # Term::ReadLine dies when TERM is unset (containers, cron, CI)
     my $term = Term::ReadLine->new($prompt);
 
     Smak::unified_cli(

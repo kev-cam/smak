@@ -1,0 +1,170 @@
+# Failure-to-package map for the smak build-test harness.
+#
+# Key forms (what bt-run's failure diagnosis produces):
+#   pc:<module>      pkg-config module not found
+#   h:<header>       missing header, as written in the #include
+#   bin:<program>    missing program (configure check, "command not found")
+#   lib:<name>       linker "cannot find -l<name>"
+#   cmake:<Pkg>      find_package(<Pkg>) failed (Could NOT find / no config file)
+#   m4:<macro>       autoconf macro undefined when regenerating configure
+#
+# Values are comma-separated package names per distro family:
+#   deb (Debian/Ubuntu)  rpm (Fedora/RHEL)  suse (openSUSE)  arch  apk (Alpine)
+# A family missing from a line falls back to the generic lookup in bt-run
+# (apt-file, dnf/zypper capabilities, pacman -F, apk pc:/cmd:). "-" means
+# "nothing to install on this family".
+
+# ---- programs --------------------------------------------------------------
+bin:bison        deb=bison rpm=bison suse=bison arch=bison apk=bison
+bin:yacc         deb=bison rpm=byacc suse=bison arch=bison apk=bison
+bin:flex         deb=flex rpm=flex suse=flex arch=flex apk=flex
+bin:lex          deb=flex rpm=flex suse=flex arch=flex apk=flex
+bin:gperf        deb=gperf rpm=gperf suse=gperf arch=gperf apk=gperf
+bin:makeinfo     deb=texinfo rpm=texinfo suse=makeinfo arch=texinfo apk=texinfo
+bin:autopoint    deb=autopoint rpm=gettext-devel suse=gettext-tools arch=gettext apk=gettext-dev
+bin:pkg-config   deb=pkg-config rpm=pkgconf-pkg-config suse=pkg-config arch=pkgconf apk=pkgconf
+bin:python       deb=python3,python-is-python3 rpm=python3,python-unversioned-command suse=python3 arch=python apk=python3
+bin:python3      deb=python3 rpm=python3 suse=python3 arch=python apk=python3
+bin:help2man     deb=help2man rpm=help2man suse=help2man arch=help2man apk=help2man
+bin:asciidoc     deb=asciidoc rpm=asciidoc suse=asciidoc arch=asciidoc apk=asciidoc
+bin:xsltproc     deb=xsltproc rpm=libxslt suse=libxslt-tools arch=libxslt apk=libxslt
+bin:nasm         deb=nasm rpm=nasm suse=nasm arch=nasm apk=nasm
+bin:yasm         deb=yasm rpm=yasm suse=yasm arch=yasm apk=yasm
+bin:gettext      deb=gettext rpm=gettext suse=gettext-tools arch=gettext apk=gettext
+bin:msgfmt       deb=gettext rpm=gettext suse=gettext-tools arch=gettext apk=gettext
+bin:xxd          deb=xxd rpm=vim-common suse=vim arch=vim apk=xxd
+bin:tclsh        deb=tcl rpm=tcl suse=tcl arch=tcl apk=tcl
+bin:doxygen      deb=doxygen rpm=doxygen suse=doxygen arch=doxygen apk=doxygen
+bin:llvm-config  deb=llvm-dev rpm=llvm-devel suse=llvm-devel arch=llvm apk=llvm-dev
+bin:gnat         deb=gnat rpm=gcc-gnat suse=gcc-ada arch=gcc-ada apk=gcc-gnat
+bin:zip          deb=zip rpm=zip suse=zip arch=zip apk=zip
+bin:unzip        deb=unzip rpm=unzip suse=unzip arch=unzip apk=unzip
+bin:m4           deb=m4 rpm=m4 suse=m4 arch=m4 apk=m4
+bin:which        deb=debianutils rpm=which suse=which arch=which apk=-
+bin:gawk         deb=gawk rpm=gawk suse=gawk arch=gawk apk=gawk
+
+# ---- pkg-config modules ----------------------------------------------------
+pc:zlib          deb=zlib1g-dev rpm=zlib-devel suse=zlib-devel arch=zlib apk=zlib-dev
+pc:openssl       deb=libssl-dev rpm=openssl-devel suse=libopenssl-devel arch=openssl apk=openssl-dev
+pc:libssl        deb=libssl-dev rpm=openssl-devel suse=libopenssl-devel arch=openssl apk=openssl-dev
+pc:libcrypto     deb=libssl-dev rpm=openssl-devel suse=libopenssl-devel arch=openssl apk=openssl-dev
+pc:libcurl       deb=libcurl4-openssl-dev rpm=libcurl-devel suse=libcurl-devel arch=curl apk=curl-dev
+pc:ncurses       deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+pc:ncursesw      deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+pc:tinfo         deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+pc:libevent      deb=libevent-dev rpm=libevent-devel suse=libevent-devel arch=libevent apk=libevent-dev
+pc:libevent_core deb=libevent-dev rpm=libevent-devel suse=libevent-devel arch=libevent apk=libevent-dev
+pc:dbus-1        deb=libdbus-1-dev rpm=dbus-devel suse=dbus-1-devel arch=dbus apk=dbus-dev
+pc:libidn2       deb=libidn2-dev rpm=libidn2-devel suse=libidn2-devel arch=libidn2 apk=libidn2-dev
+pc:nettle        deb=nettle-dev rpm=nettle-devel suse=libnettle-devel arch=nettle apk=nettle-dev
+pc:hogweed       deb=nettle-dev rpm=nettle-devel suse=libnettle-devel arch=nettle apk=nettle-dev
+pc:libnetfilter_conntrack deb=libnetfilter-conntrack-dev rpm=libnetfilter_conntrack-devel suse=libnetfilter_conntrack-devel arch=libnetfilter_conntrack apk=libnetfilter_conntrack-dev
+pc:libnftables   deb=libnftables-dev rpm=nftables-devel suse=nftables-devel arch=nftables apk=nftables-dev
+pc:lua           deb=liblua5.4-dev rpm=lua-devel suse=lua54-devel arch=lua apk=lua5.4-dev
+pc:libpcre2-8    deb=libpcre2-dev rpm=pcre2-devel suse=pcre2-devel arch=pcre2 apk=pcre2-dev
+pc:libpcre       deb=libpcre3-dev rpm=pcre-devel suse=pcre-devel arch=pcre apk=pcre-dev
+pc:expat         deb=libexpat1-dev rpm=expat-devel suse=libexpat-devel arch=expat apk=expat-dev
+pc:libxml-2.0    deb=libxml2-dev rpm=libxml2-devel suse=libxml2-devel arch=libxml2 apk=libxml2-dev
+pc:readline      deb=libreadline-dev rpm=readline-devel suse=readline-devel arch=readline apk=readline-dev
+pc:libffi        deb=libffi-dev rpm=libffi-devel suse=libffi-devel arch=libffi apk=libffi-dev
+pc:glib-2.0      deb=libglib2.0-dev rpm=glib2-devel suse=glib2-devel arch=glib2 apk=glib-dev
+pc:libzstd       deb=libzstd-dev rpm=libzstd-devel suse=libzstd-devel arch=zstd apk=zstd-dev
+pc:liblzma       deb=liblzma-dev rpm=xz-devel suse=xz-devel arch=xz apk=xz-dev
+pc:bzip2         deb=libbz2-dev rpm=bzip2-devel suse=libbz2-devel arch=bzip2 apk=bzip2-dev
+pc:libpng        deb=libpng-dev rpm=libpng-devel suse=libpng16-devel arch=libpng apk=libpng-dev
+pc:sqlite3       deb=libsqlite3-dev rpm=sqlite-devel suse=sqlite3-devel arch=sqlite apk=sqlite-dev
+pc:uuid          deb=uuid-dev rpm=libuuid-devel suse=libuuid-devel arch=util-linux-libs apk=util-linux-dev
+pc:libsystemd    deb=libsystemd-dev rpm=systemd-devel suse=systemd-devel arch=systemd-libs apk=-
+pc:libcap        deb=libcap-dev rpm=libcap-devel suse=libcap-devel arch=libcap apk=libcap-dev
+pc:python3       deb=python3-dev rpm=python3-devel suse=python3-devel arch=python apk=python3-dev
+pc:python3-embed deb=python3-dev rpm=python3-devel suse=python3-devel arch=python apk=python3-dev
+pc:fuse3         deb=libfuse3-dev rpm=fuse3-devel suse=fuse3-devel arch=fuse3 apk=fuse3-dev
+pc:fuse          deb=libfuse-dev rpm=fuse-devel suse=fuse-devel arch=fuse2 apk=fuse-dev
+pc:libutf8proc   deb=libutf8proc-dev rpm=utf8proc-devel suse=utf8proc-devel arch=libutf8proc apk=utf8proc-dev
+pc:oniguruma     deb=libonig-dev rpm=oniguruma-devel suse=oniguruma-devel arch=oniguruma apk=oniguruma-dev
+
+# ---- headers ---------------------------------------------------------------
+h:zlib.h                deb=zlib1g-dev rpm=zlib-devel suse=zlib-devel arch=zlib apk=zlib-dev
+h:openssl/ssl.h         deb=libssl-dev rpm=openssl-devel suse=libopenssl-devel arch=openssl apk=openssl-dev
+h:openssl/evp.h         deb=libssl-dev rpm=openssl-devel suse=libopenssl-devel arch=openssl apk=openssl-dev
+h:curl/curl.h           deb=libcurl4-openssl-dev rpm=libcurl-devel suse=libcurl-devel arch=curl apk=curl-dev
+h:ncurses.h             deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+h:curses.h              deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+h:term.h                deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+h:readline/readline.h   deb=libreadline-dev rpm=readline-devel suse=readline-devel arch=readline apk=readline-dev
+h:event2/event.h        deb=libevent-dev rpm=libevent-devel suse=libevent-devel arch=libevent apk=libevent-dev
+h:dbus/dbus.h           deb=libdbus-1-dev rpm=dbus-devel suse=dbus-1-devel arch=dbus apk=dbus-dev
+h:nettle/nettle-meta.h  deb=nettle-dev rpm=nettle-devel suse=libnettle-devel arch=nettle apk=nettle-dev
+h:gmp.h                 deb=libgmp-dev rpm=gmp-devel suse=gmp-devel arch=gmp apk=gmp-dev
+h:bzlib.h               deb=libbz2-dev rpm=bzip2-devel suse=libbz2-devel arch=bzip2 apk=bzip2-dev
+h:lzma.h                deb=liblzma-dev rpm=xz-devel suse=xz-devel arch=xz apk=xz-dev
+h:zstd.h                deb=libzstd-dev rpm=libzstd-devel suse=libzstd-devel arch=zstd apk=zstd-dev
+h:expat.h               deb=libexpat1-dev rpm=expat-devel suse=libexpat-devel arch=expat apk=expat-dev
+h:ffi.h                 deb=libffi-dev rpm=libffi-devel suse=libffi-devel arch=libffi apk=libffi-dev
+h:pcre.h                deb=libpcre3-dev rpm=pcre-devel suse=pcre-devel arch=pcre apk=pcre-dev
+h:pcre2.h               deb=libpcre2-dev rpm=pcre2-devel suse=pcre2-devel arch=pcre2 apk=pcre2-dev
+h:sqlite3.h             deb=libsqlite3-dev rpm=sqlite-devel suse=sqlite3-devel arch=sqlite apk=sqlite-dev
+h:Python.h              deb=python3-dev rpm=python3-devel suse=python3-devel arch=python apk=python3-dev
+h:libintl.h             deb=- rpm=- suse=- arch=- apk=gettext-dev
+h:execinfo.h            deb=- rpm=- suse=- arch=- apk=libexecinfo-dev
+h:sys/capability.h      deb=libcap-dev rpm=libcap-devel suse=libcap-devel arch=libcap apk=libcap-dev
+h:linux/limits.h        deb=linux-libc-dev rpm=kernel-headers suse=linux-glibc-devel arch=linux-api-headers apk=linux-headers
+h:uuid/uuid.h           deb=uuid-dev rpm=libuuid-devel suse=libuuid-devel arch=util-linux-libs apk=util-linux-dev
+h:libelf.h              deb=libelf-dev rpm=elfutils-libelf-devel suse=libelf-devel arch=libelf apk=elfutils-dev
+h:gelf.h                deb=libelf-dev rpm=elfutils-libelf-devel suse=libelf-devel arch=libelf apk=elfutils-dev
+h:libdwarf.h            deb=libdwarf-dev rpm=libdwarf-devel suse=libdwarf-devel arch=libdwarf apk=libdwarf-dev
+h:boost/version.hpp     deb=libboost-dev rpm=boost-devel suse=boost-devel arch=boost apk=boost-dev
+h:fftw3.h               deb=libfftw3-dev rpm=fftw-devel suse=fftw3-devel arch=fftw apk=fftw-dev
+
+# ---- libraries (-l<name>) --------------------------------------------------
+lib:z            deb=zlib1g-dev rpm=zlib-devel suse=zlib-devel arch=zlib apk=zlib-dev
+lib:ssl          deb=libssl-dev rpm=openssl-devel suse=libopenssl-devel arch=openssl apk=openssl-dev
+lib:crypto       deb=libssl-dev rpm=openssl-devel suse=libopenssl-devel arch=openssl apk=openssl-dev
+lib:ncurses      deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+lib:ncursesw     deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+lib:tinfo        deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+lib:readline     deb=libreadline-dev rpm=readline-devel suse=readline-devel arch=readline apk=readline-dev
+lib:bz2          deb=libbz2-dev rpm=bzip2-devel suse=libbz2-devel arch=bzip2 apk=bzip2-dev
+lib:gmp          deb=libgmp-dev rpm=gmp-devel suse=gmp-devel arch=gmp apk=gmp-dev
+lib:ffi          deb=libffi-dev rpm=libffi-devel suse=libffi-devel arch=libffi apk=libffi-dev
+lib:dl           deb=- rpm=- suse=- arch=- apk=-
+lib:execinfo     deb=- rpm=- suse=- arch=- apk=libexecinfo-dev
+lib:fl           deb=libfl-dev rpm=flex-devel suse=flex arch=flex apk=flex-dev
+lib:blas         deb=libblas-dev rpm=blas-devel suse=blas-devel arch=blas apk=openblas-dev
+lib:lapack       deb=liblapack-dev rpm=lapack-devel suse=lapack-devel arch=lapack apk=lapack-dev
+
+# ---- cmake find_package ----------------------------------------------------
+cmake:ZLIB       deb=zlib1g-dev rpm=zlib-devel suse=zlib-devel arch=zlib apk=zlib-dev
+cmake:OpenSSL    deb=libssl-dev rpm=openssl-devel suse=libopenssl-devel arch=openssl apk=openssl-dev
+cmake:CURL       deb=libcurl4-openssl-dev rpm=libcurl-devel suse=libcurl-devel arch=curl apk=curl-dev
+cmake:BISON      deb=bison rpm=bison suse=bison arch=bison apk=bison
+cmake:FLEX       deb=flex rpm=flex suse=flex arch=flex apk=flex
+cmake:PkgConfig  deb=pkg-config rpm=pkgconf-pkg-config suse=pkg-config arch=pkgconf apk=pkgconf
+cmake:Python3    deb=python3-dev rpm=python3-devel suse=python3-devel arch=python apk=python3-dev
+cmake:Python     deb=python3-dev rpm=python3-devel suse=python3-devel arch=python apk=python3-dev
+cmake:PythonInterp deb=python3 rpm=python3 suse=python3 arch=python apk=python3
+cmake:Threads    deb=- rpm=- suse=- arch=- apk=-
+cmake:Curses     deb=libncurses-dev rpm=ncurses-devel suse=ncurses-devel arch=ncurses apk=ncurses-dev
+cmake:BZip2      deb=libbz2-dev rpm=bzip2-devel suse=libbz2-devel arch=bzip2 apk=bzip2-dev
+cmake:LibLZMA    deb=liblzma-dev rpm=xz-devel suse=xz-devel arch=xz apk=xz-dev
+cmake:EXPAT      deb=libexpat1-dev rpm=expat-devel suse=libexpat-devel arch=expat apk=expat-dev
+cmake:LibXml2    deb=libxml2-dev rpm=libxml2-devel suse=libxml2-devel arch=libxml2 apk=libxml2-dev
+cmake:Boost      deb=libboost-all-dev rpm=boost-devel suse=boost-devel arch=boost apk=boost-dev
+cmake:BLAS       deb=libblas-dev rpm=blas-devel suse=blas-devel arch=blas apk=openblas-dev
+cmake:LAPACK     deb=liblapack-dev rpm=lapack-devel suse=lapack-devel arch=lapack apk=lapack-dev
+cmake:Doxygen    deb=doxygen rpm=doxygen suse=doxygen arch=doxygen apk=doxygen
+cmake:GTest      deb=libgtest-dev rpm=gtest-devel suse=gtest arch=gtest apk=gtest-dev
+cmake:FFTW       deb=libfftw3-dev rpm=fftw-devel suse=fftw3-devel arch=fftw apk=fftw-dev
+cmake:SQLite3    deb=libsqlite3-dev rpm=sqlite-devel suse=sqlite3-devel arch=sqlite apk=sqlite-dev
+cmake:PNG        deb=libpng-dev rpm=libpng-devel suse=libpng16-devel arch=libpng apk=libpng-dev
+cmake:LLVM       deb=llvm-dev rpm=llvm-devel suse=llvm-devel arch=llvm apk=llvm-dev
+
+# ---- autoconf macros (regenerating configure) ------------------------------
+m4:AX_           deb=autoconf-archive rpm=autoconf-archive suse=autoconf-archive arch=autoconf-archive apk=autoconf-archive
+m4:PKG_CHECK_MODULES deb=pkg-config rpm=pkgconf-pkg-config suse=pkg-config arch=pkgconf apk=pkgconf
+m4:PKG_PROG_PKG_CONFIG deb=pkg-config rpm=pkgconf-pkg-config suse=pkg-config arch=pkgconf apk=pkgconf
+m4:AM_GNU_GETTEXT deb=gettext,autopoint rpm=gettext-devel suse=gettext-tools arch=gettext apk=gettext-dev
+m4:AM_ICONV      deb=gettext rpm=gettext-devel suse=gettext-tools arch=gettext apk=gettext-dev
+m4:LT_INIT       deb=libtool rpm=libtool suse=libtool arch=libtool apk=libtool
+m4:AC_PROG_LIBTOOL deb=libtool rpm=libtool suse=libtool arch=libtool apk=libtool
+m4:AM_PATH_PYTHON deb=python3 rpm=python3 suse=python3 arch=python apk=python3

@@ -434,6 +434,16 @@ if (!defined $retries) {
     $retries = ($jobs > 0) ? 1 : 0;
 }
 
+# Command-line variables reach sub-makes through MAKEFLAGS, as in GNU make:
+# the part after " -- " holds VAR=value words with spaces escaped by '\'.
+# Inherited ones come first so this invocation's own arguments override them.
+if (defined $ENV{MAKEFLAGS} && $ENV{MAKEFLAGS} =~ /(?:^|\s)--\s+(.*)$/s) {
+    for my $word ($1 =~ /((?:\\.|\S)+)/g) {
+        (my $w = $word) =~ s/\\(.)/$1/g;
+        Smak::set_cmd_var($1, $2) if $w =~ /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
+    }
+}
+
 # Parse variable assignments and targets from remaining arguments
 my @targets;
 for my $arg (@ARGV) {
@@ -443,6 +453,18 @@ for my $arg (@ARGV) {
     } else {
         # Target name
         push @targets, $arg;
+    }
+}
+
+{
+    my $cv = Smak::get_cmd_vars();
+    if (%$cv) {
+        my $flags = $ENV{MAKEFLAGS} // '';
+        $flags =~ s/(?:^|\s)--\s.*$//s;
+        $ENV{MAKEFLAGS} = "$flags -- " . join(' ', map {
+            (my $v = $cv->{$_}) =~ s/([\\\s])/\\$1/g;
+            "$_=$v";
+        } sort keys %$cv);
     }
 }
 

@@ -4739,6 +4739,21 @@ sub get_first_target {
     return undef;
 }
 
+# Expand a dependency word: $MV{VAR} references, and then -- only when a
+# function call such as $(shell ...) is left -- the full expand_vars, so a
+# recursively-expanded variable like dnsmasq's `sum?=$(shell ...)` is not
+# split into bogus words by the caller.
+sub expand_dep_text {
+    my ($d) = @_;
+    while ($d =~ /\$MV\{([^}]+)\}/) {
+        my $var = $1;
+        my $val = $MV{$var} // '';
+        $d =~ s/\$MV\{\Q$var\E\}/$val/;
+    }
+    $d = expand_vars($d) if $d =~ /\$\(/;
+    return $d;
+}
+
 # Check if a target needs rebuilding based on timestamp comparison
 # Returns 1 if target needs rebuilding, 0 if up-to-date
 sub needs_rebuild {
@@ -4782,15 +4797,14 @@ sub needs_rebuild {
         $has_rule = (exists $pattern_rule{$key} && defined $pattern_rule{$key} && $pattern_rule{$key} =~ /\S/);
     }
     unless ($has_rule) {
-        # Try suffix rules
-        if ($target =~ /^(.+)(\.[^.\/]+)$/) {
-            my ($base, $target_suffix) = ($1, $2);
-            for my $source_suffix (@suffixes) {
-                my $suffix_key = "$makefile\t$source_suffix\t$target_suffix";
-                if (exists $suffix_rule{$suffix_key} && -e "$base$source_suffix") {
-                    $has_rule = 1;
-                    last;
-                }
+        # No explicit recipe: the recipe comes from a suffix or pattern rule,
+        # and that rule's source ($<) is a prerequisite too, e.g.
+        # `foo.o: foo.h` plus `.c.o:` or `%.o: %.c` must notice foo.c changes.
+        my @implicit = implicit_rule_prereqs($target);
+        if (@implicit) {
+            $has_rule = 1;
+            for my $p (@implicit) {
+                push @deps, $p unless grep { $_ eq $p } @deps;
             }
         }
     }
@@ -4799,15 +4813,11 @@ sub needs_rebuild {
         return 0;
     }
 
-    # Expand variables in dependencies
+    # Expand variables in dependencies the same way build_target does, so
+    # functions such as $(shell ...) inside recursively-expanded variables
+    # are evaluated instead of being split into bogus words.
     @deps = map {
-        my $dep = $_;
-        # Expand $MV{VAR} references
-        while ($dep =~ /\$MV\{([^}]+)\}/) {
-            my $var = $1;
-            my $val = $MV{$var} // '';
-            $dep =~ s/\$MV\{\Q$var\E\}/$val/;
-        }
+        my $dep = expand_vars(format_output($_));
         # If expansion resulted in multiple space-separated values, split them
         if ($dep =~ /\s/) {
             split /\s+/, $dep;
@@ -4868,6 +4878,41 @@ sub needs_rebuild {
 
     # Target is up-to-date
     return 0;
+}
+
+
+# Prerequisites contributed by the implicit rule that would build $target:
+# the first suffix rule whose source exists, else the first pattern-rule
+# variant whose prerequisites all exist.  Mirrors build_target's lookup.
+sub implicit_rule_prereqs {
+    my ($target) = @_;
+    use Cwd 'getcwd';
+    my $cwd = getcwd();
+    if ($target =~ /^(.+)(\.[^.\/]+)$/) {
+        my ($base, $target_suffix) = ($1, $2);
+        for my $source_suffix (@suffixes) {
+            next if $source_suffix eq $target_suffix;
+            next unless exists $suffix_rule{"$makefile\t$source_suffix\t$target_suffix"};
+            my $source = resolve_vpath("$base$source_suffix", $cwd);
+            return ($source) if -e $source;
+        }
+    }
+    for my $match (find_matching_patterns($target)) {
+        my ($pkey, $stem) = @$match;
+        my $rules_ref = $pattern_rule{$pkey};
+        my $deps_ref = $pattern_deps{$pkey};
+        my @rules = ref($rules_ref) eq 'ARRAY' ? @$rules_ref : ($rules_ref);
+        my @deps_list = (ref($deps_ref) eq 'ARRAY' && ref($deps_ref->[0]) eq 'ARRAY')
+            ? @$deps_ref : ([ref($deps_ref) eq 'ARRAY' ? @$deps_ref : ()]);
+        for (my $i = 0; $i < @rules; $i++) {
+            next unless defined $rules[$i] && $rules[$i] =~ /\S/;
+            my @d = map { my $x = $_; $x =~ s/%/$stem/g; resolve_vpath($x, $cwd) }
+                    @{ $deps_list[$i] || [] };
+            next unless @d;
+            return @d unless grep { !-e ($_ =~ m{^/} ? $_ : "$cwd/$_") } @d;
+        }
+    }
+    return ();
 }
 
 sub can_build_from_suffix_rule {
@@ -11796,7 +11841,9 @@ sub run_job_master {
                         my $source_can_build = !$source_exists && can_build_from_suffix_rule($source, $makefile);
                         if ($source_exists || $source_can_build) {
                             $stem = $base;
-                            push @deps, $source unless grep { $_ eq $source } @deps;
+                            # The suffix rule's source is $< and goes first,
+                            # ahead of explicit prerequisites like `foo.o: foo.h`.
+                            @deps = ($source, grep { $_ ne $source } @deps);
                             $rule = $suffix_rule{$suffix_key};
                             my $suffix_deps_ref = $suffix_deps{$suffix_key};
                             if ($suffix_deps_ref && @$suffix_deps_ref) {
@@ -12067,11 +12114,7 @@ sub run_job_master {
         # Expand variables in order-only deps and split on whitespace
         my @expanded_order_only;
         for my $dep (@order_only_deps) {
-            while ($dep =~ /\$MV\{([^}]+)\}/) {
-                my $var = $1;
-                my $val = $MV{$var} // '';
-                $dep =~ s/\$MV\{\Q$var\E\}/$val/;
-            }
+            $dep = expand_dep_text($dep);
             # Split on whitespace in case variable expanded to multiple targets
             push @expanded_order_only, split /\s+/, $dep;
         }
@@ -12088,11 +12131,7 @@ sub run_job_master {
         # (Variables like $MV{PROGRAMS} may expand to multiple targets)
         my @expanded_deps;
         for my $dep (@deps) {
-            while ($dep =~ /\$MV\{([^}]+)\}/) {
-                my $var = $1;
-                my $val = $MV{$var} // '';
-                $dep =~ s/\$MV\{\Q$var\E\}/$val/;
-            }
+            $dep = expand_dep_text($dep);
             # Split on whitespace in case variable expanded to multiple targets
             push @expanded_deps, split /\s+/, $dep;
         }
@@ -13161,11 +13200,7 @@ sub run_job_master {
 
             # Expand variables in dependency
             my $expanded_dep = $dep;
-            while ($expanded_dep =~ /\$MV\{([^}]+)\}/) {
-                my $var = $1;
-                my $val = $MV{$var} // '';
-                $expanded_dep =~ s/\$MV\{\Q$var\E\}/$val/;
-            }
+            $expanded_dep = expand_dep_text($expanded_dep);
 
             for my $single_dep (split /\s+/, $expanded_dep) {
                 next unless $single_dep =~ /\S/;
@@ -13609,11 +13644,7 @@ sub run_job_master {
                 # Expand variables in order-only deps and split on whitespace
                 my @expanded_order_only;
                 for my $dep (@order_only_deps) {
-                    while ($dep =~ /\$MV\{([^}]+)\}/) {
-                        my $var = $1;
-                        my $val = $MV{$var} // '';
-                        $dep =~ s/\$MV\{\Q$var\E\}/$val/;
-                    }
+                    $dep = expand_dep_text($dep);
                     # Split on whitespace in case variable expanded to multiple targets
                     push @expanded_order_only, split /\s+/, $dep;
                 }

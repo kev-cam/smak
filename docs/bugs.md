@@ -5,6 +5,117 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 
 ## Open
 
+<!-- Entries below marked "smak-buildtest" were found by building GitHub
+     projects in containers (buildtest/README.md), 2026-09-27, Ubuntu 24.04. -->
+
+### Recursive `$(shell ...)` variable in a prerequisite: rebuild every time / dep `'`
+- [x] **FIXED (2026-09-27):** `needs_rebuild` now expands prerequisites with
+  `expand_vars(format_output(...))` like `build_target`. The job-master's
+  `$MV`-only loops call the new `expand_dep_text`, which runs `expand_vars`
+  when a function call is left. Test: `test/test_shell_var_prereq.sh`.
+- **Symptom (smak-buildtest, dnsmasq):** a second sequential `smak` recompiled
+  all 43 objects. `smak -jN` on the sub-make failed with
+  `Job 'x.o' FAILED: dependency ''' cannot be built`.
+- **Cause:** dnsmasq names its flags stamp
+  `copts_conf = .copts_$(sum)` with
+  `sum?=$(shell echo ... | ( md5sum 2>/dev/null || md5 ) | cut -f 1 -d ' ')`.
+  `needs_rebuild` and the job-master replaced only `$MV{VAR}` references, then
+  split the unexpanded `$(shell ...)` text on spaces into words like `'`.
+  `:=` variables were not affected.
+
+### Implicit-rule source ignored when the target has recipe-less prerequisites
+- [x] **FIXED (2026-09-27):** `needs_rebuild` adds the source of the suffix or
+  pattern rule that builds the target (`implicit_rule_prereqs`). The
+  job-master puts the suffix-rule source first so it becomes `$<`. Test:
+  `test/test_implicit_source_stale.sh`.
+- **Symptom:** with `a.o: a.h` plus `.c.o:` or `%.o: %.c`, touching `a.c` did
+  not rebuild `a.o`, sequentially or with `-j`. Under `-j` with the suffix rule
+  the recipe ran `cc -c a.h`, creating `a.h.gch` and failing. GNU make treats
+  `a.c` as a prerequisite and as `$<`. dnsmasq has this shape
+  (`$(objs): $(copts_conf) $(hdrs)` plus `.c.o:`).
+
+### Command-line variables not passed to sub-makes (dnsmasq `COPTS` lost)
+- [x] **FIXED (2026-09-27):** smak.pl now reads inherited variables from the
+  `MAKEFLAGS` part after `--` and exports all command-line variables there in
+  GNU make's format (`-- VAR=val\ with\ spaces`). The sub-make's own
+  arguments still win, and it interoperates with GNU make either way. Test:
+  `test/test_cmdline_var_submake.sh`.
+- **Symptom (smak-buildtest, dnsmasq-full):**
+  `smak COPTS='-DHAVE_DNSSEC -DHAVE_DBUS ...'` compiled every object without
+  those `-D` flags and linked without their libraries. It exited 0 with a
+  binary lacking the requested features. This always happened under `-j`, and
+  sequentially whenever the sub-make ran through the shell, as dnsmasq's
+  backtick `build_cflags` makes it. With the fix the binary is byte-identical
+  to make's.
+
+### smak-attach dies when TERM is unset
+- [x] **FIXED (2026-09-27):** default `TERM=dumb` before `Term::ReadLine->new`.
+- **Symptom:** in containers, cron or CI, `smak-attach -pid N` died with
+  `TERM not set at .../Term/Cap.pm` before connecting. `smak -cli` was fine.
+
+### smak-attach: bare `build` does not build the default goal
+- [ ] **Symptom (smak-buildtest, every project):** in `smak-attach`, `build`
+  with no target prints `No default target found.` and exits 0. The same
+  command in `smak -cli` builds the default goal. `build all` works.
+- **Hypothesis:** the attached CLI never parsed the makefile, so
+  `get_default_target()` is empty; ask the job server for its default goal.
+
+### `reconnect` rc option is a no-op; detached servers pile up
+- [ ] **Symptom:** with `set reconnect = 1`, smak.pl reads `.smak.connect` and
+  stores the old master port in `$Smak::job_server_master_port`, but nothing
+  uses it. Every `smak -cli` then starts a new job server, and each `detach`
+  leaves one more running. Only `smak-attach -pid` reuses a server. Batch runs
+  also leave a dangling `.smak.connect` symlink and stale port files that
+  `smak-attach` cleans up later.
+
+### Only `Makefile` is searched, not `GNUmakefile` / `makefile`
+- [ ] **Symptom (smak-buildtest, lua):**
+  `Cannot open Makefile: No such file or directory at Smak.pm line 2250.`
+  GNU make tries `GNUmakefile`, `makefile`, then `Makefile`.
+
+### GNU make options smak rejects: `--no-print-directory`
+- [ ] **Symptom (smak-buildtest, lz4):** `$(MAKE) --no-print-directory -C lib`
+  fails with `Unknown option: no-print-directory`. It is fatal under `-j`, and
+  sequentially the in-process path ignores it. `-w`, `--print-directory` and
+  similar harmless flags should be accepted.
+
+### `+` recipe prefix not stripped
+- [ ] **Symptom (smak-buildtest, redis, zstd):** `+@cmd` and `+$(MAKE) ...` run
+  literally. Sequentially the shell prints `Illegal option -@` but smak exits 0
+  having built nothing. Under `-j` it fails with `Cannot exec '+@...'` (127).
+  Repro: `all:` with recipe `+@echo hi`.
+
+### Inline recipe `target: ; command` is ignored
+- [ ] **Symptom:** `all: ; @echo hi` prints nothing and exits 0.
+
+### `VAR != command` shell assignment yields an empty value
+- [ ] **Symptom:** `sum != echo hi | md5sum` leaves `$(sum)` empty. GNU make 4.0+
+  and BSD make run the command.
+
+### Recipe output of `-C` sub-makes is lost under `-j`
+- [ ] **Symptom:** `all: ; $(MAKE) -C lib` with `lib/Makefile` recipe
+  `@echo hello` prints nothing under `smak -j2`. The recipe does run.
+
+### `smak -j4` hangs after a failed job (jq)
+- [ ] **Symptom (smak-buildtest, jq, autotools):** `src/config_opts.inc` failed
+  with `output file not found`, then the build sat idle for 16+ minutes
+  (smak-server, 4 idle workers and a relayed `smak all-am` child). It should
+  fail fast. The rule writes its output through a pipe:
+  `if test -x ./config.status; then ...; fi | sed ... > $@`.
+
+### CMake metadata mode: link commands run from the wrong directory
+- [ ] **Symptom (smak-buildtest, zlib-cmake, cJSON; cmake 3.28 Makefile
+  generator):** every smak mode fails to link test executables with
+  `/usr/bin/ld: cannot find ../libz.a` or `cannot find ../libcjson.so.1.7.19`.
+  cmake's `link.txt` is written to run in the target's binary dir, e.g.
+  `_build/test`, but smak runs it from the top build dir, so the relative
+  library path points outside the tree. The same runs also show the open
+  "links before its static-library dependency is archived" ordering problem:
+  `undefined reference to cJSON_Delete`.
+- **Hypothesis:** SmakCMake should set the job's `exec_dir` to the target's
+  `CMakeFiles/<t>.dir/..` directory, as cmake's `build.make` does with
+  `cd <dir> && ...`.
+
 ### `smak <goal>` with no rule for the goal exits 0 silently
 - [x] **FIXED (2026-09-05):** `Smak::goal_has_rule` (Smak.pm) + a pre-build check
   in smak.pl over the command-line goals: a goal with no explicit rule (incl.

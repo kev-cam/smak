@@ -1,0 +1,117 @@
+#!/bin/sh
+# bt-pkg - distro-neutral package helper for the smak build-test harness.
+#
+#   bt-pkg family            print deb|rpm|suse|arch|apk
+#   bt-pkg install PKG...    install packages with the native package manager
+#   bt-pkg base              install the toolchain smak and the harness need
+#   bt-pkg ca FILE...        add extra CA certificates to the system trust store
+#   bt-pkg sshd              prepare sshd (host keys, run dir)
+#
+# POSIX sh on purpose: it has to run on Alpine before bash is installed.
+
+set -e
+
+family() {
+    ids=""
+    if [ -r /etc/os-release ]; then
+        ids=$(. /etc/os-release; echo "$ID $ID_LIKE")
+    fi
+    for id in $ids; do
+        case "$id" in
+            debian|ubuntu) echo deb; return ;;
+            fedora|rhel|centos|rocky|almalinux) echo rpm; return ;;
+            opensuse*|suse|sles) echo suse; return ;;
+            arch|archlinux) echo arch; return ;;
+            alpine) echo apk; return ;;
+        esac
+    done
+    command -v apt-get >/dev/null 2>&1 && { echo deb; return; }
+    command -v dnf     >/dev/null 2>&1 && { echo rpm; return; }
+    command -v zypper  >/dev/null 2>&1 && { echo suse; return; }
+    command -v pacman  >/dev/null 2>&1 && { echo arch; return; }
+    command -v apk     >/dev/null 2>&1 && { echo apk; return; }
+    echo unknown
+}
+
+apt_updated=/var/tmp/.bt-apt-updated
+
+install() {
+    [ $# -gt 0 ] || return 0
+    case $(family) in
+        deb)
+            export DEBIAN_FRONTEND=noninteractive
+            [ -f $apt_updated ] || { apt-get update -qq && touch $apt_updated; }
+            apt-get install -y -qq --no-install-recommends "$@" ;;
+        rpm)  dnf -y -q install "$@" ;;
+        suse) zypper -n -q install --no-recommends "$@" ;;
+        arch) pacman -Sy --noconfirm --needed "$@" ;;
+        apk)  apk add -q "$@" ;;
+        *)    echo "bt-pkg: unknown distro family" >&2; return 1 ;;
+    esac
+}
+
+base() {
+    case $(family) in
+        deb) install build-essential cmake pkg-config autoconf automake libtool \
+                autopoint gettext bison flex texinfo perl libio-pty-perl git \
+                openssh-server openssh-client sshfs procps file findutils diffutils \
+                debianutils python3 ca-certificates curl xz-utils bzip2 patch rsync lsof \
+                apt-file ;;
+        rpm) install gcc gcc-c++ make cmake pkgconf-pkg-config autoconf automake \
+                libtool gettext-devel bison flex texinfo perl perl-IO-Tty \
+                perl-Time-HiRes perl-FindBin perl-Storable perl-JSON-PP git \
+                openssh-server openssh-clients fuse-sshfs procps-ng file findutils \
+                diffutils which python3 ca-certificates curl xz bzip2 patch rsync lsof \
+                'dnf-command(provides)' ;;
+        suse) install gcc gcc-c++ make cmake pkg-config autoconf automake libtool \
+                gettext-tools bison flex makeinfo perl perl-IO-Tty git openssh \
+                sshfs procps file findutils diffutils which python3 \
+                ca-certificates curl xz bzip2 patch rsync tar gzip gawk ;;
+        arch) install base-devel cmake git openssh sshfs perl perl-io-tty python \
+                rsync lsof procps-ng which file diffutils ;;
+        apk)  install bash build-base cmake pkgconf autoconf automake libtool \
+                gettext-dev bison flex texinfo perl perl-io-tty git openssh \
+                sshfs procps file findutils diffutils coreutils python3 rsync lsof \
+                linux-headers curl xz bzip2 patch ;;
+        *) echo "bt-pkg: unsupported distro" >&2; return 1 ;;
+    esac
+}
+
+ca() {
+    [ $# -gt 0 ] || return 0
+    case $(family) in
+        deb)  mkdir -p /usr/local/share/ca-certificates
+              for f; do cp "$f" /usr/local/share/ca-certificates/bt-$(basename "$f" .crt).crt; done
+              command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1 || true ;;
+        rpm)  for f; do cp "$f" /etc/pki/ca-trust/source/anchors/; done
+              update-ca-trust ;;
+        suse) for f; do cp "$f" /etc/pki/trust/anchors/; done
+              update-ca-certificates ;;
+        arch) for f; do trust anchor --store "$f"; done ;;
+        apk)  for f; do cat "$f" >> /etc/ssl/certs/ca-certificates.crt; done ;;
+    esac
+}
+
+sshd_setup() {
+    ssh-keygen -A >/dev/null 2>&1
+    mkdir -p /run/sshd /var/run/sshd /root/.ssh
+    chmod 700 /root/.ssh
+    # Some images lock root; key-only login still needs an unlocked account.
+    passwd -d root >/dev/null 2>&1 || true
+    for f in /etc/ssh/sshd_config; do
+        [ -f "$f" ] || continue
+        grep -q '^PermitRootLogin prohibit-password' "$f" || \
+            echo 'PermitRootLogin prohibit-password' >> "$f"
+        grep -q '^PermitUserEnvironment' "$f" || echo 'PermitUserEnvironment yes' >> "$f"
+    done
+}
+
+cmd=$1; shift || true
+case "$cmd" in
+    family)  family ;;
+    install) install "$@" ;;
+    base)    base ;;
+    ca)      ca "$@" ;;
+    sshd)    sshd_setup ;;
+    *) echo "usage: bt-pkg family|install PKG...|base|ca FILE...|sshd" >&2; exit 2 ;;
+esac

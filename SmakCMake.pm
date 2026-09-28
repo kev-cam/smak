@@ -100,11 +100,14 @@ sub parse_makefile2 {
 
     while (<$fh>) {
         chomp;
-        # target.dir/all: dep.dir/all
-        if (m{^(\S+/CMakeFiles/(\w+)\.dir/all):\s*(\S+/CMakeFiles/(\w+)\.dir/all)?\s*$}) {
-            my ($target_path, $target_name, $dep_path, $dep_name) = ($1, $2, $3, $4);
+        # [dir/]CMakeFiles/target.dir/all: [dir/]CMakeFiles/dep.dir/all ...
+        # (top-level targets have no dir prefix; names may contain - and .)
+        if (m{^(?:\S+/)?CMakeFiles/([^/\s]+)\.dir/all:\s*(.*?)\s*$}) {
+            my ($target_name, $rest) = ($1, $2);
             $target_deps{$target_name} //= [];
-            push @{$target_deps{$target_name}}, $dep_name if defined $dep_name;
+            for my $dep_name ($rest =~ m{(?:^|\s)(?:\S+/)?CMakeFiles/([^/\s]+)\.dir/all\b}g) {
+                push @{$target_deps{$target_name}}, $dep_name;
+            }
         }
         # all: packages/foo/all  (top-level)
         elsif (/^all:\s+(\S+)\/all\s*$/) {
@@ -126,7 +129,7 @@ sub find_target_dirs {
     my @target_dirs;
     File::Find::find({
         wanted => sub {
-            if (/\/CMakeFiles\/(\w+)\.dir$/ && -d $_) {
+            if (/\/CMakeFiles\/([^\/]+)\.dir$/ && -d $_) {
                 my $name = $1;
                 my $dir = $_;
                 # Skip CMake internal test/probe directories
@@ -172,6 +175,22 @@ sub parse_target_dir {
         $target{link_cmd} = <$fh>;
         chomp $target{link_cmd};
         close($fh);
+    }
+
+    # Versioned shared libraries/executables: build.make follows the link
+    # with `cmake -E cmake_symlink_library libz.so.1.2.3 libz.so.1 libz.so`
+    # (soname and dev symlinks the linked programs and installs need).
+    if ($target{link_cmd} && open(my $bm, '<', "$dir/build.make")) {
+        while (my $line = <$bm>) {
+            next unless $line =~ /-E\s+cmake_symlink_(?:library|executable)\s+(\S+)((?:\s+\S+)+)\s*$/;
+            my ($real, @names) = ($1, split(' ', $2));
+            for my $n (@names) {
+                next if $n eq $real;
+                $target{link_cmd} .= "\nln -sf " . basename($real) . " $n";
+            }
+            last;
+        }
+        close($bm);
     }
 
     return \%target;
@@ -296,7 +315,7 @@ sub generate_smak_rules {
 
         # Determine the target's sub-directory (absolute for cd commands)
         my $target_dir = $t->{dir};
-        $target_dir =~ s{/CMakeFiles/\w+\.dir$}{};
+        $target_dir =~ s{/CMakeFiles/[^/]+\.dir$}{};
         my $rel_dir = $target_dir;
         $rel_dir =~ s{^\Q$build_dir\E/?}{};
         $rel_dir = '.' if $rel_dir eq '';
@@ -404,18 +423,13 @@ sub generate_smak_rules {
                 # Objects are already build_dir-relative — don't add rel_dir again
                 $fixed_deps->{$dep_key} = [@{$t->{objects}}];
 
-                # Absolutize paths in link command (link.txt paths are
-                # relative to the target's subdirectory).  Only rewrite
-                # paths that aren't already absolute.
+                # link.txt is written to run in the target's binary dir (its
+                # paths, e.g. ../libz.a, are relative to it), so run it there,
+                # as cmake's build.make does with `cd <dir> && ...`.
                 my $link_cmd = $t->{link_cmd};
                 if ($rel_dir ne '.') {
-                    # CMakeFiles/foo.dir/bar.o → /abs/build/rel_dir/CMakeFiles/...
-                    $link_cmd =~ s{(?<![/\w.])(CMakeFiles/\S+)}{$abs_dir/$1}g;
-                    # libfoo.a — only if not already part of a path (no leading slash)
-                    $link_cmd =~ s{(?<![/\w.])(lib\w+\.a)(?=\s|$)}{$abs_dir/$1}g;
-                    # -o outname — only if it's a bare name
-                    $link_cmd =~ s{-o\s+(?!/)(\S+)}{-o $abs_dir/$1}g
-                        unless $link_cmd =~ /\bar\b/;
+                    $link_cmd = join("\n", map { /\S/ ? "cd $abs_dir && $_" : $_ }
+                                           split /\n/, $link_cmd);
                 }
                 $fixed_rule->{$dep_key} = $link_cmd;
             }

@@ -4113,6 +4113,54 @@ sub _write_depend_info {
     close($fh);
 }
 
+# File names cmake gives a target's output, honoring OUTPUT_NAME, VERSION
+# and SOVERSION: (file it links to, soname, [symlink => points-to] ...).
+# For a shared library with VERSION 1.2.3 SOVERSION 1:
+#   libfoo.so.1.2.3, soname libfoo.so.1, links libfoo.so.1 -> libfoo.so.1.2.3
+#   and libfoo.so -> libfoo.so.1 (cmake -E cmake_symlink_library).
+sub _target_output_files {
+    my ($t, $name) = @_;
+    my $props = $t->{properties} // {};
+    my $base = $props->{OUTPUT_NAME} // $name;
+    my $libtype = $t->{libtype} // '';
+    if (($t->{type} // '') eq 'library' && $libtype eq 'shared') {
+        my $dev = "lib$base.so";
+        my $ver = $props->{VERSION};
+        my $sov = $props->{SOVERSION} // $ver;
+        my $real = defined $ver ? "$dev.$ver" : defined $sov ? "$dev.$sov" : $dev;
+        my $soname = defined $sov ? "$dev.$sov" : $real;
+        my @links;
+        push @links, [$soname, $real] if $soname ne $real;
+        push @links, [$dev, $soname] if $dev ne $soname;
+        return { file => $real, soname => $soname, link_as => $dev, links => \@links };
+    }
+    if (($t->{type} // '') eq 'library') {
+        return { file => "lib$base.a", link_as => "lib$base.a", links => [] };
+    }
+    return { file => $base, link_as => $base, links => [] };
+}
+
+# -Wl,-rpath for the build-tree directories of the in-project shared
+# libraries a target links (cmake's default CMAKE_SKIP_BUILD_RPATH=OFF), so
+# programs run from the build tree find them.
+sub _build_rpath_flag {
+    my ($libs, $state) = @_;
+    my $rs = $state->{root_scope} // {};
+    for my $k (qw(CMAKE_SKIP_BUILD_RPATH CMAKE_SKIP_RPATH)) {
+        my $v = $rs->{vars}{$k} // $rs->{cache}{$k} // '';
+        return '' if $v =~ /^(?:1|ON|YES|TRUE|Y)$/i;
+    }
+    my $bdir = $state->{build_dir} // '';
+    my (%seen, @dirs);
+    for my $l (@$libs) {
+        next unless $l =~ m{^(/.*)/[^/]+\.so(?:\.[\d.]+)?$};
+        my $d = $1;
+        next unless $bdir eq '' || index($d, $bdir) == 0;
+        push @dirs, $d unless $seen{$d}++;
+    }
+    return @dirs ? ' -Wl,-rpath,' . join(':', @dirs) : '';
+}
+
 sub _write_link_txt {
     my ($t, $tdir, $state, $name) = @_;
     my $lang = _primary_lang($t);
@@ -4133,7 +4181,7 @@ sub _write_link_txt {
 
     my $link_cmd;
     if ($t->{type} eq 'library' && $t->{libtype} eq 'static') {
-        my $out = "lib$name.a";
+        my $out = _target_output_files($t, $name)->{file};
         # rm -f first, exactly like CMake's static-lib link rule. `ar qc`
         # APPENDS: re-running the rule on an existing archive (any incremental
         # rebuild) would add every member a second time -> duplicate .o's ->
@@ -4144,7 +4192,8 @@ sub _write_link_txt {
                     "/usr/bin/ranlib $out";
     } elsif ($t->{type} eq 'library' && $t->{libtype} eq 'shared') {
         my $compiler = _compiler_for_lang($lang, $state);
-        my $out = "lib$name.so";
+        my $files = _target_output_files($t, $name);
+        my $out = $files->{file};
         my @libs = _resolve_link_libraries($t, $state);
         my $libs_str = '';
         if (@libs) {
@@ -4161,9 +4210,10 @@ sub _write_link_txt {
         # ld would otherwise error on symbols defined in some peer .so that
         # didn't make it into this target's link line. Real cmake reaches
         # the same effect by passing INTERFACE_LINK_LIBRARIES through.
-        $link_cmd = "$compiler -shared -fPIC -Wl,-soname,$out " .
+        $link_cmd = "$compiler -shared -fPIC -Wl,-soname,$files->{soname} " .
                     "-Wl,--allow-shlib-undefined " .
-                    join(' ', @objs) . " -o $out" . $libs_str;
+                    join(' ', @objs) . " -o $out" . $libs_str . _build_rpath_flag(\@libs, $state);
+        $link_cmd .= "\nln -sf $_->[1] $_->[0]" for @{ $files->{links} };
     } elsif ($t->{type} eq 'executable') {
         my $compiler = _compiler_for_lang($lang, $state);
         my @libs = _resolve_link_libraries($t, $state);
@@ -4180,7 +4230,8 @@ sub _write_link_txt {
             $libs_str .= ' ' . join(' ', @rest) if @rest;
         }
         $link_cmd = "$compiler -Wl,--allow-shlib-undefined " .
-                    join(' ', @objs) . " -o $name" . $libs_str;
+                    join(' ', @objs) . " -o " . _target_output_files($t, $name)->{file}
+                    . $libs_str . _build_rpath_flag(\@libs, $state);
     } else {
         $link_cmd = "# unsupported target type: $t->{type}";
     }
@@ -4223,8 +4274,8 @@ sub _resolve_link_libraries {
             # Our own target — point at where the link will produce the
             # archive/shared lib (depends on libtype).
             my $bin = $lt->{binary_dir} // $state->{build_dir};
-            my $ext = ($lt->{libtype} // 'static') eq 'shared' ? 'so' : 'a';
-            push @out, "$bin/lib$lib.$ext";
+            $lt->{type} //= 'library';
+            push @out, "$bin/" . _target_output_files($lt, $lib)->{link_as};
             next;
         }
         # Starts with /  → filesystem path

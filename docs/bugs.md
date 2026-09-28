@@ -165,7 +165,14 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   `ivlpp` and `driver/iverilog` are not byte-identical to make's.
 
 ### CMake metadata mode: link commands run from the wrong directory
-- [ ] **Symptom (smak-buildtest, zlib-cmake, cJSON; cmake 3.28 Makefile
+- [x] **FIXED (2026-09-28):** SmakCMake runs each `link.txt` line as
+  `cd <target binary dir> && ...` (replacing regex path rewriting that missed
+  `../libz.a`), parses every Makefile2 target dependency including top-level
+  `CMakeFiles/x.dir/all` and names with `-`/`.`, and appends the
+  `cmake -E cmake_symlink_library` step from build.make as `ln -sf`. zlib
+  (cmake), cJSON and libuv build with smak and -j4, and `make` finds nothing
+  left. Test: `test/test_cmake_link_dirs.sh`.
+- [ ] **(original) Symptom (smak-buildtest, zlib-cmake, cJSON; cmake 3.28 Makefile
   generator):** every smak mode fails to link test executables with
   `/usr/bin/ld: cannot find ../libz.a` or `cannot find ../libcjson.so.1.7.19`.
   cmake's `link.txt` is written to run in the target's binary dir, e.g.
@@ -207,7 +214,13 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   silently accepted.
 
 ### CMake interp: linked executables/shared libs get no build-tree RPATH
-- [ ] **Symptom (2026-09-05, Xyce 7.11 via `smak -cmake`, BUILD_SHARED_LIBS=ON):**
+- [x] **FIXED (2026-09-28):** executables and shared libraries that link
+  in-project shared libraries get `-Wl,-rpath,<their build dirs>` unless
+  CMAKE_SKIP_BUILD_RPATH / CMAKE_SKIP_RPATH is set. The interpreter also
+  honors OUTPUT_NAME, VERSION and SOVERSION (real file, soname, symlinks)
+  instead of always writing lib<target>.so. Test:
+  `test/test_cmake_link_dirs.sh` (interp cases).
+- [ ] **(original) Symptom (2026-09-05, Xyce 7.11 via `smak -cmake`, BUILD_SHARED_LIBS=ON):**
   `src/Xyce` links fine but fails to start: `libXyceLib.so: cannot open shared
   object file`. The generated link.txt has no `-Wl,-rpath,<build dirs>`; real
   cmake adds the build-tree RPATH by default (CMAKE_SKIP_BUILD_RPATH=OFF) and
@@ -427,7 +440,12 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
      test_ssh_localhost.sh -> SUCCESS.
 
 ### Executable links before its static-library dependency is archived
-- [ ] **Symptom (found 2026-07-10, while testing the ar `rm -f` fix):** a clean
+- [x] **FIXED (2026-09-28):** the exe->library edge was lost because
+  SmakCMake's Makefile2 parser only matched targets with a directory prefix,
+  so top-level library targets were never recorded as dependencies. Covered
+  by `test/test_cmake_link_dirs.sh` (static and shared library, seq and -j4,
+  metadata and interp modes).
+- [ ] **(original) Symptom (found 2026-07-10, while testing the ar `rm -f` fix):** a clean
   build of a project with a static library + an executable that links it returns
   **exit 1**, even though both artifacts are built correctly. smak dispatches the
   exe's link rule *before* the static lib's archive rule has completed: the first

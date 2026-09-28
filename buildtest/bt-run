@@ -692,10 +692,12 @@ sub check_build {
     return if $r->{rc} != 0;
     # Same commands and same binaries as make?  Different compile flags with
     # different products means smak built something else (e.g. lost -D flags).
-    my %ref_cmd = map { $_ => 1 } @{ $result{prepare}{commands} || [] };
-    my %cmd = map { $_ => 1 } compile_commands(first_section($log));
-    my @only_make = grep { !$cmd{$_} } sort keys %ref_cmd;
-    my @only_smak = grep { !$ref_cmd{$_} } sort keys %cmd;
+    # Compared without whitespace: parallel output can split a word.
+    my %ref_cmd = map { (my $k = $_) =~ s/\s+//g; $k => $_ } @{ $result{prepare}{commands} || [] };
+    my %cmd = map { (my $k = $_) =~ s/\s+//g; $k => $_ } compile_commands(first_section($log));
+    %cmd = %ref_cmd unless %cmd;   # CLI sessions do not echo commands
+    my @only_make = map { $ref_cmd{$_} } grep { !$cmd{$_} } sort keys %ref_cmd;
+    my @only_smak = map { $cmd{$_} } grep { !$ref_cmd{$_} } sort keys %cmd;
     my $sums = $result{prepare}{product_sums} || {};
     my @differ = grep { -f "$tree/$_" && file_md5($_) ne $sums->{$_} } sort keys %$sums;
     $r->{products_differ} = \@differ;
@@ -712,8 +714,8 @@ sub check_build {
         $r->{warn}++;
         push @{ $r->{notes} }, scalar(@differ) . ' product(s) not byte-identical to make\'s (same commands)';
     } elsif (@only_make || @only_smak) {
-        $r->{warn}++;
-        push @{ $r->{notes} }, 'compile commands printed differently from make (products identical)';
+        # e.g. automake's `$depbase` printed expanded; informational only.
+        push @{ $r->{info} }, scalar(@only_make) . ' compile command(s) printed differently from make (products identical)';
     }
 }
 

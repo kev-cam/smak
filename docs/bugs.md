@@ -103,6 +103,31 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   fail fast. The rule writes its output through a pipe:
   `if test -x ./config.status; then ...; fi | sed ... > $@`.
 
+### `-j`: subdir objects of a non-recursive makefile compiled in the wrong directory
+- [ ] **Symptom (smak-buildtest, tmux):** automake `subdir-objects` targets
+  like `compat/getpeereid.o` fail under `-j` and in server/multi modes with
+  `compat/getpeereid.c:27:10: fatal error: compat.h: No such file or directory`.
+  The recipe (`gcc ... -I. -c -o compat/getpeereid.o compat/getpeereid.c`) must
+  run in the makefile's directory, but smak runs it in `compat/`. The
+  sequential build works.
+- **Hypothesis:** the job's `exec_dir` is derived from the target's path
+  ("Determine exec_dir from target path" in Smak.pm) instead of the
+  directory of the makefile that owns the rule.
+
+### Server (CLI) mode splits automake's multi-line compile recipe
+- [ ] **Symptom (smak-buildtest, htop):** in `smak -cli` then `build`, the
+  depcomp recipe
+  `depbase=...;\ gcc ... -MF $depbase.Tpo ... &&\ mv -f $depbase.Tpo $depbase.Po`
+  fails with `mv: cannot move '$depbase.Tpo'`. The shell variable set on the
+  first line is gone, so the continued lines ran as separate commands or
+  with `$$` handled differently. Batch `smak` and `smak -jN` build htop fine.
+
+### VPATH-resolved `$<` gets a `./` prefix, so binaries differ from make's
+- [ ] **Symptom (smak-buildtest, iverilog):** smak compiles
+  `-c ./../libmisc/LineInfo.cc` where make uses `-c ../libmisc/LineInfo.cc`.
+  The build works, but `__FILE__` strings and debug info differ, so `ivl`,
+  `ivlpp` and `driver/iverilog` are not byte-identical to make's.
+
 ### CMake metadata mode: link commands run from the wrong directory
 - [ ] **Symptom (smak-buildtest, zlib-cmake, cJSON; cmake 3.28 Makefile
   generator):** every smak mode fails to link test executables with

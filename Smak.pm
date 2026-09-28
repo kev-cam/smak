@@ -2348,6 +2348,26 @@ sub normalize_assignment_op {
     return ('=', $out);
 }
 
+# Remove a make comment: everything from the first `#` not escaped as `\#`
+# (GNU make recognizes `#` even inside $(...) and quotes; `\#` is a literal).
+sub strip_make_comment {
+    my ($line) = @_;
+    return $line unless $line =~ /#/;
+    my $out = '';
+    my $len = length $line;
+    for (my $i = 0; $i < $len; $i++) {
+        my $c = substr($line, $i, 1);
+        if ($c eq '\\' && $i + 1 < $len && substr($line, $i + 1, 1) eq '#') {
+            $out .= '#';
+            $i++;
+            next;
+        }
+        last if $c eq '#';
+        $out .= $c;
+    }
+    return $out;
+}
+
 sub parse_makefile {
     my ($makefile_path) = @_;
 
@@ -2533,14 +2553,25 @@ sub parse_makefile {
     while (my $line = <$fh>) {
         chomp $line;
 
-        # Handle line continuations
+        # Handle line continuations.  Outside recipes GNU make turns a
+        # backslash-newline and the whitespace around it into one space;
+        # recipe lines (leading tab) go to the shell and are joined as before.
+        my $is_recipe_line = $line =~ /^\t/;
         while ($line =~ /\\$/) {
             $line =~ s/\\$//;
             my $next = <$fh>;
             last unless defined $next;
             chomp $next;
-            $line .= $next;
+            if ($is_recipe_line) {
+                $line .= $next;
+            } else {
+                $line =~ s/\s+$//;
+                $next =~ s/^\s+//;
+                $line .= " $next";
+            }
         }
+        # End-of-line comments (outside recipes): `X = a # note` is "a ".
+        $line = strip_make_comment($line) unless $is_recipe_line;
 
         # Multi-line define VAR [:=|=|+=|?=] ... endef  (GNU make canned recipes)
         # Must run BEFORE var-assignment parsing so the following lines aren't
@@ -3349,14 +3380,25 @@ sub parse_included_makefile {
     while (my $line = <$fh>) {
         chomp $line;
 
-        # Handle line continuations
+        # Handle line continuations.  Outside recipes GNU make turns a
+        # backslash-newline and the whitespace around it into one space;
+        # recipe lines (leading tab) go to the shell and are joined as before.
+        my $is_recipe_line = $line =~ /^\t/;
         while ($line =~ /\\$/) {
             $line =~ s/\\$//;
             my $next = <$fh>;
             last unless defined $next;
             chomp $next;
-            $line .= $next;
+            if ($is_recipe_line) {
+                $line .= $next;
+            } else {
+                $line =~ s/\s+$//;
+                $next =~ s/^\s+//;
+                $line .= " $next";
+            }
         }
+        # End-of-line comments (outside recipes): `X = a # note` is "a ".
+        $line = strip_make_comment($line) unless $is_recipe_line;
 
         # Handle conditional directives (same as in parse_makefile)
         if ($line =~ /^\s*ifeq\s+(.+)$/ || $line =~ /^\s*ifneq\s+(.+)$/) {
@@ -4956,6 +4998,27 @@ sub expand_dep_text {
 
 # Check if a target needs rebuilding based on timestamp comparison
 # Returns 1 if target needs rebuilding, 0 if up-to-date
+# $? : prerequisites newer than the target (all of them if the target is
+# missing).  With $include_pending, prerequisites that are queued or running
+# in this build count too (the job-master expands recipes before building).
+sub newer_prereqs {
+    my ($target, $deps, $dir, $include_pending) = @_;
+    $dir //= '.';
+    my $path = sub { my $p = shift; $p =~ m{^/} ? $p : "$dir/$p" };
+    my @t = stat($path->($target));
+    return grep { !/dirstamp$/ } @$deps unless @t;
+    my @out;
+    for my $d (@$deps) {
+        next if $d =~ /dirstamp$/;
+        my @st = stat($path->(resolve_vpath($d, $dir)));
+        if (!@st || $st[9] > $t[9]
+            || ($include_pending && exists $in_progress{$d} && $in_progress{$d} ne 'done')) {
+            push @out, $d;
+        }
+    }
+    return @out;
+}
+
 sub needs_rebuild {
     my ($target, $visited) = @_;
     $visited ||= {};
@@ -5957,7 +6020,8 @@ sub build_target {
     warn "DEBUG[" . __LINE__ . "]:   is_phony=$is_phony\n" if $ENV{SMAK_DEBUG};
 
     # Warn if phony target exists as a file
-    if ($is_phony && -e $target) {
+    # (GNU make says nothing here; lua ships a script named `all`.)
+    if ($is_phony && -e $target && ($ENV{SMAK_DEBUG} || ($ENV{SMAK_VERBOSE} // '') eq '1')) {
         warn "smak: Warning: phony target '$target' exists as a file and will be ignored\n";
     }
 
@@ -6134,6 +6198,7 @@ sub build_target {
             '@' => $target,
             '<' => $resolved_source_prereq,
             '^' => join(' ', @deps),
+            '?' => join(' ', newer_prereqs($target, \@deps, '.')),
             '*' => $stem // '',
         );
 
@@ -11476,6 +11541,9 @@ sub run_job_master {
             '@' => $target,
             '<' => $first_prereq,
             '^' => join(' ', @deps),
+            # Expanded when queued, before prerequisites are rebuilt: include
+            # the ones still being built, not only those already newer.
+            '?' => join(' ', newer_prereqs($target, \@deps, $dir, 1)),
         );
 
         # Expand variables (auto vars are resolved inside expand_vars)

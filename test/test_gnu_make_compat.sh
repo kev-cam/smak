@@ -11,6 +11,9 @@
 #     and builtin echo keeps quoted spacing and -n
 #   - $< from `%.o: $(srcdir)/../lib/%.c` with srcdir=. is ../lib/x.c, not
 #     ./../lib/x.c (iverilog binaries differed from make's via __FILE__)
+#   - end-of-line comments and \# in variable values; backslash-newline
+#     plus indentation collapses to one space (lua's CWARNSCPP)
+#   - $? (prerequisites newer than the target; lua: ar rc liblua.a $?)
 set -u
 SMAK=${SMAK:-$(cd "$(dirname "$0")/.." && pwd)/smak}
 command -v make >/dev/null || { echo "SKIP: GNU make not installed"; exit 77; }
@@ -81,5 +84,27 @@ echo x > dotslash/lib/x.c
 printf 'srcdir = .\nall: x.o\n%%.o: $(srcdir)/../lib/%%.c\n\t@echo "cc $<"\n' > dotslash/sub/Makefile
 check "pattern prerequisite ./ prefix" dotslash/sub
 rm -f dotslash/sub/x.o
+
+mkdir comments
+cat > comments/Makefile <<'EOF2'
+X = a # comment
+Y = b\#c # real comment
+W= \
+	-Wa \
+	-Wb \
+        # the next ones are off,
+	# -Wx \
+	# -Wy \
+
+all:
+	@echo "[$(X)] [$(Y)] [$(W)]"
+EOF2
+check "comments and continuations" comments
+
+mkdir newer
+printf 'lib.a: a.o b.o\n\t@echo "update: $?"\n%%.o:\n\t@touch $@\n' > newer/Makefile
+touch newer/a.o newer/b.o newer/lib.a; touch -d '1 minute ago' newer/a.o newer/lib.a
+want=$(cd newer && make -s 2>&1); got=$(cd newer && $SMAK -s 2>&1)
+if [ "$got" == "$want" ]; then echo "PASS: \$? seq"; else echo "FAIL: \$? seq: make [$want] smak [$got]"; fail=1; fi
 
 exit $fail

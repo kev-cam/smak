@@ -150,6 +150,22 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 ### Server (CLI) mode splits automake's multi-line compile recipe
 - [x] **FIXED (2026-09-28):** same fix as item 3 of the jq entry above.
 
+### End-of-line comments kept in variable values; `$?` unsupported (lua)
+- [x] **FIXED (2026-09-28):** found by smak-buildtest on lua.
+  - `X = a # comment` kept `# comment` in the value (only whole-line
+    comments were skipped); `\#` was not unescaped. Non-recipe lines now
+    lose everything from the first unescaped `#` (`strip_make_comment`).
+  - Outside recipes, backslash-newline and the surrounding whitespace now
+    collapse to one space (lua's `CWARNSCPP= \ <tab>-Wa \ ... # comment`
+    passed `#` and tabs to gcc: "#: linker input file not found").
+  - `$?` (prerequisites newer than the target) was passed to the shell,
+    which expanded it to the last exit status (`ar rc liblua.a 0`). It is now
+    an automatic variable; under -j, where recipes are expanded when queued,
+    it also includes prerequisites still being built.
+  - The "phony target 'all' exists as a file" warning (GNU make says
+    nothing) only shows with SMAK_DEBUG / -v.
+  Tests: `test/test_gnu_make_compat.sh`.
+
 ### Parse cache reused after smak itself changed
 - [x] **FIXED (2026-09-28):** the state cache was validated only against the
   makefiles' mtime/size and a hand-bumped `CACHE_VERSION`, so a newer smak

@@ -382,6 +382,15 @@ sub note_job_failure {
 }
 
 # The "token ..." line of a job-master port file ('' if none).
+# Remove this job-master's port file, and .smak.connect if it still points
+# at it (a newer job-master may own the link by now).
+sub remove_connect_files {
+    my $port_file = get_port_file_dir() . "/smak-jobserver-$$.port";
+    my $link = readlink('.smak.connect');
+    unlink('.smak.connect') if defined $link && $link eq $port_file;
+    unlink($port_file) if -f $port_file;
+}
+
 sub port_file_token {
     my ($file) = @_;
     open(my $fh, '<', $file) or return '';
@@ -420,6 +429,12 @@ sub start_job_server {
     }
 
     unless ($job_server_reused) {
+        # Port files of job-masters that no longer exist (killed, crashed).
+        for my $pf (glob(get_port_file_dir() . "/smak-jobserver-*.port")) {
+            my ($pid) = $pf =~ /smak-jobserver-(\d+)\.port$/ or next;
+            unlink($pf) unless kill(0, $pid) || $!{EPERM};
+        }
+
         # Token the job-master writes into its port file, so a stale file left by
         # an earlier job-master with the same PID is never mistaken for this one.
         our $port_token = sprintf('%d-%d-%06d', $$, time(), int(rand(1e6)));
@@ -15498,10 +15513,7 @@ sub run_job_master {
                         }
                         print $new_conn "OK\n";
                         close($new_conn);
-                        # Clean up port file
-                        my $port_dir = get_port_file_dir();
-                        my $port_file = "$port_dir/smak-jobserver-$$.port";
-                        unlink($port_file) if -f $port_file;
+                        remove_connect_files();
                         exit(0);
                     } else {
                         # Regular master connecting - replace old master
@@ -15571,6 +15583,7 @@ sub run_job_master {
                 if ($line eq 'SHUTDOWN') {
                     print STDERR "Shutdown requested by master.\n" if $ENV{SMAK_DEBUG} || $ENV{SMAK_VERBOSE};
                     shutdown_workers();
+                    remove_connect_files();
                     print $master_socket "SHUTDOWN_ACK\n";
                     exit 0;
 
@@ -15999,10 +16012,7 @@ sub run_job_master {
                     }
                     print $master_socket "OK\n";
                     close($master_socket);
-                    # Clean up port file
-                    my $port_dir = get_port_file_dir();
-                    my $port_file = "$port_dir/smak-jobserver-$$.port";
-                    unlink($port_file) if -f $port_file;
+                    remove_connect_files();
                     exit(0);
 
                 } elsif ($line =~ /^BENCHMARK$/) {

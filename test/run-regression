@@ -631,6 +631,15 @@ WRAPPER_EOF
     run_single_mode "off" "" "$out_seq_nc"
     result_seq_nocache=$?
     local result_seq_nocache_fail=0
+    if [ $result_seq_nocache -eq 77 ]; then
+        # Exit 77 = skipped (missing prerequisite such as sshd or a source
+        # tree); it applies to every mode, so don't run or score the rest.
+        echo -e "${YELLOW}SKIP${NC} ($(grep -m1 -i 'skip' "$out_seq_nc" | cut -c1-70))"
+        ((SKIPPED++))
+        [ -n "$temp_script_file" ] && rm -f "$temp_script_file"
+        rm -f "$out_seq_nc" "$out_seq_c" "$out_par_nc" "$out_par_c" "$out_par_nc_nb" "$out_par_c_nb"
+        return
+    fi
     if [ $result_seq_nocache -eq 124 ]; then
         echo -e "${RED}TIMEOUT${NC} (killed after 30s)"
         ((FAILED++))

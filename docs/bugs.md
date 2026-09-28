@@ -70,6 +70,10 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   `test/test_server_reuse.sh`.
 - **Symptom:** the old master port was stored but never used, so every
   `smak -cli` started another job server and each `detach` left one more.
+- **Also fixed:** a job-master shutting down normally left `.smak.connect`
+  pointing at its deleted port file (regression runs left one in
+  `projects/nvc`); it now removes the link if it still points at itself, and
+  a starting job server deletes port files of job-masters that are gone.
 
 ### Only `Makefile` is searched, not `GNUmakefile` / `makefile`
 - [x] **FIXED (2026-09-28):** GNU make's order `GNUmakefile`, `makefile`,
@@ -348,7 +352,10 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   test_dnsmasq stays non-executable pending the exit-77 harness fix below.
 
 ### test_dnsmasq exit 77 (skip) miscounted as failure
-- [ ] **Symptom:** with +x, test_dnsmasq exits 77 ("SKIP: dnsmasq dir not found")
+- [x] **FIXED (2026-09-28):** run-regression reports exit 77 from the first
+  mode as SKIP and does not run or score the other modes; test_dnsmasq is
+  executable again (it skips when /usr/local/src/dnsmasq is absent).
+- [ ] **(original) Symptom:** with +x, test_dnsmasq exits 77 ("SKIP: dnsmasq dir not found")
   but run-regression scores any non-0/non-124 mode exit as FAIL, so it shows as
   failed. **Fix:** honor exit 77 as skip in the per-mode scoring (all 6 mode
   checks in run-regression). Left non-executable for now.

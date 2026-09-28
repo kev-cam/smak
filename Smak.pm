@@ -6118,6 +6118,8 @@ sub build_target {
         }
 
         # Resolve source prerequisite through VPATH if $< appears in the recipe
+        # (leading ./ dropped from the name first, as GNU make does)
+        $source_prereq =~ s{^(?:\./)+(?=.)}{};
         my $resolved_source_prereq = $source_prereq;
         if ($converted =~ /\$</ && $source_prereq) {
             use Cwd 'getcwd';
@@ -11460,7 +11462,11 @@ sub run_job_master {
         for my $dep (@deps) {
             next if $dep =~ /dirstamp$/;
             next if $dep =~ /\.deps\//;
-            $first_prereq = resolve_vpath($dep, $dir);
+            # GNU make records prerequisite names without a leading ./
+            # (`%.o: $(srcdir)/../lib/%.cc` with srcdir=. gives ../lib/x.cc);
+            # a VPATH search result keeps its directory as written.
+            (my $name = $dep) =~ s{^(?:\./)+(?=.)}{};
+            $first_prereq = resolve_vpath($name, $dir);
             last;
         }
 

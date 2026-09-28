@@ -9,6 +9,8 @@
 #   - `VAR != cmd` and `VAR ::= value`
 #   - quoted `;` and `&&` in recipes are not split by the -j builtin path,
 #     and builtin echo keeps quoted spacing and -n
+#   - $< from `%.o: $(srcdir)/../lib/%.c` with srcdir=. is ../lib/x.c, not
+#     ./../lib/x.c (iverilog binaries differed from make's via __FILE__)
 set -u
 SMAK=${SMAK:-$(cd "$(dirname "$0")/.." && pwd)/smak}
 command -v make >/dev/null || { echo "SKIP: GNU make not installed"; exit 77; }
@@ -73,5 +75,11 @@ dep:
 	@echo "x;y" > f.txt; cat f.txt
 EOF
 check "quoted separators and echo" echo
+
+mkdir -p dotslash/sub dotslash/lib
+echo x > dotslash/lib/x.c
+printf 'srcdir = .\nall: x.o\n%%.o: $(srcdir)/../lib/%%.c\n\t@echo "cc $<"\n' > dotslash/sub/Makefile
+check "pattern prerequisite ./ prefix" dotslash/sub
+rm -f dotslash/sub/x.o
 
 exit $fail

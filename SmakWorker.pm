@@ -166,29 +166,90 @@ sub execute_builtin {
 
     # Strip @ and - prefixes
     my $clean_cmd = $cmd;
-    $clean_cmd =~ s/^[@-]+//;
-    $clean_cmd =~ s/^\s+//;
+    $clean_cmd =~ s/^[@+-]+//;
+    $clean_cmd =~ s/^\s+|\s+$//g;
 
-    if ($clean_cmd =~ /^rm\s+(.*)$/) {
-        my $args = $1;
-        my $force = ($args =~ s/\s*-[rf]+\s*/ /g);  # Remove -r, -f flags
-        $args =~ s/^\s+|\s+$//g;
-        my @files = split(/\s+/, $args);
-        for my $file (@files) {
-            unlink($file) or ($force ? 1 : return 1);
+    # Only plain words are handled here; anything the shell would interpret
+    # (operators, substitutions, escapes, quoting) goes to the shell.  A
+    # builtin that half-understood "mkdir -p src && if ..." created a
+    # directory named "src && if test -x ." and skipped the rest.
+    return undef if $clean_cmd =~ /[;&|<>`\$(){}\\~#\n]/;
+    if ($clean_cmd =~ /^echo\s+(.*)$/s) {
+        my $text = $1;
+        return undef if $text =~ /^-/;
+        if ($text =~ /["']/) {
+            return undef unless $text =~ /^"([^"]*)"$/ || $text =~ /^'([^']*)'$/;
+            $text = $1;
+        } else {
+            return undef if $text =~ /[*?\[\]]/;
+            $text = join(' ', split(/\s+/, $text));
+        }
+        print $socket "OUTPUT $text\n" if $socket;
+        return 0;
+    }
+    return undef if $clean_cmd =~ /["']/;
+    my ($prog, @args) = split(/\s+/, $clean_cmd);
+    return undef unless defined $prog;
+
+    if ($prog eq 'rm') {
+        my ($force, $recursive) = (0, 0);
+        my @files;
+        for my $a (@args) {
+            if ($a =~ /^-([rRf]+)$/) {
+                $force = 1 if $1 =~ /f/;
+                $recursive = 1 if $1 =~ /[rR]/;
+            } elsif ($a =~ /^-/) {
+                return undef;
+            } elsif ($a =~ /[*?\[]/) {
+                push @files, glob($a);
+            } else {
+                push @files, $a;
+            }
+        }
+        my $rc = 0;
+        for my $f (@files) {
+            if (-d $f && !-l $f) {
+                if ($recursive) { remove_tree($f); }
+                else { print $socket "OUTPUT rm: cannot remove '$f': Is a directory\n" if $socket; $rc = 1; }
+            } elsif (-e $f || -l $f) {
+                unless (unlink($f)) {
+                    print $socket "OUTPUT rm: cannot remove '$f': $!\n" if $socket;
+                    $rc = 1;
+                }
+            } elsif (!$force) {
+                print $socket "OUTPUT rm: cannot remove '$f': No such file or directory\n" if $socket;
+                $rc = 1;
+            }
+        }
+        return $rc;
+    }
+
+    return undef if $clean_cmd =~ /[*?\[\]]/;   # globs: only rm expands them here
+
+    if ($prog eq 'mkdir') {
+        my $parents = 0;
+        my @dirs;
+        for my $a (@args) {
+            if ($a eq '-p') { $parents = 1; }
+            elsif ($a =~ /^-/) { return undef; }
+            else { push @dirs, $a; }
+        }
+        return undef unless @dirs;
+        for my $d (@dirs) {
+            if ($parents) {
+                make_path($d) unless -d $d;
+                next if -d $d;
+            } else {
+                next if mkdir($d);
+            }
+            print $socket "OUTPUT mkdir: cannot create directory '$d': $!\n" if $socket;
+            return 1;
         }
         return 0;
     }
 
-    if ($clean_cmd =~ /^mkdir\s+(?:-p\s+)?(.*)$/) {
-        my $dir = $1;
-        $dir =~ s/^\s+|\s+$//g;
-        make_path($dir);
-        return 0;
-    }
-
-    if ($clean_cmd =~ /^mv\s+(?:-\w+\s+)*(\S+)\s+(\S+)\s*$/) {
-        my ($src, $dst) = ($1, $2);
+    if ($prog eq 'mv' && @args == 2 || ($prog eq 'mv' && @args == 3 && $args[0] eq '-f')) {
+        my ($src, $dst) = @args[-2, -1];
         if (!move($src, $dst)) {
             print $socket "OUTPUT mv: cannot move '$src' to '$dst': $!\n" if $socket;
             return 1;
@@ -196,8 +257,8 @@ sub execute_builtin {
         return 0;
     }
 
-    if ($clean_cmd =~ /^cp\s+(\S+)\s+(\S+)\s*$/) {
-        my ($src, $dst) = ($1, $2);
+    if ($prog eq 'cp' && @args == 2 && $args[0] !~ /^-/) {
+        my ($src, $dst) = @args;
         if (!copy($src, $dst)) {
             print $socket "OUTPUT cp: cannot copy '$src' to '$dst': $!\n" if $socket;
             return 1;
@@ -205,34 +266,20 @@ sub execute_builtin {
         return 0;
     }
 
-    if ($clean_cmd =~ /^touch\s+(\S+)\s*$/) {
-        my $file = $1;
-        if (-e $file) {
-            utime(undef, undef, $file);
-        } else {
-            open(my $fh, '>', $file) or return 1;
-            close($fh);
+    if ($prog eq 'touch' && @args && !grep { /^-/ } @args) {
+        for my $file (@args) {
+            if (-e $file) {
+                utime(undef, undef, $file) or return 1;
+            } else {
+                open(my $fh, '>', $file) or return 1;
+                close($fh);
+            }
         }
         return 0;
     }
 
-    if ($clean_cmd =~ /^(true|:)\s*$/) {
-        return 0;
-    }
-
-    if ($clean_cmd =~ /^false\s*$/) {
-        return 1;
-    }
-
-    if ($clean_cmd =~ /^echo\s+(.*)$/) {
-        my $text = $1;
-        # Don't handle as builtin if shell metacharacters are present
-        return undef if $text =~ /[>|<;&`\$]/;
-        # Strip surrounding quotes (like shell would)
-        $text =~ s/^"(.*)"$/$1/s || $text =~ s/^'(.*)'$/$1/s;
-        print $socket "OUTPUT $text\n" if $socket;
-        return 0;
-    }
+    return 0 if ($prog eq 'true' || $prog eq ':') && !@args;
+    return 1 if $prog eq 'false' && !@args;
 
     return undef;  # Not a built-in
 }
@@ -314,6 +361,15 @@ sub run_worker {
         if ($line eq 'SHUTDOWN') {
             print STDERR "Worker shutting down on master request\n" if $ENV{SMAK_DEBUG} || $ENV{SMAK_VERBOSE};
             last;
+        }
+
+        # Job server detached from its client: let go of the client's
+        # terminal/pipe (task output travels over the socket anyway).
+        if ($line eq 'STDIO_NULL') {
+            open(STDIN, '<', '/dev/null');
+            open(STDOUT, '>', '/dev/null');
+            open(STDERR, '>', '/dev/null');
+            next;
         }
 
         # Handle CLI owner change
@@ -406,7 +462,7 @@ sub run_worker {
                     # Not a built-in, execute externally
                     # Strip @ (silent) and - (ignore errors) prefixes that make understands
                     my $run_cmd = $ext_cmd;
-                    $run_cmd =~ s/^[@-]+//;
+                    $run_cmd =~ s/^[@+-]+//;
                     $run_cmd =~ s/^\s+//;
                     my ($pid, $cmd_fh, $is_direct) = execute_command_direct($run_cmd);
                     if ($pid) {
@@ -431,7 +487,7 @@ sub run_worker {
                             # Not a built-in, fall back to shell
                             # Strip @ (silent) and - (ignore errors) prefixes
                             my $shell_cmd = $builtin_cmd;
-                            $shell_cmd =~ s/^[@-]+//;
+                            $shell_cmd =~ s/^[@+-]+//;
                             $shell_cmd =~ s/^\s+//;
                             my $pid = open(my $cmd_fh, '-|', "$shell_cmd 2>&1");
                             if ($pid) {

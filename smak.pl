@@ -147,7 +147,7 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
     die "Failed to execute cmake: $!\n";
 }
 
-my $makefile = 'Makefile';
+my $makefile;  # default chosen after -C, like GNU make
 my $debug = 0;
 my $help = 0;
 my $script_file = '';
@@ -326,6 +326,7 @@ if ($reconnect || $kill_old_js) {
                         # The actual connection will happen later via start_job_server
                         $jobs = 1 unless $jobs;
                         $Smak::job_server_master_port = $master_port;
+                        $Smak::reconnect_port = $master_port;
                         print "Reconnecting to existing job server (port $master_port)\n" if $verbose;
                     } else {
                         warn "Cannot connect to job server at port $master_port (may have already exited)\n";
@@ -348,6 +349,25 @@ if (defined $ENV{SMAK_RECURSION_LEVEL}) {
 }
 
 # Parse environment variable options first (skip if recursive to avoid deadlock)
+# GNU make options that recursive makefiles pass around and that need no
+# action from smak (output decoration, builtin-rule toggles, load limits).
+# Accepting them keeps `$(MAKE) --no-print-directory -C lib` and friends working.
+sub gnu_make_compat_options {
+    my $ignore = sub { };
+    return (
+        'w|print-directory'           => $ignore,
+        'no-print-directory'          => $ignore,
+        'r|no-builtin-rules'          => $ignore,
+        'no-builtin-variables'        => $ignore,   # -R: same as -r (options are case-insensitive)
+        'warn-undefined-variables'    => $ignore,
+        'no-silent'                   => $ignore,
+        'l|load-average|max-load:s'   => $ignore,
+        'O|output-sync:s'             => $ignore,
+        'jobserver-auth|jobserver-fds=s' => $ignore,
+        'no-keep-going|stop'          => sub { $keep_going = 0; },   # no -S: it would shadow -s
+    );
+}
+
 if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
     # Split the environment variable into arguments
     my @env_args = split(/\s+/, $ENV{USR_SMAK_OPT});
@@ -378,6 +398,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
         'test=s' => \$test,
         'no-builtins' => sub { $Smak::no_builtins = 1; },
+        gnu_make_compat_options(),
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -410,6 +431,7 @@ GetOptions(
     'test=s' => \$test,
     'no-builtins' => sub { $Smak::no_builtins = 1; },
     'test-worker' => \$test_worker,
+    gnu_make_compat_options(),
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -519,6 +541,9 @@ if ($test_worker) {
 if ($directory) {
     chdir($directory) or die "smak: Cannot change to directory '$directory': $!\n";
 }
+
+# GNU make looks for GNUmakefile, makefile and Makefile, in that order.
+$makefile //= (grep { -f $_ } qw(GNUmakefile makefile Makefile))[0] // 'Makefile';
 
 # Handle -ssh=fuse option to auto-detect FUSE remote server
 if ($ssh_host eq 'fuse') {
@@ -1424,7 +1449,7 @@ if (!$debug) {
             }
             # Also handle other messages to prevent blocking
             elsif ($response =~ /^OUTPUT (.*)$/) {
-                print "$1\n" unless $Smak::silent_mode;
+                print "$1\n";   # recipe output: -s only silences command echo
                 STDOUT->flush();
             }
             elsif ($response =~ /^ERROR (.*)$/) {

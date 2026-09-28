@@ -54,73 +54,105 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   `TERM not set at .../Term/Cap.pm` before connecting. `smak -cli` was fine.
 
 ### smak-attach: bare `build` does not build the default goal
-- [ ] **Symptom (smak-buildtest, every project):** in `smak-attach`, `build`
-  with no target prints `No default target found.` and exits 0. The same
-  command in `smak -cli` builds the default goal. `build all` works.
-- **Hypothesis:** the attached CLI never parsed the makefile, so
-  `get_default_target()` is empty; ask the job server for its default goal.
+- [x] **FIXED (2026-09-28):** the attached CLI asks the job server
+  (`DEFAULT_TARGET`) when it has no parsed makefile. Test:
+  `test/test_server_reuse.sh`.
+- **Symptom (smak-buildtest, every project):** in `smak-attach`, `build` with
+  no target printed `No default target found.` and exited 0.
 
 ### `reconnect` rc option is a no-op; detached servers pile up
-- [ ] **Symptom:** with `set reconnect = 1`, smak.pl reads `.smak.connect` and
-  stores the old master port in `$Smak::job_server_master_port`, but nothing
-  uses it. Every `smak -cli` then starts a new job server, and each `detach`
-  leaves one more running. Only `smak-attach -pid` reuses a server. Batch runs
-  also leave a dangling `.smak.connect` symlink and stale port files that
-  `smak-attach` cleans up later.
+- [x] **FIXED (2026-09-28):** with `set reconnect = 1`, start_job_server
+  connects to the server named by `.smak.connect` instead of forking a new
+  one, and detaches from it afterwards rather than shutting it down. A server
+  serving a later client (reconnect or `smak-attach`) forwards its own output
+  to that client, and a detached server drops the stdio of the session that
+  started it, so `$(smak -cli ...)` captures no longer hang. Test:
+  `test/test_server_reuse.sh`.
+- **Symptom:** the old master port was stored but never used, so every
+  `smak -cli` started another job server and each `detach` left one more.
 
 ### Only `Makefile` is searched, not `GNUmakefile` / `makefile`
-- [ ] **Symptom (smak-buildtest, lua):**
-  `Cannot open Makefile: No such file or directory at Smak.pm line 2250.`
-  GNU make tries `GNUmakefile`, `makefile`, then `Makefile`.
+- [x] **FIXED (2026-09-28):** GNU make's order `GNUmakefile`, `makefile`,
+  `Makefile`, also for `-C` sub-makes. Test: `test/test_gnu_make_compat.sh`.
+- **Symptom (smak-buildtest, lua):** `Cannot open Makefile`.
 
 ### GNU make options smak rejects: `--no-print-directory`
-- [ ] **Symptom (smak-buildtest, lz4):** `$(MAKE) --no-print-directory -C lib`
-  fails with `Unknown option: no-print-directory`. It is fatal under `-j`, and
-  sequentially the in-process path ignores it. `-w`, `--print-directory` and
-  similar harmless flags should be accepted.
+- [x] **FIXED (2026-09-28):** `-w`, `--print-directory`,
+  `--no-print-directory`, `-r`, `-R`, `--warn-undefined-variables`,
+  `--no-silent`, `-l`, `-O` and `--jobserver-auth` are accepted and ignored;
+  `--no-keep-going`/`--stop` turn `-k` off. (No `-S`: Getopt::Long is
+  case-insensitive, so it would shadow `-s`.) Test: `test/test_gnu_make_compat.sh`.
+- **Symptom (smak-buildtest, lz4):** `Unknown option: no-print-directory`.
 
 ### `+` recipe prefix not stripped
-- [ ] **Symptom (smak-buildtest, redis, zstd):** `+@cmd` and `+$(MAKE) ...` run
-  literally. Sequentially the shell prints `Illegal option -@` but smak exits 0
-  having built nothing. Under `-j` it fails with `Cannot exec '+@...'` (127).
-  Repro: `all:` with recipe `+@echo hi`.
+- [x] **FIXED (2026-09-28):** `+` is stripped wherever `@` and `-` are, and
+  `+@`/`-+@` lines count as silent. Test: `test/test_gnu_make_compat.sh`.
+- **Symptom (smak-buildtest, redis, zstd):** `+@cmd` ran literally; sequential
+  exited 0 having built nothing, `-j` failed with `Cannot exec '+@...'`.
 
 ### Inline recipe `target: ; command` is ignored
-- [ ] **Symptom:** `all: ; @echo hi` prints nothing and exits 0.
+- [x] **FIXED (2026-09-28):** text after the first `;` outside `$(...)` and
+  quotes is the first recipe line (`split_inline_recipe`); target-specific
+  variable lines are left alone. Test: `test/test_gnu_make_compat.sh`.
 
 ### `VAR != command` shell assignment yields an empty value
-- [ ] **Symptom:** `sum != echo hi | md5sum` leaves `$(sum)` empty. GNU make 4.0+
-  and BSD make run the command.
+- [x] **FIXED (2026-09-28):** `!=` runs the expanded command and assigns its
+  output (newlines to spaces); `::=` is treated as `:=`. Test:
+  `test/test_gnu_make_compat.sh`. Remaining difference: GNU make re-expands a
+  bare `$X` in the result (`$HOME` -> `$H` + `OME`); smak leaves one-letter
+  `$X` references in values alone.
 
 ### Recipe output of `-C` sub-makes is lost under `-j`
-- [ ] **Symptom:** `all: ; $(MAKE) -C lib` with `lib/Makefile` recipe
-  `@echo hello` prints nothing under `smak -j2`. The recipe does run.
+- [x] **FIXED (2026-09-28):** three causes. The job-master's builtin `echo`
+  returned "not handled" for text with shell metacharacters and the caller
+  treated that as success, so the command never ran; declined builtins now
+  go to a worker. `stop_job_server` took the first queued line as the
+  shutdown ack and dropped `OUTPUT` lines still in flight; it now reads until
+  `SHUTDOWN_ACK`. And the client dropped all `OUTPUT` under `-s`, which only
+  means "don't echo commands". Tests: `test/test_gnu_make_compat.sh`,
+  `test/test_recipe_shell_semantics.sh`.
+- **Also fixed:** the `-j` builtin path split recipe lines on `;`/`&&` inside
+  quotes (`echo "a;b"`), ran later parts inline before earlier dispatched
+  ones, and turned line breaks into `;` (so a failing line no longer stopped
+  the recipe); the progress-spinner clear (`\r  \r`) was written even when
+  stderr is not a terminal, garbling logs.
 
 ### `smak -j4` hangs after a failed job (jq)
-- [ ] **Symptom (smak-buildtest, jq, autotools):** `src/config_opts.inc` failed
-  with `output file not found`, then the build sat idle for 16+ minutes
-  (smak-server, 4 idle workers and a relayed `smak all-am` child). It should
-  fail fast. The rule writes its output through a pipe:
-  `if test -x ./config.status; then ...; fi | sed ... > $@`.
+- [x] **FIXED (2026-09-28):**
+  1. `if ...; then ...; fi | sed > $@` lines are kept whole (shell keywords);
+     the worker's builtins decline anything with shell syntax (its `mkdir`
+     had created a directory named `src && if test -x .`), `rm` expands globs,
+     `mkdir`/`touch` take several arguments.
+  2. The layered scheduler waited for a running job that was itself a
+     recursive `$(MAKE)` wrapped in shell (automake `all-recursive`), while
+     that job waited for the jobs its child smak submitted. Jobs that run a
+     sub-make no longer hold back later layers (`runs_sub_make`).
+  3. Lines that set or use shell variables (automake depcomp
+     `depbase=...; ... $depbase.Tpo && mv $depbase.Tpo ...`) are no longer
+     split on `&&` for the worker, and the depbase rewrite only applies to
+     automake's exact form.
+  4. A recipe that does not create its target (e.g. `inner:` writing
+     `inner.txt`) no longer fails with "output file not found".
+  jq now builds with `smak -j4` and a following `make` finds nothing to do.
+  Test: `test/test_recipe_shell_semantics.sh`.
 
 ### `-j`: subdir objects of a non-recursive makefile compiled in the wrong directory
-- [ ] **Symptom (smak-buildtest, tmux):** automake `subdir-objects` targets
-  like `compat/getpeereid.o` fail under `-j` and in server/multi modes with
-  `compat/getpeereid.c:27:10: fatal error: compat.h: No such file or directory`.
-  The recipe (`gcc ... -I. -c -o compat/getpeereid.o compat/getpeereid.c`) must
-  run in the makefile's directory, but smak runs it in `compat/`. The
-  sequential build works.
-- **Hypothesis:** the job's `exec_dir` is derived from the target's path
-  ("Determine exec_dir from target path" in Smak.pm) instead of the
-  directory of the makefile that owns the rule.
+- [x] **FIXED (2026-09-28):** the real cause was `${LIBOBJDIR}x.o` from
+  `LIBOBJS`: the job-master expanded only `$(...)` in dependency words, so the
+  brace form stayed literal, the target matched no makefile rule and the
+  builtin `%.o: %.c` rule (without tmux's `-I.`) was used. `expand_dep_text`
+  now expands `${VAR}` too. tmux builds with `smak -j4`.
 
 ### Server (CLI) mode splits automake's multi-line compile recipe
-- [ ] **Symptom (smak-buildtest, htop):** in `smak -cli` then `build`, the
-  depcomp recipe
-  `depbase=...;\ gcc ... -MF $depbase.Tpo ... &&\ mv -f $depbase.Tpo $depbase.Po`
-  fails with `mv: cannot move '$depbase.Tpo'`. The shell variable set on the
-  first line is gone, so the continued lines ran as separate commands or
-  with `$$` handled differently. Batch `smak` and `smak -jN` build htop fine.
+- [x] **FIXED (2026-09-28):** same fix as item 3 of the jq entry above.
+
+### Parse cache reused after smak itself changed
+- [x] **FIXED (2026-09-28):** the state cache was validated only against the
+  makefiles' mtime/size and a hand-bumped `CACHE_VERSION`, so a newer smak
+  loaded rules parsed by an older one (seen as a deadlock on an inline-recipe
+  makefile first parsed by the old parser). The cache version is now
+  `CACHE_VERSION` plus the mtime/size of Smak.pm, SmakCMake.pm and
+  SmakCMakeInterp.pm (`cache_signature`).
 
 ### VPATH-resolved `$<` gets a `./` prefix, so binaries differ from make's
 - [ ] **Symptom (smak-buildtest, iverilog):** smak compiles
@@ -322,7 +354,16 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   checks in run-regression). Left non-executable for now.
 
 ### Job-server startup race
-- [ ] **Symptom:** `smak: Job-master connection lost during worker startup`
+- [x] **FIXED (2026-09-28):** the job-master created its port file and then
+  wrote the ports, and the client started reading as soon as the file
+  existed, so it could see an empty or partial file ("Cannot connect to
+  job-master: Connection refused"). Stale port files from earlier servers
+  with a reused PID were also accepted. The file is now written to `.tmp` and
+  renamed, carries a per-start token the client checks, the client retries
+  the connect briefly, and it kills the job-master it forked if it gives up
+  (an orphaned server held the caller's stdout open, hanging `$(...)`).
+  Stress test: 0 failures in 40 starts (was ~1 in 10).
+- [ ] **(original) Symptom:** `smak: Job-master connection lost during worker startup`
 - **Surfaces in:** test_dryrun, test_command_prefixes, test_objext_expansion,
   test_echo, test_modify, test_timeout. Mostly the Sequential/Cache mode of
   the regression matrix. Failure rate is non-deterministic; the same test

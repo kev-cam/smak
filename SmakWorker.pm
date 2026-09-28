@@ -401,6 +401,7 @@ sub run_worker {
                 my $count = $2;
                 for (1..$count) {
                     my $cmd = $read_line->();
+                    $cmd =~ s/\x00DOLLAR\x00/\$/g if defined $cmd;   # literal $ from $$
                     push @external_commands, $cmd if defined $cmd && $cmd ne '';
                 }
 
@@ -411,6 +412,7 @@ sub run_worker {
                     my $count = $1;
                     for (1..$count) {
                         my $cmd = $read_line->();
+                        $cmd =~ s/\x00DOLLAR\x00/\$/g if defined $cmd;
                         push @trailing_builtins, $cmd if defined $cmd && $cmd ne '';
                     }
                 }

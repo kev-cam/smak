@@ -174,6 +174,65 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   `CACHE_VERSION` plus the mtime/size of Smak.pm, SmakCMake.pm and
   SmakCMakeInterp.pm (`cache_signature`).
 
+### Generated rules: define/call/eval, lazy `$(if)`, `$(foreach)` (lz4)
+- [x] **FIXED (2026-09-28):** found by smak-buildtest on lz4, whose
+  `build/make/multiconf.make` makes its rules with
+  `$(foreach O,$(C_OBJS),$(eval $(call addTargetCObject,$(O))))`.
+  - `define`/`endef` (comments after them, override/export, nesting),
+    `$(call)` with `$(0)..$(n)`, `$(eval)`, `$(value)`, `$(origin)`,
+    `$(flavor)`, and bare `$(...)` lines evaluated for their side effects.
+  - `$$` stays escaped until a recipe reaches the shell (`$$(cmd)` was run
+    as a make function).
+  - `$(if)`, `$(and)`, `$(or)` expanded all their arguments, so
+    `$$(if $$(filter 2,$$(V)),$$(info $$(call ...)))` printed every template.
+  - `$(foreach)` joined its results with no space: `../lib/xxhash.c./bench.c`
+    lost xxhash.o from lz4's object list.
+  - A parse loaded from the cache skipped `$(info)`/`$(warning)`; makefiles
+    that print while parsing are no longer cached.
+  - A tab-indented `VAR = value` before any rule is an assignment, not a
+    recipe line.
+  Tests: `test/test_make_functions.sh`.
+
+### Prerequisites expanded late; order-only pattern prerequisites ignored (lz4)
+- [x] **FIXED (2026-09-28):** lz4 puts objects in `cachedObjs/<md5 of the
+  flags>/` via `$(C)/%/x.o: x.c | $(C)/%/.`:
+  - The order-only list of a pattern rule was looked up under the target's
+    key, so `cachedObjs/<hash>/.` was never made ("cannot touch"), and a
+    pattern rule with no normal prerequisites never matched under -j.
+  - Prerequisite lists were expanded when building, under target-specific
+    values; make expands them when reading the rule, so the hash (and the
+    directory) differed from make's. They are now expanded at parse time.
+  - Target-specific `+=` stacked (`-DNDEBUG` six times): parse_makefile did
+    not reset target-specific variables, order-only lists and vpath before
+    re-parsing, and a target's values could be applied twice.
+  - `vpath` in an included makefile was ignored; `vpath pattern` (clear) and
+    bare `vpath` are supported.
+  - Default `ARFLAGS = rv` (also LD, OBJC, MAKEINFO) was missing; lz4 hashes
+    it into the library's directory, so make rebuilt liblz4.a after smak.
+  Tests: `test/test_prereq_semantics.sh`.
+
+### Recipes not echoed under -j; `.SILENT:` ignored
+- [x] **FIXED (2026-09-28):** the job-master printed a job's command only when
+  it went to a worker, and then as one block that was silent if any line had
+  `@`. Lines run as job-master builtins, relay sub-make jobs and recursive
+  make lines were never echoed. Each job now records the lines make would
+  print (expanded, without `@` lines) and prints them once, through the
+  same channel as worker output so they stay ordered. `.SILENT:` (lz4:
+  `$(V)$(VERBOSE).SILENT:`) is honored, with or without prerequisites.
+  A precomputed worker command list also kept parts the job-master had
+  already run as builtins, so `@echo cc; touch $@` printed twice.
+  Tests: `test/test_prereq_semantics.sh`.
+
+### A failed `$(MAKE) -C sub` did not stop the recipe
+- [x] **FIXED (2026-09-28):** sequential smak ignored the sub-make's exit
+  status (lz4 printed "lz4 build completed" and exited 0 after programs
+  failed). Under -j, every line after a recursive make was forked in
+  parallel with it, so `ln -sf programs/lz4 .` ran before lz4 existed; the
+  lines now run in order in one child and stop at a failure (`;` continues,
+  as in the shell). Relay jobs run as job-master builtins now report their
+  failure (`smak: *** [all] Error 1`).
+  Tests: `test/test_prereq_semantics.sh`.
+
 ### VPATH-resolved `$<` gets a `./` prefix, so binaries differ from make's
 - [ ] **Symptom (smak-buildtest, iverilog):** smak compiles
   `-c ./../libmisc/LineInfo.cc` where make uses `-c ../libmisc/LineInfo.cc`.

@@ -1185,6 +1185,7 @@ if ($ENV{SMAK_JOB_SERVER}) {
             }
 
             my @deps = @{$info->{deps} || []};
+            my $silent_target = Smak::is_silent_target($target);  # .SILENT: here
 
             # Re-express target/deps/siblings relative to exec_dir. Capture keys
             # are relative to THIS child's cwd, but the job-server forms a job's
@@ -1209,6 +1210,7 @@ if ($ENV{SMAK_JOB_SERVER}) {
             warn "Child smak submitting: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ", siblings=" . scalar(@siblings) . ")\n" if $ENV{SMAK_DEBUG};
             # Use line-count protocol for multi-line commands
             my @cmd_lines = grep { /\S/ } split(/\n/, $rule);
+            @cmd_lines = map { /^\s*[+-]*@/ ? $_ : "\@$_" } @cmd_lines if $silent_target;
             print $sock "SUBMIT_JOB\n";
             print $sock "$target\n";
             print $sock "$exec_dir\n";

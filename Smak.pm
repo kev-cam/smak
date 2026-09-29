@@ -3094,8 +3094,8 @@ sub parse_makefile {
     # Track file mtime and size for cache validation
     use Cwd 'abs_path';
     my $abs_makefile = abs_path($makefile) || $makefile;
-    my @st = stat($makefile);
-    $parsed_file_mtimes{$abs_makefile} = [$st[9], $st[7]];  # [mtime, size]
+    my @st = Time::HiRes::stat($makefile);
+    $parsed_file_mtimes{$abs_makefile} = [sprintf('%.6f', $st[9]), $st[7]];  # [mtime, size]
 
     my @current_targets;  # Array to handle multiple targets (e.g., "target1 target2:")
     my $current_rule = '';
@@ -3464,6 +3464,9 @@ sub parse_makefile {
                 }
 
                 # Parse the included file (ignore if it doesn't exist and line starts with -)
+                # (automake's .deps/*.Po change after every compile: a cached
+                # parse must notice, or header dependencies are never seen)
+                record_parsed_file($include_path);
                 if (-f $include_path) {
                     print STDERR "DEBUG: including '$include_path'\n" if $ENV{SMAK_DEBUG};
                     # Save current makefile name
@@ -3910,6 +3913,15 @@ sub parse_makefile {
     save_state_cache($makefile_path);
 }
 
+# Record a makefile read by this parse for cache validation; a missing
+# (-include) file is recorded too, so the cache is dropped once it appears.
+sub record_parsed_file {
+    my ($path) = @_;
+    my $abs = Cwd::abs_path($path) || $path;
+    my @st = Time::HiRes::stat($path);
+    $parsed_file_mtimes{$abs} = @st ? [sprintf('%.6f', $st[9]), $st[7]] : [-1, -1];
+}
+
 sub parse_included_makefile {
     my ($include_path) = @_;
 
@@ -4196,6 +4208,7 @@ sub parse_included_makefile {
                 }
 
                 # Parse the included file (ignore if it doesn't exist and line starts with -)
+                record_parsed_file($nested_include_path);
                 if (-f $nested_include_path) {
                     print STDERR "DEBUG: including '$nested_include_path' (nested)\n" if $ENV{SMAK_DEBUG};
                     # Recursively parse the nested included file
@@ -4808,7 +4821,7 @@ sub save_state_cache {
     for my $file (sort keys %parsed_file_mtimes) {
         my $info = $parsed_file_mtimes{$file};
         my ($mtime, $size) = ref($info) eq 'ARRAY' ? @$info : ($info, 0);
-        print $fh "    " . _quote_string($file) . " => [$mtime, $size],\n";
+        print $fh "    " . _quote_string($file) . " => [" . _quote_string($mtime) . ", $size],\n";
     }
     print $fh ");\n\n";
 
@@ -4945,18 +4958,20 @@ sub load_state_cache {
     }
 
     # Validate cache - check if any makefile has changed (mtime or size)
-    my $cache_mtime = (stat($cache_file))[9];
+    my $cache_mtime = (Time::HiRes::stat($cache_file))[9];
     for my $file (keys %parsed_file_mtimes) {
         if (-f $file) {
-            my @st = stat($file);
-            my ($file_mtime, $file_size) = ($st[9], $st[7]);
+            my @st = Time::HiRes::stat($file);
+            my ($file_mtime, $file_size) = (sprintf('%.6f', $st[9]), $st[7]);
             my $cached = $parsed_file_mtimes{$file};
             my ($cached_mtime, $cached_size) = ref($cached) eq 'ARRAY' ? @$cached : ($cached, 0);
-            if ($file_mtime != $cached_mtime || $file_size != $cached_size || $file_mtime > $cache_mtime) {
+            if ($cached_mtime == -1 || $file_mtime ne $cached_mtime || $file_size != $cached_size || $file_mtime > $cache_mtime) {
                 warn "DEBUG: Cache invalid - '$file' has changed\n" if $ENV{SMAK_DEBUG};
                 return 0;
             }
         } else {
+            my $cached = $parsed_file_mtimes{$file};
+            next if ref($cached) eq 'ARRAY' && $cached->[0] == -1;  # still missing
             warn "DEBUG: Cache invalid - '$file' no longer exists\n" if $ENV{SMAK_DEBUG};
             return 0;
         }

@@ -128,6 +128,19 @@ all: ; @echo "X=$(X) L=[$(L)] $$(cat out/gen.h)"
 EOF
 check "\$(shell) side effects with a cached parse" shside
 
+# automake's .deps/*.Po are rewritten by every compile: a cached parse must
+# notice a changed, appearing or vanishing included makefile (the cache
+# only checked the top-level Makefile, so header dependencies were lost)
+mkdir incc
+printf 'all: ; @echo "X=$(X) Y=$(Y)"\ninclude inc.mk\n-include opt.mk\n' > incc/Makefile
+got=""
+for step in 'echo "X = one" > inc.mk' 'echo "X = two" > inc.mk' 'echo "Y = opt" > opt.mk' 'rm opt.mk'; do
+    (cd incc && eval "$step"); got="$got[$(cd incc && $SMAK -s 2>&1)]"
+done
+want="[X=one Y=][X=two Y=][X=two Y=opt][X=two Y=]"
+if [ "$got" == "$want" ]; then echo "PASS: cached parse follows included makefiles"
+else echo "FAIL: cached parse follows included makefiles: $got"; fail=1; fi
+
 # redis: `-include Makefile.dep` with a rule for Makefile.dep: make builds
 # the missing makefile and reads everything again
 mkdir remk

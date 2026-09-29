@@ -460,6 +460,12 @@ sub generate_smak_rules {
         my $dep_key = "$makefile_key\tall";
         $fixed_deps->{$dep_key} = \@all_outputs;
         $fixed_rule->{$dep_key} = '';  # no recipe — just deps
+        # cmake's Makefile starts with `default_target: all`, the goal make
+        # reports as the default (smak-buildtest's server mode asks for it)
+        unless (exists $fixed_rule->{"$makefile_key\tdefault_target"}) {
+            $fixed_deps->{"$makefile_key\tdefault_target"} = ['all'];
+            $fixed_rule->{"$makefile_key\tdefault_target"} = '';
+        }
     }
 
     # CMake's special targets.  The generated Makefile provides these on top

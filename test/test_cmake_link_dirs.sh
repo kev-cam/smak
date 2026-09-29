@@ -63,4 +63,10 @@ for j in "" "-j4"; do
         echo "FAIL: interp ${j:-seq} (rc=$rc)"; ls ibuild ibuild/app 2>&1 | head; fail=1
     fi
 done
+# cmake's Makefile starts with `default_target: all`, the goal make reports
+# as the default (smak-buildtest server mode: `build default_target`)
+rm -f build/app/app-static
+out=$(cd build && timeout 120 $SMAK -j4 default_target 2>&1); rc=$?
+if [ $rc -eq 0 ] && [ -x build/app/app-static ]; then echo "PASS: default_target"
+else echo "FAIL: default_target (rc=$rc)"; echo "$out" | tail -3; fail=1; fi
 exit $fail

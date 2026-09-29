@@ -355,6 +355,46 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   Tests: `test/test_make_functions.sh`, `test/test_prereq_semantics.sh`,
   `test/test_gnu_make_compat.sh`.
 
+### redis -j: sub-makes starved the workers; a relay never completed
+- [x] **FIXED (2026-09-29):** redis -j4 (top → scripts/build.sh → src →
+  deps → hiredis, jemalloc, ...) hung twice:
+  - All four workers ran sub-makes waiting for their own jobs, which then
+    had no worker. As GNU make gives each sub-make an implicit job slot,
+    the job-master now adds a worker per connected sub-make relay (up to a
+    cap), keeping -jN workers for real jobs. Late extra workers exit
+    quietly if the build has finished.
+  - `make distclean` runs in deps/ twice (from src's distclean and from
+    deps' own .make-cflags rule). The second relay's `distclean` was taken
+    as already done: its job was dropped without telling the relay, which
+    waited forever. Each relay's targets are now decided afresh (phony
+    targets run again, as in a separate make), and a dropped job notifies
+    its relay.
+  - `kill -USR1 <smak-server>` writes the scheduler state (queued jobs with
+    their dependencies' status, running jobs, relays and their outstanding
+    targets) to /tmp/smak-jobmaster-<pid>.state.
+  Also: a missing included makefile that has a rule (`-include
+  Makefile.dep`) is built and the makefiles are read again, as in make.
+
+### CMake interpreter: ALIAS targets, PROJECT_SOURCE_DIR, `\;`, file(READ) ranges
+- [x] **FIXED (2026-09-29):** smak-buildtest interp mode on zlib-cmake and
+  libuv:
+  - `add_library(ZLIB::ZLIB ALIAS zlib)` created a separate (empty)
+    target, so linking the alias pulled no include directories
+    ("zlib.h: No such file") and no library. Aliases now name the same
+    target, in link lines and dependencies too.
+  - project() did not set PROJECT_SOURCE_DIR/PROJECT_BINARY_DIR (libuv:
+    `$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>` → -I/include), nor
+    the version variables or PROJECT_IS_TOP_LEVEL; it used the top source
+    dir for a project() in a subdirectory.
+  - `"\;"` in a quoted argument is kept as `\;`; lists split on unescaped
+    `;` only and `\;` becomes `;` in the elements (zlib builds
+    zconf.h.cmakein with `string(APPEND OUT "\;" ${item})`).
+  - file(READ) ignored OFFSET/LIMIT/HEX (zlib reads zconf.h in two parts:
+    the text came out twice).
+  - check_include_file looked only in /usr/include: compiler headers such
+    as stdarg.h were "not found" (HAVE_STDARG_H). It now asks the compiler.
+  - target_link_options (zlib's infcover: -coverage).
+
 ### VPATH-resolved `$<` gets a `./` prefix, so binaries differ from make's
 - [ ] **Symptom (smak-buildtest, iverilog):** smak compiles
   `-c ./../libmisc/LineInfo.cc` where make uses `-c ../libmisc/LineInfo.cc`.

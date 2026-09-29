@@ -2621,7 +2621,7 @@ sub transform_make_vars {
     return $text;
 }
 
-our %missing_inc; # bug workaround
+our @remake_includes;   # [path, optional] of included makefiles not found while parsing
 
 # Parse ifeq/ifneq argument string into (arg1, arg2)
 # Handles: (arg1,arg2) with nested $() and quoted forms "a" "b", 'a' 'b'
@@ -2925,6 +2925,38 @@ sub static_pattern_lines {
     return @lines;
 }
 
+# GNU make remakes an included makefile that is missing but has a rule
+# (redis: `-include Makefile.dep` with `Makefile.dep: ; $(CC) -MM ... >
+# Makefile.dep`) and then reads the makefiles again. Called once after the
+# top-level parse; returns the number of files remade.
+sub remake_missing_includes {
+    my ($makefile_path) = @_;
+    return 0 if $dry_run_mode || !@remake_includes;
+    my @todo = @remake_includes;
+    my $remade = 0;
+    for my $inc (@todo) {
+        my ($path, $optional, $name) = @$inc;
+        $name //= $path;
+        next if -e $path || -e $name;
+        my $key = "$makefile\t$name";
+        my $has_rule = (exists $fixed_rule{$key} && $fixed_rule{$key} =~ /\S/)
+                    || grep { my $r = $pattern_rule{$_->[0]}; ref $r ? grep { /\S/ } @$r : ($r // '') =~ /\S/ }
+                       find_matching_patterns($name);
+        if (!$has_rule) {
+            warn "smak: $path: No such file or directory\n" unless $optional;
+            next;
+        }
+        eval { local $job_server_socket; build_target($name) };
+        $remade++ if -e $path || -e $name;
+    }
+    if ($remade) {
+        my $cache = get_cache_file($makefile_path);
+        unlink $cache if $cache;
+        parse_makefile($makefile_path);
+    }
+    return $remade;
+}
+
 sub parse_makefile {
     my ($makefile_path) = @_;
 
@@ -2973,6 +3005,7 @@ sub parse_makefile {
     %vpath = ();
     %static_stem = ();
     @parse_shell_log = ();
+    @remake_includes = ();
 
     # Reset suffix rules - initialize with GNU make default suffixes
     # These are the common suffixes used in C/C++ development
@@ -3391,9 +3424,6 @@ sub parse_makefile {
                 # Skip empty entries
                 next if $include_file eq '';
 
-		if (defined $missing_inc{$include_file}) {
-		    die "Already missing: $include_file !!!\n";
-		}
 
                 # Determine include path
                 my $include_path = $include_file;
@@ -3437,11 +3467,11 @@ sub parse_makefile {
 
                     # Restore current makefile name
                     $makefile = $saved_makefile;
-                } elsif ($line !~ /^-include/) {
-                    warn "Warning: included file not found: $include_path [$include_file]\n";
-		    $missing_inc{$include_file} = 1;
-                } elsif ($ENV{SMAK_DEBUG}) {
-                    print STDERR "DEBUG: optional include not found (ignored): $include_path\n";
+                } else {
+                    # make remakes a missing makefile that has a rule, then
+                    # reads everything again (remake_missing_includes)
+                    push @remake_includes, [$include_path, $line =~ /^-include/ ? 1 : 0, $include_file];
+                    print STDERR "DEBUG: include not found (may be remade): $include_path\n" if $ENV{SMAK_DEBUG};
                 }
             }
             next;
@@ -4161,10 +4191,9 @@ sub parse_included_makefile {
                     print STDERR "DEBUG: including '$nested_include_path' (nested)\n" if $ENV{SMAK_DEBUG};
                     # Recursively parse the nested included file
                     parse_included_makefile($nested_include_path);
-                } elsif ($line !~ /^-include/) {
-                    warn "Warning: included file not found: $nested_include_path\n";
-                } elsif ($ENV{SMAK_DEBUG}) {
-                    print STDERR "DEBUG: optional include not found (ignored): $nested_include_path\n";
+                } else {
+                    push @remake_includes, [$nested_include_path, $line =~ /^-include/ ? 1 : 0, $include_file];
+                    print STDERR "DEBUG: include not found (may be remade): $nested_include_path\n" if $ENV{SMAK_DEBUG};
                 }
             }
             next;
@@ -4752,6 +4781,9 @@ sub save_state_cache {
     # When a sub-makefile is parsed with command-line variable overrides,
     # the cache is only valid if the same overrides are present
     print $fh "# Command-line variable overrides at parse time\n";
+    print $fh "\@Smak::remake_includes = (\n";
+    print $fh "    [" . _quote_string($_->[0]) . ", $_->[1], " . _quote_string($_->[2]) . "],\n" for @remake_includes;
+    print $fh ");\n\n";
     print $fh "\@Smak::_cached_shell_log = (\n";
     print $fh "    [" . _quote_string($_->[0]) . ", " . _quote_string($_->[1]) . "],\n" for @parse_shell_log;
     print $fh ");\n\n";
@@ -11640,9 +11672,53 @@ sub show_dependencies {
 
 # Job-master main loop - runs in forked child with full Makefile data
 # This allows intelligent dependency-aware parallelization
+# Scheduler state for SIGUSR1: queued jobs with each dependency's status,
+# running jobs, relays and their outstanding targets.
+sub dump_job_master_state {
+    my ($file) = @_;
+    our (@job_queue, %running_jobs, %child_job_targets, %child_all_submitted,
+         %completed_targets, %failed_targets, %pending_composite, %deferred_deps, @child_sockets);
+    open(my $fh, '>', $file) or return;
+    my $st = sub {
+        my $d = shift;
+        return 'done' if $completed_targets{$d};
+        return "failed($failed_targets{$d})" if exists $failed_targets{$d};
+        my $ip = $in_progress{$d};
+        return defined $ip ? "in_progress=" . (ref $ip ? 'worker' : $ip) : (-e $d ? 'exists' : 'missing');
+    };
+    printf $fh "time %s\nqueued %d, running %d, relays %d\n\n", scalar(localtime), scalar(@job_queue),
+        scalar(keys %running_jobs), scalar(@child_sockets);
+    print $fh "RUNNING\n";
+    for my $id (sort { $a <=> $b } keys %running_jobs) {
+        my $r = $running_jobs{$id};
+        (my $c = $r->{command} // '') =~ s/\n/ ; /g;
+        printf $fh "  #%s %s  [%s]\n", $id, $r->{target}, substr($c, 0, 160);
+    }
+    print $fh "\nQUEUED\n";
+    for my $j (@job_queue) {
+        printf $fh "  %s layer=%s%s%s\n", $j->{target}, $j->{layer} // '?',
+            ($j->{from_child} ? ' relay' . ($j->{child_ready} ? '' : '(not ready)') : ''),
+            ($deferred_deps{$j->{target}} ? " deferred-on=$deferred_deps{$j->{target}}{dep}" : '');
+        printf $fh "      dep %s: %s\n", $_, $st->($_) for @{$j->{deps} || []};
+    }
+    print $fh "\nRELAYS\n";
+    for my $sock (@child_sockets) {
+        my @left = sort keys %{$child_job_targets{$sock} || {}};
+        printf $fh "  %s submitted=%s outstanding=%d\n", $sock, ($child_all_submitted{$sock} ? 'all' : 'partial'), scalar(@left);
+        printf $fh "      %s: %s\n", $_, $st->($_) for @left[0 .. ($#left < 20 ? $#left : 19)];
+    }
+    print $fh "\nPENDING COMPOSITES\n";
+    for my $c (sort keys %pending_composite) {
+        printf $fh "  %s waits for: %s\n", $c, join(' ', map { "$_(" . $st->($_) . ")" } @{$pending_composite{$c}{deps} || []});
+    }
+    close($fh);
+}
+
 sub run_job_master {
     my ($num_workers, $arg_bin_dir) = @_;
     our $bin_dir = $arg_bin_dir;
+    my $base_workers = $num_workers;   # -jN, for sub-make slot accounting
+    my $extra_workers = 0;             # spawned for blocked sub-makes
 
     use IO::Socket::INET;
     use IO::Select;
@@ -11667,6 +11743,9 @@ sub run_job_master {
     my $hup_received = 0;
     my $explicitly_detached = 0;  # Set when detached via SIGHUP or detach command
     $SIG{HUP} = sub { $hup_received = 1; };
+    # kill -USR1 <smak-server>: write the scheduler state to
+    # /tmp/smak-jobmaster-<pid>.state (for diagnosing a stalled build)
+    $SIG{USR1} = sub { dump_job_master_state("/tmp/smak-jobmaster-$$.state") };
 
     # Job-master has access to all parsed Makefile data:
     # Bring package-level variables into scope
@@ -15151,6 +15230,7 @@ sub run_job_master {
             if (exists $completed_targets{$target}) {
                 print STDERR "DEBUG: Skipping already-completed target '$target' (placeholder removed)\n" if $ENV{SMAK_DEBUG};
                 splice(@job_queue, $job_index, 1);
+                check_child_completion($target, 0);   # its relay waits for it
                 next;
             }
 
@@ -15772,6 +15852,29 @@ sub run_job_master {
         }
 
         my @ready = $select->can_read(0.1);
+
+        # A sub-make waiting for its jobs holds a worker (redis: build.sh ->
+        # src -> deps -> hdr_histogram, jemalloc: all 4 workers ran sub-makes
+        # whose jobs then had no worker). As GNU make gives every sub-make
+        # an implicit job slot, keep -jN workers free of connected sub-makes.
+        if (@job_queue && @child_sockets && !@ssh_hosts && !$ssh_host && !$dry_run_mode) {
+            my $want = $base_workers + scalar(@child_sockets);
+            my $cap = 8 * $base_workers + 8;
+            if ($base_workers + $extra_workers < $want && $base_workers + $extra_workers < $cap) {
+                my $worker_port = $worker_server->sockport();
+                my $pid = fork();
+                if (defined $pid && $pid == 0) {
+                    $ENV{SMAK_EXTRA_WORKER} = 1;
+                    { no warnings 'exec'; exec($worker_script, "127.0.0.1:$worker_port"); }
+                    POSIX::_exit(127);
+                }
+                if (defined $pid) {
+                    $extra_workers++;
+                    print STDERR "Added a worker for blocked sub-makes (" . scalar(@child_sockets)
+                        . " waiting, " . ($base_workers + $extra_workers) . " workers)\n" if $ENV{SMAK_DEBUG};
+                }
+            }
+        }
 
         # Handle SIGHUP: detach from connected master/CLI client
         if ($hup_received) {
@@ -17595,6 +17698,16 @@ sub run_job_master {
                         @siblings = map { ($_ !~ m{^/} && $exec_dir ne '.' && $exec_dir ne '')
                                       ? "$exec_dir/$_" : $_ } @siblings;
 
+                        # Each sub-make runs its goals anew (make would): a target
+                        # completed earlier for another relay (redis runs
+                        # `make distclean` in deps/ twice) is decided again
+                        # (post-processing checks times), not taken as done --
+                        # its job was dropped and this relay never completed.
+                        delete $completed_targets{$target};
+                        delete $failed_targets{$target};
+                        delete $in_progress{$target}
+                            if ($in_progress{$target} // '') =~ /^(done|failed)$/;
+
                         # `libzstd.a: ; $(MAKE) $@ BUILD_DIR=..` (zstd): the
                         # sub-make submits the very target whose job is running
                         # it, which then never runs and the outer job never
@@ -18028,7 +18141,7 @@ sub run_job_master {
                         $select->add($worker);
                         push @workers, $worker;
                         $worker_status{$worker} = {ready => 0, task_id => 0};
-                        warn "Worker connected during runtime\n";
+                        warn "Worker connected during runtime\n" if $ENV{SMAK_DEBUG};
 
                         # Send environment to new worker
                         print $worker "ENV_START\n";

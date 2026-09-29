@@ -150,7 +150,7 @@ sub _read_quoted_string {
             # Standard C-like escapes
             $text .= { 'n' => "\n", 't' => "\t", 'r' => "\r",
                        '"' => '"', '\\' => '\\', ' ' => ' ',
-                       ';' => ';', '0' => "\0" }->{$nc} // $nc;
+                       ';' => '\\;', '0' => "\0" }->{$nc} // $nc;
         } else {
             $text .= $c;
         }
@@ -419,7 +419,15 @@ sub expand_arg {
     if ($arg->{text} =~ /"/) {
         return ($expanded);
     }
-    return grep { $_ ne '' } split(/;/, $expanded);
+    return _split_list($expanded);
+}
+
+# A CMake list as arguments: elements separated by unescaped ';', with `\;`
+# in an element standing for a literal ';' (zlib builds zconf.h.cmakein
+# with string(APPEND OUT "\;" ${item}) and writes ${OUT} unquoted).
+sub _split_list {
+    my ($v) = @_;
+    return map { (my $e = $_) =~ s/\\;/;/g; $e } grep { $_ ne '' } split /(?<!\\);/, $v;
 }
 
 # Evaluate generator expressions in a string.  Handle the common forms:
@@ -944,7 +952,7 @@ sub _eval_foreach {
             shift @args;
             for my $listvar (@args) {
                 my $val = _lookup($listvar, $scope) // '';
-                push @items, split /;/, $val;
+                push @items, _split_list($val);
             }
         } elsif (@args >= 1 && $args[0] eq 'ITEMS') {
             shift @args;
@@ -1241,16 +1249,68 @@ $builtins{'cmake_policy'} = sub { };
 $builtins{'project'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
+    my $src = $state->{current_source_dir} // $state->{source_dir};
+    my $bin = $state->{current_binary_dir} // $state->{build_dir};
+    my $top = !defined $scope->{vars}{CMAKE_PROJECT_NAME};
     $state->{project_name} = $name;
     $scope->{vars}{PROJECT_NAME} = $name;
-    $scope->{vars}{"${name}_SOURCE_DIR"} = $state->{source_dir};
-    $scope->{vars}{"${name}_BINARY_DIR"} = $state->{build_dir};
+    # PROJECT_SOURCE_DIR/PROJECT_BINARY_DIR (libuv: $<BUILD_INTERFACE:
+    # ${PROJECT_SOURCE_DIR}/include> gave -I/include, "uv.h: No such file")
+    for my $p ('PROJECT', $name) {
+        $scope->{vars}{"${p}_SOURCE_DIR"} = $src;
+        $scope->{vars}{"${p}_BINARY_DIR"} = $bin;
+        $scope->{vars}{"${p}_IS_TOP_LEVEL"} = $top ? 'ON' : 'OFF';
+    }
     $scope->{vars}{CMAKE_PROJECT_NAME} //= $name;
+    my %kw;
+    for (my $i = 0; $i < @$args; $i++) {
+        if ($args->[$i] =~ /^(VERSION|DESCRIPTION|HOMEPAGE_URL)$/ && $i + 1 < @$args) {
+            $kw{$1} = $args->[++$i];
+        }
+    }
+    if (defined $kw{VERSION}) {
+        my @v = split /\./, $kw{VERSION};
+        for my $p ('PROJECT', $name) {
+            $scope->{vars}{"${p}_VERSION"} = $kw{VERSION};
+            $scope->{vars}{"${p}_VERSION_MAJOR"} = $v[0] // '';
+            $scope->{vars}{"${p}_VERSION_MINOR"} = $v[1] // '';
+            $scope->{vars}{"${p}_VERSION_PATCH"} = $v[2] // '';
+            $scope->{vars}{"${p}_VERSION_TWEAK"} = $v[3] // '';
+        }
+        $scope->{vars}{CMAKE_PROJECT_VERSION} //= $kw{VERSION};
+    }
+    $scope->{vars}{PROJECT_DESCRIPTION} = $kw{DESCRIPTION} if defined $kw{DESCRIPTION};
+};
+
+# target_link_options(<target> [BEFORE] <PRIVATE|PUBLIC|INTERFACE> opts...)
+# (zlib's infcover: -coverage, else "undefined reference to __gcov_init")
+$builtins{'target_link_options'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my $name = shift @$args;
+    $name = $state->{aliases}{$name} // $name;
+    my $t = $state->{targets}{$name} or return;
+    my $mode = 'PRIVATE';
+    for my $a (@$args) {
+        next if $a eq 'BEFORE';
+        if ($a =~ /^(PRIVATE|PUBLIC|INTERFACE)$/) { $mode = $a; next; }
+        push @{$t->{link_options}}, $a unless $mode eq 'INTERFACE';
+        push @{$t->{interface_link_options}}, $a if $mode ne 'PRIVATE';
+    }
 };
 
 $builtins{'add_executable'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
+    # add_library/add_executable(<name> ALIAS <target>): another name for the
+    # same target (zlib's ZLIB::ZLIB), so linking it pulls the target's
+    # INTERFACE properties (include directories: "zlib.h: No such file")
+    if (@$args >= 2 && $args->[0] eq 'ALIAS') {
+        my $real = $args->[1];
+        $real = $state->{aliases}{$real} // $real;
+        $state->{aliases}{$name} = $real;
+        $state->{targets}{$name} = $state->{targets}{$real} if $state->{targets}{$real};
+        return;
+    }
     my @sources = grep {
         !/^(IMPORTED|ALIAS|GLOBAL|EXCLUDE_FROM_ALL|WIN32|MACOSX_BUNDLE)$/
         && !/\.(h|hh|hpp|hxx|H)$/
@@ -1261,6 +1321,16 @@ $builtins{'add_executable'} = sub {
 $builtins{'add_library'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
+    # add_library/add_executable(<name> ALIAS <target>): another name for the
+    # same target (zlib's ZLIB::ZLIB), so linking it pulls the target's
+    # INTERFACE properties (include directories: "zlib.h: No such file")
+    if (@$args >= 2 && $args->[0] eq 'ALIAS') {
+        my $real = $args->[1];
+        $real = $state->{aliases}{$real} // $real;
+        $state->{aliases}{$name} = $real;
+        $state->{targets}{$name} = $state->{targets}{$real} if $state->{targets}{$real};
+        return;
+    }
     # CMake: when no type keyword is given, add_library() honors
     # BUILD_SHARED_LIBS (ON → SHARED, otherwise STATIC). We previously
     # always defaulted to STATIC, which silently turned shared-lib builds
@@ -1778,11 +1848,24 @@ $builtins{'file'} = sub {
         }
         $scope->{vars}{$out} = join(';', @matches);
     } elsif ($op eq 'READ') {
-        my ($path, $out) = @$args;
-        if (open(my $fh, '<', $path)) {
+        # file(READ <file> <var> [OFFSET o] [LIMIT n] [HEX]) (zlib reads
+        # zconf.h in two parts with LIMIT 245 / OFFSET 244)
+        my ($path, $out, @opt) = @$args;
+        my ($offset, $limit, $hex) = (0, undef, 0);
+        while (@opt) {
+            my $k = shift @opt;
+            if    ($k eq 'OFFSET') { $offset = shift(@opt) // 0; }
+            elsif ($k eq 'LIMIT')  { $limit  = shift(@opt); }
+            elsif ($k eq 'HEX')    { $hex = 1; }
+        }
+        if (open(my $fh, '<:raw', $path)) {
             local $/;
-            $scope->{vars}{$out} = <$fh>;
+            my $data = <$fh> // '';
             close $fh;
+            $data = substr($data, $offset) // '' if $offset;
+            $data = substr($data, 0, $limit) if defined $limit;
+            $data = unpack('H*', $data) if $hex;
+            $scope->{vars}{$out} = $data;
         }
     } elsif ($op eq 'WRITE' || $op eq 'APPEND') {
         my $path = shift @$args;
@@ -2565,7 +2648,29 @@ sub _check_include {
         $scope->{vars}{$var} = 1;
         return;
     }
-    $scope->{vars}{$var} = '';  # not found
+    # Ask the compiler (its own headers: stdarg.h, stddef.h ... are not
+    # under /usr/include; zlib's HAVE_STDARG_H came out undefined)
+    my $cc = _lookup($lang eq 'CXX' ? 'CMAKE_CXX_COMPILER' : 'CMAKE_C_COMPILER', $scope)
+          || ($lang eq 'CXX' ? 'c++' : 'cc');
+    my @inc = map { "-I$_" } grep { $_ ne '' } split /;/, ($req_inc // '');
+    our %include_check_cache;
+    my $key = join("\0", $cc, $lang, $header, @inc);
+    unless (exists $include_check_cache{$key}) {
+        my $x = $lang eq 'CXX' ? 'c++' : 'c';
+        open(my $olderr, '>&', \*STDERR);
+        open(STDERR, '>', '/dev/null');          # the compiler's "not found"
+        my $pid = open(my $cfh, '|-', $cc, '-E', "-x$x", @inc, '-o', '/dev/null', '-');
+        open(STDERR, '>&', $olderr);
+        my $ok = 0;
+        if ($pid) {
+            local $SIG{PIPE} = 'IGNORE';
+            print $cfh "#include <$header>\n";
+            close($cfh);
+            $ok = $? == 0;
+        }
+        $include_check_cache{$key} = $ok;
+    }
+    $scope->{vars}{$var} = $include_check_cache{$key} ? 1 : '';
 }
 
 $builtins{'check_include_file'} = sub {
@@ -3420,6 +3525,7 @@ sub generate_makefiles {
 
     # Per-target metadata
     for my $name (sort keys %{$state->{targets}}) {
+        next if $state->{aliases}{$name};
         my $t = $state->{targets}{$name};
         # Skip interface/imported/alias libraries (no build rules)
         next if $t->{libtype} && $t->{libtype} =~ /^(interface|imported|alias)$/;
@@ -3895,7 +4001,7 @@ sub _write_makefile2 {
     # Collect real build targets (with sources)
     my @real = grep {
         my $t = $state->{targets}{$_};
-        @{$t->{sources}} > 0 && $t->{type} ne 'custom'
+        !$state->{aliases}{$_} && @{$t->{sources}} > 0 && $t->{type} ne 'custom'
     } sort keys %{$state->{targets}};
 
     # all: depends on all real targets
@@ -3914,7 +4020,8 @@ sub _write_makefile2 {
         # Dependencies: each link_libraries target's own /all
         my @deps;
         for my $lib (@{$t->{link_libraries} // []}) {
-            if ($state->{targets}{$lib}) {
+            $lib = $state->{aliases}{$lib} // $lib;
+            if ($state->{targets}{$lib} && !($lib =~ /::/)) {
                 push @deps, _target_all_key($state->{targets}{$lib}, $lib, $build_dir);
             }
         }
@@ -4211,6 +4318,7 @@ sub _write_link_txt {
         # didn't make it into this target's link line. Real cmake reaches
         # the same effect by passing INTERFACE_LINK_LIBRARIES through.
         $link_cmd = "$compiler -shared -fPIC -Wl,-soname,$files->{soname} " .
+                    join('', map { "$_ " } @{$t->{link_options} // []}) .
                     "-Wl,--allow-shlib-undefined " .
                     join(' ', @objs) . " -o $out" . $libs_str . _build_rpath_flag(\@libs, $state);
         $link_cmd .= "\nln -sf $_->[1] $_->[0]" for @{ $files->{links} };
@@ -4229,7 +4337,8 @@ sub _write_link_txt {
             }
             $libs_str .= ' ' . join(' ', @rest) if @rest;
         }
-        $link_cmd = "$compiler -Wl,--allow-shlib-undefined " .
+        $link_cmd = "$compiler " . join('', map { "$_ " } @{$t->{link_options} // []}) .
+                    "-Wl,--allow-shlib-undefined " .
                     join(' ', @objs) . " -o " . _target_output_files($t, $name)->{file}
                     . $libs_str . _build_rpath_flag(\@libs, $state);
     } else {
@@ -4255,6 +4364,7 @@ sub _resolve_link_libraries {
     while (@queue) {
         my $lib = shift @queue;
         next unless defined $lib;
+        $lib = $state->{aliases}{$lib} // $lib;   # ZLIB::ZLIBSTATIC -> zlibstatic
         next if $seen{$lib}++;
 
         # Known target?

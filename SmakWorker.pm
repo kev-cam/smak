@@ -306,7 +306,13 @@ sub run_worker {
         PeerPort => $port,
         Proto    => 'tcp',
         Timeout  => 10,
-    ) or die "Cannot connect to master at $host:$port: $!\n";
+    );
+    unless ($socket) {
+        # An extra worker started for blocked sub-makes may arrive after the
+        # build has finished and the job-master has gone: nothing to report.
+        exit(0) if $ENV{SMAK_EXTRA_WORKER};
+        die "Cannot connect to master at $host:$port: $!\n";
+    }
 
     $socket->autoflush(1);
     # Disable Nagle's algorithm for low latency - always needed for responsive dispatch

@@ -128,6 +128,12 @@ all: ; @echo "X=$(X) L=[$(L)] $$(cat out/gen.h)"
 EOF
 check "\$(shell) side effects with a cached parse" shside
 
+# redis: `-include Makefile.dep` with a rule for Makefile.dep: make builds
+# the missing makefile and reads everything again
+mkdir remk
+printf 'all: ; @echo "X=$(X)"\n-include out/dep.mk\nout/dep.mk:\n\t@mkdir -p out; echo "X = from-dep" > $@\n' > remk/Makefile
+check "missing included makefile with a rule" remk
+
 # redis deps/jemalloc: static pattern rules (targets: tpattern: ppattern,
 # and `$(OBJS): %.o:` carrying the recipe), $(@D) $(@F) $(@:%.o=%.d)
 mkdir -p static/src

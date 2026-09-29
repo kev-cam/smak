@@ -1105,6 +1105,7 @@ if (SmakCMake::is_cmake_build_dir('.')) {
     $Smak::default_target //= 'all';
 } else {
     parse_makefile($makefile);
+    Smak::remake_missing_includes($makefile);
 }
 
 # Auto-load <makefile>.smak if it exists

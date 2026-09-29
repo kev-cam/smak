@@ -104,3 +104,24 @@ the host's loopback.
 
 The smak checkout is mounted read-only at `/opt/smak` in every container.
 The run therefore tests the working tree as it is, uncommitted changes included.
+
+Because the checkout is mounted live, editing it while a run is in progress
+mixes versions within that run. To keep working on smak during a long
+batch, run it from a copy (`cp -a smak smak-snap; smak-snap/smak-buildtest ...`).
+
+## Diagnosing a stalled build
+
+A hung `-j` build can be inspected without restarting it:
+
+```
+kill -USR1 $(pgrep -x smak-server)     # inside the container, or on the host
+cat /tmp/smak-jobmaster-<pid>.state
+```
+
+The state file lists the running jobs, every queued job with the status of
+each of its dependencies, the connected sub-make relays with the targets they
+still wait for, and pending composite targets. A relay whose outstanding
+targets are all `done`, or a queued job waiting on a dependency that nothing
+builds, points at the cause. Do not use `pkill -x smak-server` on a host that
+runs a batch: container processes are visible there and it would stop their
+servers too.

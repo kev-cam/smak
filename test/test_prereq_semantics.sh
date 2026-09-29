@@ -124,6 +124,33 @@ endif
 EOF
 check "same target re-made by a relayed sub-make" self
 
+# jq: after touching a source, a relayed sub-make (-j) rebuilt the object
+# but relinked nothing (its jobs were judged up to date while the object's
+# job, dispatched early, still had the old file), or linked the program
+# before the library was relinked
+mkdir -p relink/sub
+printf 'all:\n\t@$(MAKE) --no-print-directory -C sub\n' > relink/Makefile
+cat > relink/sub/Makefile <<'EOF'
+prog: main.o lib.a
+	@sleep 1; cat main.o lib.a > $@
+lib.a: a.o b.o
+	@sleep 1; cat a.o b.o > $@
+%.o: %.c
+	@cp $< $@
+EOF
+for f in main a b; do echo "$f" > relink/sub/$f.c; done
+(cd relink && timeout 120 $SMAK -j4 >/dev/null 2>&1)
+for j in "" "-j4"; do
+    sleep 1; echo "a2$j" > relink/sub/a.c
+    (cd relink && timeout 120 $SMAK $j >/dev/null 2>&1)
+    if grep -q "a2$j" relink/sub/prog && [ relink/sub/prog -nt relink/sub/lib.a ] \
+       && [ relink/sub/lib.a -nt relink/sub/a.o ] && [ -z "$(cd relink/sub && make -q prog || echo stale)" ]; then
+        echo "PASS: relayed incremental relink ${j:-seq}"
+    else
+        echo "FAIL: relayed incremental relink ${j:-seq}"; ls -la --time-style=full-iso relink/sub; fail=1
+    fi
+done
+
 mkdir silent
 printf 'all: a\na:\n\tmkdir -p out\n\techo quiet\n.SILENT:\n' > silent/Makefile
 check ".SILENT" silent

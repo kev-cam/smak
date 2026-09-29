@@ -14260,6 +14260,10 @@ sub run_job_master {
                 # Exception: when $bypass_layers is set (second pass), skip layer gate
                 # to handle cross-relay deadlocks where child relays submit jobs at
                 # different layer depths into the same queue.
+                # A relay's jobs wait until it has sent them all (see the
+                # CHILD_DONE post-processing)
+                next if $job->{from_child} && !$job->{child_ready};
+
                 my $job_layer = $job->{layer} // 0;
                 if ($job_layer > $current_dispatch_layer && !$bypass_layers) {
                     print STDERR "DEBUG dispatch: Skipping job '$target' (layer $job_layer > current $current_dispatch_layer)\n" if $ENV{SMAK_DEBUG} && $skipped_for_layer < 3;
@@ -17340,8 +17344,13 @@ sub run_job_master {
                 } # end while(1) CHILD_READ loop
                 $socket->blocking(1) if grep { $_ == $socket } @child_sockets;
 
-                # Post-process child jobs: compute layers and check needs_rebuild
-                my @child_jobs = grep { $_->{from_child} && $_->{layer} == 0 } @job_queue;
+                # Post-process child jobs: compute layers and check needs_rebuild.
+                # Only once a relay has sent all its jobs (CHILD_DONE): deciding
+                # "up to date" on part of them skipped jq's relink when
+                # builtin.lo was dispatched before libjq.la arrived.
+                my @child_jobs = grep { $_->{from_child} && !$_->{child_ready} && $_->{layer} == 0
+                                        && $child_all_submitted{$target_to_child{$_->{target}} // ''} } @job_queue;
+                $_->{child_ready} = 1 for @child_jobs;
                 if (@child_jobs) {
                     # Build set of child job targets for dep classification
                     my %child_targets;
@@ -17390,6 +17399,9 @@ sub run_job_master {
                         $job_layers[$layer] //= [];
                         push @{$job_layers[$layer]}, $job;
                         print STDERR "Child job '$job->{target}' assigned to layer $layer\n" if $ENV{SMAK_DEBUG};
+                        # Jobs depending on it must wait for it, not see the old
+                        # file (the layer gate is lifted while relays run)
+                        $in_progress{$job->{target}} //= 'queued';
                     }
 
                     # Check needs_rebuild: skip up-to-date targets
@@ -17430,7 +17442,10 @@ sub run_job_master {
                         for my $job (@child_jobs) {
                             next if $needs_build{$job->{target}};
                             for my $dep (@{$job->{deps}}) {
-                                if ($needs_build{$dep}) {
+                                # being (re)built by an earlier job counts too
+                                my $ip = $in_progress{$dep} // '';
+                                if ($needs_build{$dep} || (!$child_targets{$dep} && $ip ne '' && $ip ne 'done'
+                                                           && $ip ne 'failed' && !$completed_targets{$dep})) {
                                     $needs_build{$job->{target}} = 1;
                                     $changed = 1;
                                     last;
@@ -17516,7 +17531,7 @@ sub run_job_master {
                 my @pre_exec_indices;
                 for my $qi (0 .. $#job_queue) {
                     my $qj = $job_queue[$qi];
-                    next unless $qj->{from_child};
+                    next unless $qj->{from_child} && $qj->{child_ready};
                     next unless defined $qj->{command} && $qj->{command} =~ /\S/;
                     next unless defined(try_execute_compound_builtin_check($qj->{command}));
                     # Check all deps are satisfied

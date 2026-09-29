@@ -287,6 +287,19 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   does; the parse cache is written atomically.
   Tests: `test/test_prereq_semantics.sh`, `test/test_make_functions.sh`.
 
+### -j incremental: relayed sub-make rebuilt an object but relinked nothing (jq)
+- [x] **FIXED (2026-09-29):** smak-buildtest's incremental check on jq:
+  touching src/builtin.c rebuilt src/.libs/builtin.o but not libjq.la or
+  jq (and in another run linked jq while libtool was replacing
+  .libs/libjq.so: "cannot find ./.libs/libjq.so"). The job-master
+  dispatched a relay's jobs while the relay was still sending them, and
+  decided which were up to date on each partial batch: libjq.la was judged
+  against builtin.lo's old file because builtin.lo's job had already left
+  the queue. A relay's jobs are now held until it has sent them all
+  (CHILD_DONE), prerequisites being built by other jobs count as changed,
+  and accepted relay jobs are marked queued so dependents wait for them.
+  Tests: `test/test_prereq_semantics.sh` (relayed incremental relink).
+
 ### VPATH-resolved `$<` gets a `./` prefix, so binaries differ from make's
 - [ ] **Symptom (smak-buildtest, iverilog):** smak compiles
   `-c ./../libmisc/LineInfo.cc` where make uses `-c ../libmisc/LineInfo.cc`.

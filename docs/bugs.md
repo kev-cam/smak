@@ -738,6 +738,20 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 - **Repro:** `cd /usr/local/src/xyce-build` (fully built) `&& time smak -j8` →
   does not complete.
 
+### Intermediate files of implicit-rule chains are kept (OPEN)
+
+- **Symptom:** redis `tests/modules`: `%.so: %.xo` and `%.xo: %.c` build
+  `basics.so` through `basics.xo`. GNU make treats `basics.xo` as an
+  intermediate file (reached only through an implicit-rule chain, never
+  named in the makefile, not .PRECIOUS/.SECONDARY) and deletes it at the end
+  (`rm basics.xo ...`). smak keeps it (smak-buildtest: 48 files written that
+  make does not write).
+- **Fix needs:** record intermediates created during the build (seq
+  build_target and the job-master), delete them at the end with make's `rm`
+  line, and treat a missing intermediate as up to date when its target is
+  newer than the chain's source; today `rebuild_missing_intermediates`
+  would remake them on the next run.
+
 ## Container deps (cross-distro)
 Tests need these Perl/system packages installed:
 - `perl-IO-Tty` (Tumbleweed) / `libio-pty-perl` (Debian/Ubuntu): for the

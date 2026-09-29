@@ -709,6 +709,12 @@ sub check_build {
     %cmd = %ref_cmd unless %cmd;   # CLI sessions do not echo commands
     my @only_make = map { $ref_cmd{$_} } grep { !$cmd{$_} } sort keys %ref_cmd;
     my @only_smak = map { $cmd{$_} } grep { !$ref_cmd{$_} } sort keys %cmd;
+    # make -jN output can put a command mid-line (redis: jemalloc's configure
+    # printed "checking for stdlib.h... cc ... -c -o lbaselib.o lbaselib.c")
+    if (@only_smak) {
+        (my $ref_txt = first_section('reference')) =~ s/\s+//g;
+        @only_smak = grep { (my $k = $_) =~ s/\s+//g; index($ref_txt, $k) < 0 } @only_smak;
+    }
     my $sums = $result{prepare}{product_sums} || {};
     my %unstable = map { $_ => 1 } @{ $result{prepare}{unstable_products} || [] };
     my @differ = grep { !$unstable{$_} && -f "$tree/$_" && file_md5($_) ne $sums->{$_} } sort keys %$sums;

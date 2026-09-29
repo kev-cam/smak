@@ -734,6 +734,7 @@ sub is_recursive_make {
 sub is_builtin_command {
     my ($cmd) = @_;
     return 0 unless defined $cmd;
+    return 0 if $cmd =~ /\x00BSNL\x00|\\\n/;   # continued lines need the shell
 
     # Strip command prefixes (make finds them after leading whitespace)
     my $clean_cmd = $cmd;
@@ -2543,10 +2544,25 @@ sub format_output {
 
 # $$ in a makefile is a literal $; it is carried as \x00DOLLAR\x00 until the
 # text reaches the shell or the user.
+# True when $text ends inside an unclosed $(...) or ${...} reference.
+sub open_make_ref {
+    my ($text) = @_;
+    my @stack;
+    while ($text =~ /(\$\$|\$[({]|[({]|[)}])/g) {
+        my $t = $1;
+        next if $t eq '$$';
+        if ($t eq '$(' || $t eq '${') { push @stack, $t eq '$(' ? ')' : '}'; }
+        elsif ($t eq '(' || $t eq '{') { push @stack, $t eq '(' ? ')' : '}' if @stack; }
+        elsif (@stack && $t eq $stack[-1]) { pop @stack; }
+    }
+    return scalar @stack;
+}
+
 sub unescape_dollars {
     my ($s) = @_;
     return $s unless defined $s;
     $s =~ s/\x00DOLLAR\x00/\$/g;
+    $s =~ s/\x00BSNL\x00/\\\n/g;   # a recipe's backslash-newline
     return $s;
 }
 
@@ -3210,8 +3226,13 @@ sub parse_makefile {
             my $next = $read_line->();
             last unless defined $next;
             chomp $next;
-            if ($is_recipe_line) {
-                $line .= $next;
+            if ($is_recipe_line && !open_make_ref($line)) {
+                # make keeps a recipe's backslash-newline for the shell (and
+                # its echo), dropping one recipe tab from the next line
+                $next =~ s/^\t//;
+                $line .= "\x00BSNL\x00$next";
+            } elsif ($is_recipe_line) {
+                $line .= $next;   # inside $(...): expansion joins it
             } else {
                 $line =~ s/\s+$//;
                 $next =~ s/^\s+//;
@@ -4023,8 +4044,13 @@ sub parse_included_makefile {
             my $next = $read_line->();
             last unless defined $next;
             chomp $next;
-            if ($is_recipe_line) {
-                $line .= $next;
+            if ($is_recipe_line && !open_make_ref($line)) {
+                # make keeps a recipe's backslash-newline for the shell (and
+                # its echo), dropping one recipe tab from the next line
+                $next =~ s/^\t//;
+                $line .= "\x00BSNL\x00$next";
+            } elsif ($is_recipe_line) {
+                $line .= $next;   # inside $(...): expansion joins it
             } else {
                 $line =~ s/\s+$//;
                 $next =~ s/^\s+//;
@@ -12227,18 +12253,22 @@ sub run_job_master {
     # back to the command unless any line was @-silenced.
     sub echo_job_command {
         my ($job) = @_;
-        return if $job->{echoed}++ || $silent_mode || $dry_run_mode;
+        # (make -n prints the lines even with -s; the worker prints nothing)
+        return if $job->{echoed}++ || ($silent_mode && !$dry_run_mode);
         my @lines;
         if ($job->{echo}) {
             @lines = @{$job->{echo}};
+        } elsif ($dry_run_mode) {
+            @lines = map { (my $l = $_) =~ s/^\s*[@+-]+//; $l } grep { /\S/ } split /\n/, $job->{command} // '';
         } elsif (!$job->{silent}) {
             @lines = map { (my $l = $_) =~ s/^\s*[+-]+//; $l }
                 grep { /\S/ && !/^\s*[+-]*@/ } split /\n/, $job->{command} // '';
         }
         for my $l (@lines) {
             (my $shown = unescape_dollars($l)) =~ s/^\s+//;
-            # Same channel as the workers' output, so the order holds.
-            if ($master_socket) { print $master_socket "OUTPUT $shown\n"; }
+            # Same channel as the workers' output, so the order holds; a
+            # line continued with backslash-newline is one OUTPUT per line.
+            if ($master_socket) { print $master_socket "OUTPUT $_\n" for split /\n/, $shown; }
             else                { print $stomp_prompt, "$shown\n"; }
         }
         $master_socket ? $master_socket->flush() : STDOUT->flush();
@@ -12329,7 +12359,9 @@ sub run_job_master {
             #    where && is a logical operator in a condition, not a command separator
             my @line_parts = do { my @t = split_shell_list($line, 1); @t[grep { $_ % 2 == 0 } 0 .. $#t] };
             my $keep_together = 0;
-            if ($line =~ /\b(?:if|then|elif|else|fi|while|until|do|done|for|case|esac)\b/) {
+            if ($line =~ /\x00BSNL\x00/) {
+                $keep_together = 1;   # continued over lines: one shell command
+            } elsif ($line =~ /\b(?:if|then|elif|else|fi|while|until|do|done|for|case|esac)\b/) {
                 $keep_together = 1;
             } elsif ($line =~ /(?:\$|\x00DOLLAR\x00)[{(]?\w|`/ || $line =~ /(?:^|[;&|]\s*)[A-Za-z_]\w*=/) {
                 # Shell variables / command substitution (automake's
@@ -13695,7 +13727,10 @@ sub run_job_master {
             my $processed_rule = process_command($expanded_rule);
             # What make echoes: each line not starting with @, prefixes dropped
             # (process_command joins the lines and drops that information).
-            my @echo_lines = is_silent_target($target) ? () :
+            # make -n prints every line, @-lines too.
+            my @echo_lines = $dry_run_mode
+                ? map { (my $l = $_) =~ s/^\s*[@+-]+//; $l } grep { /\S/ } split /\n/, $expanded_rule
+                : is_silent_target($target) ? () :
                 map { (my $l = $_) =~ s/^\s*[+-]+//; $l }
                 grep { /\S/ && !/^\s*[+-]*@/ } split /\n/, $expanded_rule;
 

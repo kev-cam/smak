@@ -90,6 +90,20 @@ rm -f dotslash/sub/x.o
 mkdir -p vpv/libmisc; echo x > vpv/libmisc/x.cc
 printf 'srcdir = .\nVPATH = $(srcdir) $(srcdir)/libmisc\nall: x.o\n%%.o: %%.cc\n\t@echo "cc $<"\n' > vpv/Makefile
 check "VPATH with variables keeps ./" vpv
+# a recipe's backslash-newline reaches the shell and the echo as written
+# (smak joined the lines with a tab: 'a\<newline>b' printed "a<tab>b"), and
+# make -n prints each recipe line (smak printed `a && b && c`)
+mkdir bsnl
+printf "all:\n\t@echo 'a\\\\\n\tb'\n\techo \"x\" \\\\\n\t  \"y\"\n\tv=1;\\\\\n\techo \$\$v\n\t@echo quiet; true\n" > bsnl/Makefile
+for j in "" "-j2"; do
+    for n in "" "-n"; do
+        want=$(cd bsnl && make $n 2>&1); got=$(cd bsnl && $SMAK $j $n 2>&1)
+        [ -n "$j" ] && { want=$(sort <<<"$want"); got=$(sort <<<"$got"); }
+        if [ "$got" == "$want" ]; then echo "PASS: backslash-newline in recipes ${j:-seq} $n"
+        else echo "FAIL: backslash-newline in recipes ${j:-seq} $n"; echo "  make: $want" | head -8; echo "  smak: $got" | head -8; fail=1; fi
+    done
+done
+
 # out-of-tree build (Verilator): a target that exists only through VPATH and
 # is up to date is not remade (-j regenerated configure in the build dir)
 mkdir -p oot/src oot/b; echo in > oot/src/configure.ac; touch -d '1 minute ago' oot/src/configure.ac

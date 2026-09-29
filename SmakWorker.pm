@@ -58,6 +58,7 @@ sub parse_simple_command {
     $cmd =~ s/\s+2>&1\s*$//;
 
     # Shell metacharacters that require shell interpretation
+    return () if $cmd =~ /\\\n/;               # backslash-newline continuation
     return () if $cmd =~ /\|/;                  # Pipes
     return () if $cmd =~ /`/;                   # Backticks
     return () if $cmd =~ /\$/;                  # Variables
@@ -420,7 +421,10 @@ sub run_worker {
                 my $count = $2;
                 for (1..$count) {
                     my $cmd = $read_line->();
-                    $cmd =~ s/\x00DOLLAR\x00/\$/g if defined $cmd;   # literal $ from $$
+                    if (defined $cmd) {
+                        $cmd =~ s/\x00DOLLAR\x00/\$/g;   # literal $ from $$
+                        $cmd =~ s/\x00BSNL\x00/\\\n/g;  # recipe backslash-newline
+                    }
                     push @external_commands, $cmd if defined $cmd && $cmd ne '';
                 }
 
@@ -431,7 +435,10 @@ sub run_worker {
                     my $count = $1;
                     for (1..$count) {
                         my $cmd = $read_line->();
-                        $cmd =~ s/\x00DOLLAR\x00/\$/g if defined $cmd;
+                        if (defined $cmd) {
+                            $cmd =~ s/\x00DOLLAR\x00/\$/g;
+                            $cmd =~ s/\x00BSNL\x00/\\\n/g;
+                        }
                         push @trailing_builtins, $cmd if defined $cmd && $cmd ne '';
                     }
                 }
@@ -463,8 +470,9 @@ sub run_worker {
             my $exit_code = 0;
 
             if ($is_dry_run) {
-                # DRY-RUN MODE: Print command
-                print $socket "OUTPUT $command\n";
+                # DRY-RUN MODE: the job-master prints the recipe lines, one
+                # per line as make -n does (joined here they came out as
+                # `a && b && c`)
                 $socket->flush();
             } else {
                 # REGULAR MODE: Execute commands using direct exec where possible

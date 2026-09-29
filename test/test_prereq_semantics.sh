@@ -244,6 +244,34 @@ for j in "" "-j2"; do
     else echo "FAIL: match-anything pattern is not chained on itself ${j:-seq}: make [$want] smak [$(head -c 300 <<<"$got")]"; fail=1; fi
 done
 
+# No-op runs (smak-buildtest, 2026-09-29):
+#  - redis `commands.def: commands/*.json`: prerequisites are globbed (the
+#    literal pattern never existed, so it was regenerated every run)
+#  - lz4: liblz4.so.1 depends on a .PHONY link, liblz4.so on liblz4.so.1;
+#    make remakes liblz4.so.1 every run but then finds liblz4.so no older
+#    (symlinks followed); smak -j rebuilt everything after a remade prerequisite
+mkdir -p noop/in noop/cache
+touch noop/in/a.json noop/in/b.json noop/cache/real.so
+touch -d '1 minute ago' noop/cache/real.so
+cat > noop/Makefile <<'EOF2'
+all: out.def lib.so
+out.def: in/*.json
+	@echo "gen from $^"; touch $@
+.PHONY: lib.so.1.0
+lib.so.1.0:
+	@ln -sf cache/real.so $@
+lib.so.1: lib.so.1.0
+	@echo "link1"; ln -sf $< $@
+lib.so: lib.so.1
+	@echo "link-so"; ln -sf $< $@
+EOF2
+for j in "" "-j2"; do
+    (cd noop && rm -f out.def lib.so*; make -s >/dev/null 2>&1); want=$(cd noop && make -s 2>&1)
+    (cd noop && rm -f out.def lib.so*; timeout 60 $SMAK -s $j >/dev/null 2>&1); got=$(cd noop && timeout 60 $SMAK -s $j 2>&1)
+    if [ "$got" == "$want" ]; then echo "PASS: no-op run: globbed prerequisites, remade prerequisite no newer ${j:-seq}"
+    else echo "FAIL: no-op run ${j:-seq}: make [$want] smak [$got]"; fail=1; fi
+done
+
 # tmux: cmd-parse.o from the makefile's .c.o, whose source cmd-parse.c is
 # made from cmd-parse.y by .y.c (the built-in %.o: %.c was used instead)
 mkdir sfx

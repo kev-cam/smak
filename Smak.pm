@@ -2878,6 +2878,27 @@ sub handle_define {
 
 # Split make words on whitespace outside $(...) / ${...}, so a prerequisite
 # like $(CACHE_ROOT)/$(call HASH_FUNC,$(1),$(2) $(CFLAGS))/$(1) stays whole.
+# make expands wildcards in prerequisites (redis: `commands.def:
+# commands/*.json`); a pattern matching nothing stays as written. The
+# directory is recorded so a cached parse notices added or removed files.
+sub glob_prereqs {
+    my @out;
+    for my $w (@_) {
+        if ($w =~ /[*?\[]/ && $w !~ /[%\$]/) {
+            require File::Glob;
+            my @g = File::Glob::bsd_glob($w);
+            if (@g) {
+                (my $d = $w) =~ s{/[^/]*$}{};
+                record_parsed_file($d eq $w ? '.' : $d);
+                push @out, sort @g;
+                next;
+            }
+        }
+        push @out, $w;
+    }
+    return @out;
+}
+
 sub split_make_words {
     my ($str) = @_;
     my @w;
@@ -3748,8 +3769,8 @@ sub parse_makefile {
                 # No order-only prerequisites
                 @deps = split_make_words($deps_str);
             }
-            @deps = grep { $_ ne '' } @deps;
-            @order_only_deps = grep { $_ ne '' } @order_only_deps;
+            @deps = glob_prereqs(grep { $_ ne '' } @deps);
+            @order_only_deps = glob_prereqs(grep { $_ ne '' } @order_only_deps);
 
             # Handle multiple targets (e.g., "target1 target2: deps")
             # Make creates the same rule for each target
@@ -4441,8 +4462,8 @@ sub parse_included_makefile {
                 # No order-only prerequisites
                 @deps = split_make_words($deps_str);
             }
-            @deps = grep { $_ ne '' } @deps;
-            @order_only_deps = grep { $_ ne '' } @order_only_deps;
+            @deps = glob_prereqs(grep { $_ ne '' } @deps);
+            @order_only_deps = glob_prereqs(grep { $_ ne '' } @order_only_deps);
 
             # Handle multiple targets
             my @targets = split /\s+/, $targets_str;
@@ -5019,7 +5040,7 @@ sub load_state_cache {
     # Validate cache - check if any makefile has changed (mtime or size)
     my $cache_mtime = (Time::HiRes::stat($cache_file))[9];
     for my $file (keys %parsed_file_mtimes) {
-        if (-f $file) {
+        if (-e $file) {
             my @st = Time::HiRes::stat($file);
             my ($file_mtime, $file_size) = (sprintf('%.6f', $st[9]), $st[7]);
             my $cached = $parsed_file_mtimes{$file};
@@ -5788,9 +5809,32 @@ sub newer_prereqs {
     return @out;
 }
 
+# Targets needs_rebuild found out of date only because a prerequisite will be
+# remade: make decides after remaking it, by the times (see job_up_to_date)
+our %rebuild_via_deps;
+
+# After its prerequisites were made: does the job's target exist and is no
+# prerequisite missing, phony or newer?
+our %relayed_phony;   # .PHONY targets of relayed sub-makes (their makefile's, not ours)
+sub job_up_to_date {
+    my ($job) = @_;
+    my $base = $job->{from_child} ? ($job->{exec_dir} // $job->{dir} // '.') : ($job->{dir} // '.');
+    my $path = sub { $_[0] =~ m{^/} ? $_[0] : "$base/$_[0]" };
+    my @t = Time::HiRes::stat($path->($job->{target}));
+    return 0 unless @t;
+    for my $d (@{$job->{deps} || []}) {
+        next if !defined $d || $d eq '';
+        return 0 if is_declared_phony($d) || $relayed_phony{$d};
+        my @st = Time::HiRes::stat($path->($d));
+        return 0 if !@st || $st[9] > $t[9];
+    }
+    return 1;
+}
+
 sub needs_rebuild {
     my ($target, $visited) = @_;
     $visited ||= {};
+    delete $rebuild_via_deps{$target};
 
     # Prevent infinite recursion on circular dependencies
     return 0 if $visited->{$target};
@@ -5902,6 +5946,7 @@ sub needs_rebuild {
         # This handles transitive dirty dependencies (e.g., A depends on B, B depends on dirty C)
         if (needs_rebuild($dep, $visited)) {
             warn "DEBUG: Dependency '$dep' of '$target' needs rebuild (recursive check), so '$target' needs rebuild too\n" if $ENV{SMAK_DEBUG};
+            $rebuild_via_deps{$target} = 1;
             return 1;
         }
 
@@ -6898,7 +6943,6 @@ sub build_target {
     # In parallel mode (non-dry-run), skip this - let job-master handle dependency expansion
     # In dry-run mode, always expand locally to print all commands
     warn "DEBUG[" . __LINE__ . "]:   Checking job_server_socket: " . (defined $job_server_socket ? "SET (fd=" . fileno($job_server_socket) . ")" : "NOT SET") . "\n" if $ENV{SMAK_DEBUG};
-    local $active_pattern_chain{$matched_pkey} = 1 if $matched_pkey;
     if (!$job_server_socket || $dry_run_mode) {
         warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies" . ($dry_run_mode ? " (dry-run mode)" : " sequentially (no job server)") . "...\n" if $ENV{SMAK_DEBUG};
         # In dry-run mode, temporarily disable job server for recursive builds
@@ -6906,6 +6950,7 @@ sub build_target {
         local $job_server_socket = $dry_run_mode ? undef : $job_server_socket;
         for my $dep (@deps) {
             warn "DEBUG[" . __LINE__ . "]:     Building dependency: $dep\n" if $ENV{SMAK_DEBUG};
+            local $active_pattern_chain{$matched_pkey} = 1 if $matched_pkey;
             build_target($dep, $visited, $depth + 1);
         }
         warn "DEBUG[" . __LINE__ . "]:   Finished building dependencies\n" if $ENV{SMAK_DEBUG};
@@ -13473,9 +13518,11 @@ sub run_job_master {
         # (propagates to prerequisites and rule expansion)
         my $tsv_saved = apply_target_specific_vars($target);
 
-        local $active_pattern_chain{$matched_pattern_key} = 1 if $matched_pattern_key;
         # Recursively queue each dependency first
         for my $dep (@deps) {
+            # (only while making prerequisites: the rule still applies to
+            # this target's own needs_rebuild below)
+            local $active_pattern_chain{$matched_pattern_key} = 1 if $matched_pattern_key;
             next if $dep =~ /^\.PHONY$/;
             next if $dep !~ /\S/;
             next if $dep =~ /^["']+$/;
@@ -13876,6 +13923,7 @@ sub run_job_master {
                 layer => $layer,  # Store layer for reference
                 deps => [map { target_with_prefix($_, $prefix) } @deps],  # Store deps for dispatch lookup (compound targets)
                 order_only_deps => [map { target_with_prefix($_, $prefix) } @order_only_deps],  # Store order-only deps
+                recheck_after_deps => ($rebuild_via_deps{$target} && !$is_phony) ? 1 : 0,
             };
             add_job_to_layer($job, $layer);
             $in_progress{$full_target} = "queued";
@@ -15382,11 +15430,19 @@ sub run_job_master {
                 }
 
                 my $builtin_exit;
-                {
-                    local $builtin_before_hook = sub { echo_job_command($peek_job) };
-                    $builtin_exit = $no_builtins ? undef : try_execute_compound_builtin($peek_cmd);
+                if ($peek_job->{recheck_after_deps} && job_up_to_date($peek_job)) {
+                    # Queued because a prerequisite was to be remade, which
+                    # left it no newer than the target: nothing to do, as in make
+                    # (lz4: liblz4.so -> liblz4.so.1, relinked by every -j run)
+                    print STDERR "DEBUG: '$target' up to date after its prerequisites\n" if $ENV{SMAK_DEBUG};
+                    $builtin_exit = 0;
+                } else {
+                    {
+                        local $builtin_before_hook = sub { echo_job_command($peek_job) };
+                        $builtin_exit = $no_builtins ? undef : try_execute_compound_builtin($peek_cmd);
+                    }
+                    echo_job_command($peek_job) if defined $builtin_exit;
                 }
-                echo_job_command($peek_job) if defined $builtin_exit;
 
                 # Restore directory
                 chdir($saved_dir) if defined $saved_dir;
@@ -17891,6 +17947,7 @@ sub run_job_master {
                             from_child => 1,
                             phony => $child_phony,
                         };
+                        $relayed_phony{$target} = 1 if $child_phony;
                     }
                 } elsif ($line =~ /^CHILD_DONE\s*(\d+)?$/) {
                     # Child smak finished submitting all jobs
@@ -18027,6 +18084,8 @@ sub run_job_master {
                                 if ($needs_build{$dep} || (!$child_targets{$dep} && $ip ne '' && $ip ne 'done'
                                                            && $ip ne 'failed' && !$completed_targets{$dep})) {
                                     $needs_build{$job->{target}} = 1;
+                                    # decided again by the times once $dep is made
+                                    $job->{recheck_after_deps} = 1;
                                     $changed = 1;
                                     last;
                                 }

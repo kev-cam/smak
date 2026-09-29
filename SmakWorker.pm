@@ -356,7 +356,10 @@ sub run_worker {
     my $env_done = 0;
     while (1) {
         my $line = $read_line->();
-        die "Connection closed before environment received\n" unless defined $line;
+        unless (defined $line) {
+            exit(0) if $ENV{SMAK_EXTRA_WORKER};  # job-master finished meanwhile
+            die "Connection closed before environment received\n";
+        }
 
         if ($line eq 'ENV_START') {
             next;

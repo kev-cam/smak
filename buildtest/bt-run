@@ -797,6 +797,16 @@ sub noop_check {
 
 # Pick an object file whose source can be identified, touch the source,
 # rebuild, and check the object and at least one product were redone.
+# Would make, on the tree as it is now, remake $obj (dry run, recursive
+# makes included)?
+sub make_would_remake {
+    my ($obj, $src) = @_;
+    my $out = `cd '$bdir' && make -n $makeargs $target 2>&1`;
+    (my $o = $obj) =~ s{.*/}{};
+    (my $s = $src) =~ s{.*/}{};
+    return $out =~ /\Q$o\E/ || $out =~ /\Q$s\E/;
+}
+
 sub incremental_check {
     my ($r, $again) = @_;
     my ($src, $obj) = pick_touch();
@@ -814,6 +824,9 @@ sub incremental_check {
     if ($rc != 0) {
         $r->{fail}++;
         push @{ $r->{notes} }, "incremental rebuild failed (exit $rc)";
+    } elsif (!$ch{$obj} && !make_would_remake($obj, $src)) {
+        # redis builds deps/ once behind a stamp: make does not remake it either
+        push @{ $r->{info} }, "touching $src rebuilt nothing, as with make";
     } elsif (!$ch{$obj}) {
         $r->{fail}++;
         push @{ $r->{notes} }, "touching $src did not rebuild $obj";

@@ -1628,6 +1628,17 @@ sub is_empty_explicit_target {
     return 1;
 }
 
+# smak's extension: conventional phony names (all, clean, test, ...) are
+# phony without a .PHONY declaration, so a test/ or install/ directory does
+# not hide them. Not when a regular file of that name exists: then it is the
+# target's product, as in make (lua's `all: $(ALL_T) ; touch all`).
+sub is_conventional_phony {
+    my ($target) = @_;
+    return 0 unless defined $target
+        && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/;
+    return !-f $target;
+}
+
 sub classify_target {
     my ($target) = @_;
     if ($target =~ /^\./) {
@@ -6375,7 +6386,7 @@ sub build_target {
 
     # Auto-detect common phony target names even without .PHONY declaration
     # This is a pragmatic extension to standard Make behavior
-    if (!$is_phony && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+    if (!$is_phony && is_conventional_phony($target)) {
         warn "DEBUG[" . __LINE__ . "]:   Auto-detecting '$target' as phony (common target name)\n" if $ENV{SMAK_DEBUG};
         $is_phony = 1;
     }
@@ -6485,6 +6496,35 @@ sub build_target {
             build_target($dep, $visited, $depth + 1);
         }
         warn "DEBUG[" . __LINE__ . "]:   Finished building dependencies\n" if $ENV{SMAK_DEBUG};
+
+        # make decides after remaking the prerequisites, by their times: the
+        # up-front check above assumed a prerequisite that "needs rebuild"
+        # changes, but lz4's `liblz4.so.1: liblz4.so.1.10.0` (a phony that
+        # re-links a symlink) leaves the file it points to untouched, so
+        # liblz4.so was not remade by make and must not be here.
+        if (!$job_server_socket && !$dry_run_mode && !$relay_capture_mode && !$is_phony
+            && defined $rule && $rule =~ /\S/ && -e $target) {
+            require Time::HiRes;
+            my $t_mtime = (Time::HiRes::stat($target))[9];
+            my $phony_key = "$makefile\t.PHONY";
+            my %declared_phony = map { $_ => 1 } @{$pseudo_deps{$phony_key} || []};
+            my $stale = 0;
+            for my $dep (@deps) {
+                next if $dep =~ /^\.PHONY$/ || $dep !~ /\S/;
+                my $d_mtime = (Time::HiRes::stat($dep))[9];
+                if ($declared_phony{$dep} || !defined $d_mtime || exists $Smak::dirty_files{$dep}
+                    || $d_mtime > $t_mtime) {
+                    $stale = 1;
+                    last;
+                }
+            }
+            if (!$stale) {
+                warn "DEBUG:   Target '$target' is up-to-date after building its prerequisites\n" if $ENV{SMAK_DEBUG};
+                delete $stale_targets_cache{$target};
+                restore_target_specific_vars($tsv_saved);
+                return;
+            }
+        }
     } else {
         warn "DEBUG[" . __LINE__ . "]:   Skipping dependency expansion - job server will handle it\n" if $ENV{SMAK_DEBUG};
     }
@@ -10062,7 +10102,7 @@ sub perform_auto_rescan {
 
         # Skip phony targets
         next if exists $is_phony{$target};
-        next if $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/;
+        next if is_conventional_phony($target);
 
         $targets_to_check{$target} = 1 if -e $target;
     }
@@ -10121,7 +10161,7 @@ sub auto_rescan_watcher {
         my ($mf, $target) = split(/\t/, $key, 2);
         next unless $target;
         next if exists $is_phony{$target};
-        next if $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/;
+        next if is_conventional_phony($target);
 
         if (-e $target) {
             $watched_targets{$target} = 1;
@@ -12042,7 +12082,7 @@ sub run_job_master {
         }
 
         # Auto-detect common phony target names
-        if ($target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+        if (is_conventional_phony($target)) {
             return 1;
         }
 
@@ -13115,7 +13155,7 @@ sub run_job_master {
                 $is_phony = 1 if grep { $_ eq $target } @phony_targets;
             }
             # Auto-detect common phony targets
-            if (!$is_phony && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+            if (!$is_phony && is_conventional_phony($target)) {
                 $is_phony = 1;
             }
 
@@ -15667,7 +15707,7 @@ sub run_job_master {
                                 }
 
                                 # 2. Check for common phony target names
-                                if (!$is_phony_target && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+                                if (!$is_phony_target && is_conventional_phony($target)) {
                                     $is_phony_target = 1;
                                 }
 
@@ -18248,7 +18288,7 @@ sub run_job_master {
                             }
 
                             # 2. Check for common phony target names
-                            if (!$is_phony_target && $target =~ /^(clean|distclean|mostlyclean|maintainer-clean|realclean|clobber|install|uninstall|check|test|tests|all|help|info|dvi|pdf|ps|dist|tags|ctags|etags|TAGS)$/) {
+                            if (!$is_phony_target && is_conventional_phony($target)) {
                                 $is_phony_target = 1;
                             }
 

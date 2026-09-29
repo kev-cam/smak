@@ -300,6 +300,21 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   and accepted relay jobs are marked queued so dependents wait for them.
   Tests: `test/test_prereq_semantics.sh` (relayed incremental relink).
 
+### No-op runs remade targets make leaves alone (lua `all`, lz4 liblz4.so)
+- [x] **FIXED (2026-09-29):** smak-buildtest's no-op check:
+  - smak treats conventional names (all, clean, test, ...) as phony without
+    a .PHONY declaration. lua's `all: $(ALL_T) ; touch all` creates a file
+    `all`, which make then keeps as up to date; the extension now only
+    applies when no regular file of that name exists (a test/ directory
+    still does not hide `test`).
+  - Sequential smak decided "needs rebuild" before building the
+    prerequisites, propagating it upward. lz4's `liblz4.so.1:
+    liblz4.so.1.10.0` (a phony re-linking a symlink) is remade every run
+    but the file it points to keeps its time, so make does not remake
+    liblz4.so. After building the prerequisites the target is now checked
+    again by their (sub-second) times, as make does.
+  Tests: `test/test_prereq_semantics.sh` (second run).
+
 ### VPATH-resolved `$<` gets a `./` prefix, so binaries differ from make's
 - [ ] **Symptom (smak-buildtest, iverilog):** smak compiles
   `-c ./../libmisc/LineInfo.cc` where make uses `-c ../libmisc/LineInfo.cc`.

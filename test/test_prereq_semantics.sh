@@ -151,6 +151,31 @@ for j in "" "-j4"; do
     fi
 done
 
+# lz4: `liblz4.so.1: liblz4.so.1.10.0` (a phony re-linking a symlink) is
+# remade every run, but the file it points to keeps its time, so make does
+# not remake liblz4.so; smak did (decided before building prerequisites).
+# lua: `all: $(ALL_T) ; touch all` - a regular file named `all` is a file
+# target, not smak's conventional phony.
+mkdir symlinks
+cat > symlinks/Makefile <<'EOF'
+all: lib.so
+	touch all
+lib.so: lib.so.1
+	ln -sf lib.so.1 $@
+lib.so.1: lib.so.1.0
+	ln -sf lib.so.1.0 $@
+.PHONY: lib.so.1.0
+lib.so.1.0: real
+	ln -sf real $@
+real:
+	touch real
+EOF
+(cd symlinks && make >/dev/null 2>&1); want=$(cd symlinks && make 2>&1)
+(cd symlinks && rm -f all lib.so* real && timeout 120 $SMAK >/dev/null 2>&1); sleep 1
+got=$(cd symlinks && timeout 120 $SMAK 2>&1)
+if [ "$got" == "$want" ]; then echo "PASS: second run (phony symlink chain, file named all)"
+else echo "FAIL: second run: make [$want] smak [$got]"; fail=1; fi
+
 mkdir silent
 printf 'all: a\na:\n\tmkdir -p out\n\techo quiet\n.SILENT:\n' > silent/Makefile
 check ".SILENT" silent

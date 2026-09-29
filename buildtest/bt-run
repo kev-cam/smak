@@ -525,6 +525,13 @@ sub prepare {
                 my $t2 = mark();
                 run("make $makeargs $target", $bdir, 'reference');
                 $p{make_noise} = [changed_since($t2)];
+                # Products make itself does not reproduce (zlib's infcover is
+                # built with -coverage, which embeds a random stamp) cannot
+                # be compared: build once more from the configured tree.
+                copy_tree($conf, $tree);
+                run("make -j$J $makeargs $target", $bdir, 'reference-again');
+                $p{unstable_products} = [grep { !-f "$tree/$_" || file_md5($_) ne $p{product_sums}{$_} }
+                                         @{ $p{products} }];
                 return \%p;
             }
             ($stage, $log) = ('build', 'reference');
@@ -699,7 +706,8 @@ sub check_build {
     my @only_make = map { $ref_cmd{$_} } grep { !$cmd{$_} } sort keys %ref_cmd;
     my @only_smak = map { $cmd{$_} } grep { !$ref_cmd{$_} } sort keys %cmd;
     my $sums = $result{prepare}{product_sums} || {};
-    my @differ = grep { -f "$tree/$_" && file_md5($_) ne $sums->{$_} } sort keys %$sums;
+    my %unstable = map { $_ => 1 } @{ $result{prepare}{unstable_products} || [] };
+    my @differ = grep { !$unstable{$_} && -f "$tree/$_" && file_md5($_) ne $sums->{$_} } sort keys %$sums;
     $r->{products_differ} = \@differ;
     if (@only_make || @only_smak) {
         $r->{command_diff} = { make_only => [@only_make[0 .. ($#only_make < 2 ? $#only_make : 2)]],

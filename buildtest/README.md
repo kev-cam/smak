@@ -29,7 +29,7 @@ checked for:
 
 - **Exit status.** A CLI session counts as failed unless it prints "Build succeeded".
 - **Artifacts.** Every file make wrote must be written. Extra files are a warning.
-- **Same build.** smak's compile commands are compared with make's, and final binaries and libraries are checksummed. Different commands with different binaries fails the mode, since smak built something else.
+- **Same build.** smak's compile commands are compared with make's, and final binaries and libraries are checksummed. Different commands with different binaries fails the mode, since smak built something else. make builds the project twice, and binaries that differ between its own two builds (e.g. built with `-coverage`) are not compared.
 - **Nothing left undone.** A follow-up `make` must find nothing to do. Anything make also redoes on an up-to-date tree is ignored as noise.
 - **No-op rebuild.** Running smak again must rebuild nothing, or the mode gets a warning.
 - **Incremental rebuild.** Touching one source must rebuild its object and relink.

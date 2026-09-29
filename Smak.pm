@@ -1849,10 +1849,17 @@ sub classify_target {
 # Find all pattern rules matching a target, sorted by stem length (shortest first).
 # GNU make uses shortest-stem as the tie-breaker when multiple pattern rules match.
 # Returns list of [$pkey, $stem] arrayrefs, or empty list if no match.
+# Pattern rules in use by the targets being made further up the current
+# chain: make never uses a rule twice in one chain (jemalloc's
+# `test/unit/%: test/unit/%.o` with EXE empty matched its own prerequisite:
+# a0.d -> a0.d.o -> a0.d.o.o ...)
+our %active_pattern_chain;
+
 sub find_matching_patterns {
     my ($target) = @_;
     my @matches;
     for my $pkey (keys %pattern_rule) {
+        next if $active_pattern_chain{$pkey};
         if ($pkey =~ /^[^\t]+\t(.+)$/) {
             my $pattern = $1;
             my $pattern_re = quotemeta($pattern);
@@ -2959,6 +2966,31 @@ sub static_pattern_lines {
 # (redis: `-include Makefile.dep` with `Makefile.dep: ; $(CC) -MM ... >
 # Makefile.dep`) and then reads the makefiles again. Called once after the
 # top-level parse; returns the number of files remade.
+# Does pattern rule $pkey, matched with $stem, have a recipe and a variant
+# whose prerequisites all exist or can be made?
+sub pattern_rule_viable {
+    my ($pkey, $stem) = @_;
+    my $r = $pattern_rule{$pkey};
+    my @rules = ref $r ? @$r : ($r // '');
+    my $d = $pattern_deps{$pkey} || [];
+    my @variants = (@$d && ref $d->[0]) ? @$d : ($d);
+    for my $i (0 .. $#rules) {
+        next unless ($rules[$i] // '') =~ /\S/;
+        my $ok = 1;
+        for my $p (@{$variants[$i] || []}) {
+            (my $f = $p) =~ s/%/$stem/g;
+            $f = expand_vars(format_output($f)) if $f =~ /\$/;
+            for my $w (split ' ', $f) {
+                next if -e $w || prereq_can_be_built($w);
+                $ok = 0; last;
+            }
+            last unless $ok;
+        }
+        return 1 if $ok;
+    }
+    return 0;
+}
+
 sub remake_missing_includes {
     my ($makefile_path) = @_;
     return 0 if $dry_run_mode || !@remake_includes;
@@ -2969,9 +3001,10 @@ sub remake_missing_includes {
         $name //= $path;
         next if -e $path || -e $name;
         my $key = "$makefile\t$name";
+        # A pattern rule applies only if its prerequisites exist or can be
+        # made (jemalloc: `test/unit/%: test/unit/%.o` does not make a0.d)
         my $has_rule = (exists $fixed_rule{$key} && $fixed_rule{$key} =~ /\S/)
-                    || grep { my $r = $pattern_rule{$_->[0]}; ref $r ? grep { /\S/ } @$r : ($r // '') =~ /\S/ }
-                       find_matching_patterns($name);
+                    || grep { pattern_rule_viable($_->[0], $_->[1]) } find_matching_patterns($name);
         if (!$has_rule) {
             warn "smak: $path: No such file or directory\n" unless $optional;
             next;
@@ -6865,6 +6898,7 @@ sub build_target {
     # In parallel mode (non-dry-run), skip this - let job-master handle dependency expansion
     # In dry-run mode, always expand locally to print all commands
     warn "DEBUG[" . __LINE__ . "]:   Checking job_server_socket: " . (defined $job_server_socket ? "SET (fd=" . fileno($job_server_socket) . ")" : "NOT SET") . "\n" if $ENV{SMAK_DEBUG};
+    local $active_pattern_chain{$matched_pkey} = 1 if $matched_pkey;
     if (!$job_server_socket || $dry_run_mode) {
         warn "DEBUG[" . __LINE__ . "]:   Building " . scalar(@deps) . " dependencies" . ($dry_run_mode ? " (dry-run mode)" : " sequentially (no job server)") . "...\n" if $ENV{SMAK_DEBUG};
         # In dry-run mode, temporarily disable job server for recursive builds
@@ -13439,6 +13473,7 @@ sub run_job_master {
         # (propagates to prerequisites and rule expansion)
         my $tsv_saved = apply_target_specific_vars($target);
 
+        local $active_pattern_chain{$matched_pattern_key} = 1 if $matched_pattern_key;
         # Recursively queue each dependency first
         for my $dep (@deps) {
             next if $dep =~ /^\.PHONY$/;

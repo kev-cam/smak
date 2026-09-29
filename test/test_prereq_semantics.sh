@@ -231,6 +231,19 @@ for j in "" "-j2"; do
     fi
 done
 
+# redis deps/jemalloc: `test/unit/%$(EXE): test/unit/%.$(O)` with EXE empty
+# and a missing `-include test/unit/a0.d`: make uses no rule twice in one
+# chain and skips a rule it cannot satisfy; smak chained a0.d.o.o.o...
+mkdir -p mchain/t
+echo 'int main(void){return 0;}' > mchain/t/a0.c
+printf '.SECONDARY:\nall: t/a0\nt/%%: t/%%.o\n\t@echo "link $@"; cp $< $@\nt/%%.o: t/%%.c\n\t@echo "cc $@"; cp $< $@\n-include t/a0.d\n' > mchain/Makefile
+want=$(cd mchain && make -s 2>&1); rm -f mchain/t/a0 mchain/t/a0.o
+for j in "" "-j2"; do
+    got=$(cd mchain && timeout 60 $SMAK -s $j 2>&1); rm -f mchain/t/a0 mchain/t/a0.o
+    if [ "$got" == "$want" ]; then echo "PASS: match-anything pattern is not chained on itself ${j:-seq}"
+    else echo "FAIL: match-anything pattern is not chained on itself ${j:-seq}: make [$want] smak [$(head -c 300 <<<"$got")]"; fail=1; fi
+done
+
 # tmux: cmd-parse.o from the makefile's .c.o, whose source cmd-parse.c is
 # made from cmd-parse.y by .y.c (the built-in %.o: %.c was used instead)
 mkdir sfx

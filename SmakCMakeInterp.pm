@@ -38,7 +38,25 @@ sub _cmake_install_root {
 sub _cmake_modules_dir {
     my $root = _cmake_install_root();
     my ($ver) = glob("$root/share/cmake-*");
-    return $ver ? "$ver/Modules" : "$root/share/cmake-3.31/Modules";
+    return "$ver/Modules" if $ver && -d "$ver/Modules";
+    # Without a bundled cmake, use the modules of the cmake on PATH
+    # (/usr/bin/cmake -> /usr/share/cmake-3.28/Modules): include(CTest),
+    # include(CMakeDependentOption) ... otherwise did nothing (libuv's tests
+    # were never configured)
+    our $path_modules_dir;
+    unless (defined $path_modules_dir) {
+        $path_modules_dir = '';
+        for my $d (split /:/, $ENV{PATH} // '') {
+            next unless -x "$d/cmake";
+            require Cwd;
+            my $real = Cwd::abs_path("$d/cmake") or next;
+            my $prefix = dirname(dirname($real));
+            my ($m) = grep { -d } map { "$_/Modules" } sort glob("$prefix/share/cmake-*");
+            if ($m) { $path_modules_dir = $m; last; }
+        }
+    }
+    return $path_modules_dir if $path_modules_dir ne '';
+    return "$root/share/cmake-3.31/Modules";
 }
 
 # ─── Lexer ──────────────────────────────────────────────────────────
@@ -1313,7 +1331,7 @@ $builtins{'add_executable'} = sub {
     }
     my @sources = grep {
         !/^(IMPORTED|ALIAS|GLOBAL|EXCLUDE_FROM_ALL|WIN32|MACOSX_BUNDLE)$/
-        && !/\.(h|hh|hpp|hxx|H)$/
+        && !_not_compiled($_)
     } @$args;
     $state->{targets}{$name} = _new_target($state, 'executable', \@sources);
 };
@@ -1352,7 +1370,7 @@ $builtins{'add_library'} = sub {
     }
     # Filter out header files (CMake source lists often include the header
     # via bison output; they're not compile targets)
-    my @sources = grep { !/\.(h|hh|hpp|hxx|H)$/ } @$args;
+    my @sources = grep { !_not_compiled($_) } @$args;
     my $t = _new_target($state, 'library', \@sources);
     $t->{libtype} = $libtype;
     $t->{imported} = $imported;
@@ -1502,6 +1520,14 @@ sub _propagate_interface {
     }
 }
 
+# Sources cmake lists but does not compile: headers, and files of no
+# compiled language on this platform (libuv: uv_win_longpath.manifest was
+# linked as a missing .o)
+sub _not_compiled {
+    my ($src) = @_;
+    return $src =~ /\.(?:h|hh|hpp|hxx|H|inl|ipp|tcc|manifest|rc|def|in|txt|md|cmake|json|xml)$/;
+}
+
 $builtins{'target_sources'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my $name = shift @$args;
@@ -1509,7 +1535,7 @@ $builtins{'target_sources'} = sub {
     my $curdir = $state->{current_source_dir};
     for my $a (@$args) {
         next if $a =~ /^(PUBLIC|PRIVATE|INTERFACE|FILE_SET|BASE_DIRS|TYPE|HEADERS|FILES)$/;
-        next if $a =~ /\.(h|hh|hpp|hxx|H)$/;  # headers aren't compile sources
+        next if _not_compiled($a);  # headers aren't compile sources
         my $src = $a =~ m{^/} ? $a : File::Spec->catfile($curdir, $a);
         push @{$t->{sources}}, $src;
     }
@@ -1867,6 +1893,34 @@ $builtins{'file'} = sub {
             $data = unpack('H*', $data) if $hex;
             $scope->{vars}{$out} = $data;
         }
+    } elsif ($op eq 'STRINGS') {
+        # file(STRINGS <file> <var> [REGEX re] [LIMIT_COUNT n]
+        # [LENGTH_MINIMUM n] [LENGTH_MAXIMUM n]): the file's lines as a list
+        # (libuv takes its version from configure.ac's AC_INIT line)
+        my ($path, $out, @opt) = @$args;
+        $path = File::Spec->catfile($state->{current_source_dir}, $path) unless $path =~ m{^/};
+        my ($re, $count, $min, $max);
+        while (@opt) {
+            my $k = shift @opt;
+            if    ($k eq 'REGEX')          { $re    = shift @opt; }
+            elsif ($k eq 'LIMIT_COUNT')    { $count = shift @opt; }
+            elsif ($k eq 'LENGTH_MINIMUM') { $min   = shift @opt; }
+            elsif ($k eq 'LENGTH_MAXIMUM') { $max   = shift @opt; }
+        }
+        my @lines;
+        if (open(my $fh, '<', $path)) {
+            while (my $l = <$fh>) {
+                $l =~ s/\r?\n\z//;
+                next if defined $min && length($l) < $min;
+                $l = substr($l, 0, $max) if defined $max;
+                next if defined $re && $l !~ /$re/;
+                $l =~ s/;/\\;/g;
+                push @lines, $l;
+                last if defined $count && @lines >= $count;
+            }
+            close $fh;
+        }
+        $scope->{vars}{$out} = join(';', @lines);
     } elsif ($op eq 'WRITE' || $op eq 'APPEND') {
         my $path = shift @$args;
         my $dir = $path;
@@ -2726,6 +2780,32 @@ $builtins{'check_cxx_source_compiles'} = sub {
     $scope->{vars}{$var} = _try_compile($source, 'CXX', $scope) ? 1 : '';
 };
 
+# check_type_size(TYPE VAR [BUILTIN_TYPES_ONLY] [LANGUAGE lang]): HAVE_VAR
+# and VAR = sizeof(TYPE), found as cmake does by compiling, not running
+# (zlib builds its example64 programs only when HAVE_OFF64_T)
+$builtins{'check_type_size'} = sub {
+    my ($state, $args, $cmd, $scope) = @_;
+    my ($type, $var, @opts) = @$args;
+    my $lang = 'C';
+    for my $i (0 .. $#opts) { $lang = $opts[$i + 1] // 'C' if $opts[$i] eq 'LANGUAGE' }
+    my $head = '';
+    unless (grep { $_ eq 'BUILTIN_TYPES_ONLY' } @opts) {
+        $head .= "#include <$_>\n" for qw(sys/types.h stdint.h stddef.h);
+    }
+    $head .= "#include <$_>\n" for grep { $_ ne '' } split /;/, _lookup('CMAKE_EXTRA_INCLUDE_FILES', $scope) // '';
+    my $size = '';
+    if (_try_compile("${head}int main(void) { return (int)sizeof($type); }\n", $lang, $scope)) {
+        for my $n (8, 4, 2, 1, 16, 3, 5, 6, 7, 9 .. 15, 32, 64) {
+            if (_try_compile("${head}char smak_check[(sizeof($type) == $n) ? 1 : -1];\n", $lang, $scope)) {
+                $size = $n;
+                last;
+            }
+        }
+    }
+    $scope->{vars}{"HAVE_$var"} = $size ne '' ? 1 : '';
+    $scope->{vars}{$var} = $size;
+};
+
 $builtins{'check_c_source_compiles'} = sub {
     my ($state, $args, $cmd, $scope) = @_;
     my ($source, $var) = @$args;
@@ -2744,7 +2824,11 @@ sub _try_compile {
         DIR => $tmpdir, SUFFIX => $ext, UNLINK => 1);
     print $fh $source;
     close $fh;
-    my $flags = $scope->{vars}{CMAKE_REQUIRED_FLAGS} // '';
+    my $flags = _lookup('CMAKE_REQUIRED_FLAGS', $scope) // '';
+    # check_* honor these too (zlib: -D_LARGEFILE64_SOURCE=1 for off64_t)
+    $flags .= ' ' . join(' ', grep { $_ ne '' }
+        split(/;/, _lookup('CMAKE_REQUIRED_DEFINITIONS', $scope) // ''),
+        map { "-I$_" } grep { $_ ne '' } split /;/, _lookup('CMAKE_REQUIRED_INCLUDES', $scope) // '');
     my $obj = "$path.o";
     my $rc = system("$cc $flags -c $path -o $obj >/dev/null 2>&1");
     unlink $obj;
@@ -4231,6 +4315,7 @@ sub _target_output_files {
     my $base = $props->{OUTPUT_NAME} // $name;
     my $libtype = $t->{libtype} // '';
     if (($t->{type} // '') eq 'library' && $libtype eq 'shared') {
+        $base = $props->{LIBRARY_OUTPUT_NAME} // $base;
         my $dev = "lib$base.so";
         my $ver = $props->{VERSION};
         my $sov = $props->{SOVERSION} // $ver;
@@ -4242,8 +4327,11 @@ sub _target_output_files {
         return { file => $real, soname => $soname, link_as => $dev, links => \@links };
     }
     if (($t->{type} // '') eq 'library') {
+        # zlib: ARCHIVE_OUTPUT_NAME z for the static zlibstatic -> libz.a
+        $base = $props->{ARCHIVE_OUTPUT_NAME} // $base;
         return { file => "lib$base.a", link_as => "lib$base.a", links => [] };
     }
+    $base = $props->{RUNTIME_OUTPUT_NAME} // $base;
     return { file => $base, link_as => $base, links => [] };
 }
 

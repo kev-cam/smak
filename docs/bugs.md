@@ -784,13 +784,13 @@ Found building Verilator out-of-tree (configure run from a separate build dir,
    dry-run capture).
 2. **missing-intermediate check ignored VPATH** — FIXED (resolve_vpath before
    deciding a dep is missing).
-3. **core target build still ignores VPATH (OPEN)** — smak's normal
-   existence/needs_rebuild checks test `-e "$dir/$target"` only. A prerequisite
-   that lives on the VPATH (e.g. `configure`, up-to-date in `$(srcdir)`) is seen
-   as absent and rebuilt — `config.status: configure` triggers `autoconf` in the
-   build dir → "no input file" → build aborts. Fix needs resolve_vpath threaded
-   through the target-existence + needs_rebuild path (and their timestamp reads),
-   not just the missing-intermediate check.
+3. **core target build ignored VPATH** — FIXED 2026-09-29. Under -j the
+   target-existence check and needs_rebuild tested `-e "$dir/$target"` only,
+   so an up-to-date `configure` in `$(srcdir)` was remade (autoconf in the
+   build dir, "no input file"). Both now look the target up through VPATH
+   (test_gnu_make_compat "up-to-date target found through VPATH"). Related,
+   same day: `VPATH = $(srcdir) ...` was stored with its variable references
+   unexpanded (iverilog), and a VPATH search result lost its leading ./.
 4. **man-page tasks fail (OPEN)** — `help2man`/`pod2man` for verilator.1 etc.
    fail (exit 127 / exit 2) under smak's recipe-exec env though they succeed
    under make. Non-fatal to verilator_bin but aborts the default `all` goal.

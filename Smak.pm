@@ -5722,8 +5722,10 @@ sub needs_rebuild {
     return 0 if $visited->{$target};
     $visited->{$target} = 1;
 
-    # If target doesn't exist, it needs to be built
-    return 1 unless -e $target;
+    # If target doesn't exist (here or through VPATH), it needs to be built
+    my $target_file = $target;
+    $target_file = resolve_vpath($target, Cwd::getcwd()) unless -e $target_file;
+    return 1 unless -e $target_file;
 
     # Check if target or any dependency is manually marked dirty
     if (exists $Smak::dirty_files{$target}) {
@@ -5732,7 +5734,7 @@ sub needs_rebuild {
     }
 
     # Get target's modification time
-    my $target_mtime = (stat($target))[9];
+    my $target_mtime = (stat($target_file))[9];
     return 1 unless defined $target_mtime;
 
     # Find target's dependencies and rule
@@ -13549,6 +13551,12 @@ sub run_job_master {
             my $needs_build = $is_phony;
             unless ($is_phony) {
                 my $target_path = $target =~ m{^/} ? $target : "$dir/$target";
+                unless (-e $target_path) {
+                    # A target found through VPATH exists (out-of-tree build:
+                    # `configure` in $(srcdir) must not be regenerated)
+                    my $vp = resolve_vpath($target, $dir);
+                    $target_path = $vp =~ m{^/} ? $vp : "$dir/$vp" if $vp ne $target;
+                }
                 if (-e $target_path) {
                     # Target exists - check if it needs rebuilding
                     $needs_build = needs_rebuild($target);

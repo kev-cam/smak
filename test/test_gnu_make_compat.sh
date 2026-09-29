@@ -90,6 +90,12 @@ rm -f dotslash/sub/x.o
 mkdir -p vpv/libmisc; echo x > vpv/libmisc/x.cc
 printf 'srcdir = .\nVPATH = $(srcdir) $(srcdir)/libmisc\nall: x.o\n%%.o: %%.cc\n\t@echo "cc $<"\n' > vpv/Makefile
 check "VPATH with variables keeps ./" vpv
+# out-of-tree build (Verilator): a target that exists only through VPATH and
+# is up to date is not remade (-j regenerated configure in the build dir)
+mkdir -p oot/src oot/b; echo in > oot/src/configure.ac; touch -d '1 minute ago' oot/src/configure.ac
+echo c > oot/src/configure
+printf 'VPATH = ../src\nall: status\nstatus: configure\n\t@echo "status from $<"; rm -f $@\nconfigure: configure.ac\n\t@echo REGEN-CONFIGURE; false\n' > oot/b/Makefile
+check "up-to-date target found through VPATH" oot/b
 
 mkdir comments
 cat > comments/Makefile <<'EOF2'

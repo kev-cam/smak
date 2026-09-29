@@ -6503,9 +6503,14 @@ sub build_target {
                     my $cwd = getcwd();
                     my $resolved_source = resolve_vpath($source, $cwd);
 
-                    if (-f $resolved_source) {
+                    # The source may also be made by another suffix rule
+                    # (tmux: cmd-parse.c from cmd-parse.y by .y.c; without
+                    # this the built-in %.o: %.c compiled it without the
+                    # makefile's .c.o flags)
+                    if (-f $resolved_source || can_build_from_suffix_rule($source, $makefile)) {
                         # Found matching suffix rule and source file
                         $stem = $base;
+                        $suffix_source = $source;
                         @deps = ($source);  # Store unresolved path, will be resolved later
                         $rule = $suffix_rule{$suffix_key};
                         my $suffix_deps_ref = $suffix_deps{$suffix_key};

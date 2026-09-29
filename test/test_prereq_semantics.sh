@@ -231,6 +231,20 @@ for j in "" "-j2"; do
     fi
 done
 
+# tmux: cmd-parse.o from the makefile's .c.o, whose source cmd-parse.c is
+# made from cmd-parse.y by .y.c (the built-in %.o: %.c was used instead)
+mkdir sfx
+# (.SECONDARY: make would delete the intermediate p.c, which smak does not
+# do yet - see docs/bugs.md)
+printf '.SUFFIXES: .c .o .y\n.SECONDARY:\nall: p.o\n.y.c:\n\t@echo "yacc $< -> $@"; cp $< $@\n.c.o:\n\t@echo "cc-rule $< -> $@"; cp $< $@\n' > sfx/Makefile
+echo y > sfx/p.y
+want=$(cd sfx && make -s 2>&1); rm -f sfx/p.c sfx/p.o
+for j in "" "-j2"; do
+    got=$(cd sfx && timeout 60 $SMAK -s $j 2>&1); rm -f sfx/p.c sfx/p.o
+    if [ "$got" == "$want" ]; then echo "PASS: suffix rule whose source another suffix rule makes ${j:-seq}"
+    else echo "FAIL: suffix rule whose source another suffix rule makes ${j:-seq}: make [$want] smak [$got]"; fail=1; fi
+done
+
 # redis: utils/generate-fmtargs.py checked out a fraction of a second after
 # src/fmtargs.h; make compares sub-second times and regenerates the header
 mkdir ns

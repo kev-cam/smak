@@ -231,4 +231,31 @@ for j in "" "-j2"; do
     fi
 done
 
+# zstd lib/Makefile: `.PHONY: libx.a` whose recipe re-runs make with
+# BUILD_DIR set. The relayed job's target file exists, but being phony it
+# must still run, or a touched source is never recompiled under -j.
+mkdir -p ph/lib
+printf 'all:\n\t@$(MAKE) --no-print-directory -C lib\n' > ph/Makefile
+cat > ph/lib/Makefile <<'EOF'
+.PHONY: all libx.a
+all: libx.a
+ifndef BUILD_DIR
+libx.a:
+	+@$(MAKE) --no-print-directory $@ BUILD_DIR=obj
+else
+libx.a: $(BUILD_DIR)/a.o
+	@echo AR; cp $< $@
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(@D); echo "CC $<"; cp $< $@
+endif
+EOF
+echo a > ph/lib/a.c
+for j in "" "-j2"; do
+    (cd ph && timeout 120 $SMAK $j >/dev/null 2>&1)
+    touch -d '1 minute ago' ph/lib/obj/a.o ph/lib/libx.a; touch ph/lib/a.c
+    got=$(cd ph && timeout 120 $SMAK $j 2>&1 | tr '\n' ' ')
+    if [ "$got" == "CC a.c AR " ]; then echo "PASS: phony sub-make target that exists as a file ${j:-seq}"
+    else echo "FAIL: phony sub-make target that exists as a file ${j:-seq}: [$got]"; fail=1; fi
+done
+
 exit $fail

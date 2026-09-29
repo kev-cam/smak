@@ -1613,6 +1613,15 @@ sub tee_print {
     print $log_fh $msg if $report_mode && $log_fh;
 }
 
+# Declared in .PHONY (in the makefile being read)
+sub is_declared_phony {
+    my ($target) = @_;
+    for my $key (grep { /\t\.PHONY$/ } keys %pseudo_deps) {
+        return 1 if grep { $_ eq $target } map { split ' ', expand_dep_text($_) } @{$pseudo_deps{$key} || []};
+    }
+    return 0;
+}
+
 # .SILENT: with no prerequisites silences every recipe, with prerequisites
 # those targets' recipes (lz4: `$(V)$(VERBOSE).SILENT:`).
 sub is_silent_target {
@@ -1754,6 +1763,7 @@ sub relay_to_job_server {
             @deps = $flatten->(@deps);
             @deps = grep { -e $_ || !is_empty_explicit_target($_) } @deps;
             my $silent_target = is_silent_target($target);  # .SILENT: here
+            my $phony_target = is_declared_phony($target);
 
             # Re-express target/deps/siblings relative to exec_dir. Capture keys
             # are relative to THIS child's cwd, but the job-server forms a job's
@@ -1792,6 +1802,10 @@ sub relay_to_job_server {
             for my $sib (@other_siblings) {
                 print $sock "$sib\n";
             }
+            # .PHONY in this makefile: always run (zstd's libzstd.a re-runs
+            # `$(MAKE) $@ BUILD_DIR=..`; judged by its file it was skipped
+            # and a touched source was never recompiled)
+            print $sock "PHONY\n" if $phony_target;
             print $sock "COMMAND_LINES " . scalar(@cmd_lines) . "\n";
             for my $cmd_line (@cmd_lines) {
                 print $sock "$cmd_line\n";
@@ -17664,6 +17678,12 @@ sub run_job_master {
                     # Read command lines (may follow SIBLINGS or DEPS if no SIBLINGS)
                     my $cmd_header = defined $sib_header && $sib_header =~ /^SIBLINGS/ ? <$socket> : $sib_header;
                     chomp $cmd_header if defined $cmd_header;
+                    my $child_phony = 0;
+                    if (defined $cmd_header && $cmd_header eq 'PHONY') {
+                        $child_phony = 1;
+                        $cmd_header = <$socket>;
+                        chomp $cmd_header if defined $cmd_header;
+                    }
                     my $command = '';
                     if (defined $cmd_header && $cmd_header =~ /^COMMAND_LINES (\d+)$/) {
                         my $count = $1;
@@ -17758,6 +17778,7 @@ sub run_job_master {
                             siblings => \@siblings,
                             layer => 0,
                             from_child => 1,
+                            phony => $child_phony,
                         };
                     }
                 } elsif ($line =~ /^CHILD_DONE\s*(\d+)?$/) {
@@ -17857,7 +17878,10 @@ sub run_job_master {
                         # Targets whose command is a recursive make always need rebuild —
                         # they are entry points (like CMake's .dir/all stamp files) that
                         # trigger sub-builds.  Skipping them loses the entire sub-build.
-                        if (is_recursive_make($job->{command})) {
+                        # .PHONY targets (zstd: `libzstd.a: ; +$(MAKE) $@ BUILD_DIR=..`)
+                        # always run, even when a file of that name exists.
+                        if ($job->{phony} || is_recursive_make($job->{command})
+                            || runs_sub_make($job->{command})) {
                             $needs_build{$job->{target}} = 1;
                             next;
                         }

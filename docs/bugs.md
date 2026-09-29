@@ -315,6 +315,46 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
     again by their (sub-second) times, as make does.
   Tests: `test/test_prereq_semantics.sh` (second run).
 
+### redis: static pattern rules, `$(shell)` side effects, shell handling
+- [x] **FIXED (2026-09-29):** found building redis (sequential now builds,
+  -j in progress):
+  - Static pattern rules (`$(OBJS): src/%.o: src/%.c`, and
+    `$(OBJS): %.o:` carrying the recipe, jemalloc) were read as plain
+    rules with literal `%` prerequisites. They now become one explicit rule
+    per target, with `$*` set to the stem.
+  - `$(@D)`/`$(@F)` (and `$(<D)` ...), `$(@:%.o=%.d)`, `$+` (with
+    duplicates; `$^` now drops them) were unsupported.
+  - A substitution reference did not expand references inside its pattern:
+    `$(C_SRCS:$(srcroot)%.c=$(objroot)%.sym)` returned the .c names, and
+    the `%.sym` recipe then wrote over jemalloc's source files.
+  - `release_hdr := $(shell ./mkreleasehdr.sh)` creates release.h while
+    parsing; a parse loaded from the cache skipped it. Parse-time
+    `$(shell)` commands are now recorded and re-run when the cache is
+    loaded (a different output means a stale cache). `$(shell)` output
+    newlines become spaces.
+  - `<tab>vpath %.c ../modules/vector-sets` inside a conditional was ignored.
+  - `# ...` inside `$(...)` is literal, not a comment.
+  - Commands were run with Perl's one-string exec, which for "cmd 2>&1"
+    handles the redirect itself and execs the words directly unless it sees
+    a metacharacter it knows: `$(AR) $@ $(OBJS)	# DLL needs ...` passed
+    "#", "DLL", ... to ar, and `PROG_SUFFIX='' scripts/build.sh` exec'd
+    "PROG_SUFFIX=". /bin/sh is now called explicitly; the worker's direct
+    exec keeps empty quoted arguments. A trailing comment no longer hides a
+    failing command's status (the marker was commented out).
+  - Echoed commands showed smak's internal `$$` placeholder (` DOLLAR `):
+    tmux's automake compile lines all "differed from make".
+  - `cd dir && $(MAKE)` lines were echoed twice.
+  - The worker's `rm -rf` builtin lost the `r` (`$1` reset by a match).
+  - -j: a relay capturing its targets also expanded recursive makes, so
+    `module_tests: redis-server ; $(MAKE) -C ../tests/modules` built the
+    modules at once (and again later), racing `make clean` there.
+  - -j: `$(MAKE) -C src distclean` run in-process sent src's targets on the
+    parent's job-server connection; that job-master looked them up in its
+    own makefile and ran nothing. The in-process child now relays like a
+    sub-smak (`Smak::relay_to_job_server`, shared with smak.pl).
+  Tests: `test/test_make_functions.sh`, `test/test_prereq_semantics.sh`,
+  `test/test_gnu_make_compat.sh`.
+
 ### VPATH-resolved `$<` gets a `./` prefix, so binaries differ from make's
 - [ ] **Symptom (smak-buildtest, iverilog):** smak compiles
   `-c ./../libmisc/LineInfo.cc` where make uses `-c ../libmisc/LineInfo.cc`.

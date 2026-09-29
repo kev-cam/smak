@@ -68,6 +68,8 @@ sub parse_simple_command {
     return () if $cmd =~ /\[\[/;                # Bash conditionals
     return () if $cmd =~ /[&]{2}|[|]{2}/;       # && or ||
     return () if $cmd =~ /^\s*\(/;              # Subshell
+    return () if $cmd =~ /^\s*[A-Za-z_]\w*=/;   # VAR=value cmd (redis: PROG_SUFFIX='' scripts/build.sh)
+    return () if $cmd =~ /(?:^|\s)#/;           # shell comment (redis lua: `$(AR) $@ ...	# DLL ...`)
 
     # Shell keywords that require shell interpretation
     # These are control flow keywords that can't be exec'd directly
@@ -80,6 +82,7 @@ sub parse_simple_command {
     # Parse into words, handling quotes
     my @words;
     my $current = '';
+    my $quoted = 0;   # the word had quotes: '' is an (empty) argument
     my $in_single = 0;
     my $in_double = 0;
     my $escaped = 0;
@@ -92,16 +95,19 @@ sub parse_simple_command {
             $escaped = 1;
         } elsif ($char eq "'" && !$in_double) {
             $in_single = !$in_single;
+            $quoted = 1;
         } elsif ($char eq '"' && !$in_single) {
             $in_double = !$in_double;
+            $quoted = 1;
         } elsif ($char =~ /\s/ && !$in_single && !$in_double) {
-            push @words, $current if $current ne '';
+            push @words, $current if $current ne '' || $quoted;
             $current = '';
+            $quoted = 0;
         } else {
             $current .= $char;
         }
     }
-    push @words, $current if $current ne '';
+    push @words, $current if $current ne '' || $quoted;
 
     # If quotes weren't balanced, fall back to shell
     return () if $in_single || $in_double;
@@ -152,8 +158,11 @@ sub execute_command_direct {
         close($write_fh);
         return ($pid, $read_fh, 1);  # 1 = is_direct
     } else {
-        # Need shell - use open with shell
-        my $pid = open(my $cmd_fh, '-|', "$cmd 2>&1");
+        # Need shell. Run /bin/sh explicitly: given "cmd 2>&1", Perl handles
+        # the 2>&1 itself and, seeing no metacharacter it knows (# is not
+        # one), execs the words directly (redis lua: `ar rc x.a *.o	# DLL`
+        # passed "#", "DLL", ... to ar).
+        my $pid = open(my $cmd_fh, '-|', '/bin/sh', '-c', "{ $cmd\n} 2>&1");
         return ($pid, $cmd_fh, 0) if $pid;  # 0 = is_shell
         return (undef, undef, 0);
     }
@@ -196,8 +205,9 @@ sub execute_builtin {
         my @files;
         for my $a (@args) {
             if ($a =~ /^-([rRf]+)$/) {
-                $force = 1 if $1 =~ /f/;
-                $recursive = 1 if $1 =~ /[rR]/;
+                my $flags = $1;   # (a successful match below resets $1)
+                $force = 1 if $flags =~ /f/;
+                $recursive = 1 if $flags =~ /[rR]/;
             } elsif ($a =~ /^-/) {
                 return undef;
             } elsif ($a =~ /[*?\[]/) {
@@ -491,7 +501,7 @@ sub run_worker {
                             my $shell_cmd = $builtin_cmd;
                             $shell_cmd =~ s/^[@+-]+//;
                             $shell_cmd =~ s/^\s+//;
-                            my $pid = open(my $cmd_fh, '-|', "$shell_cmd 2>&1");
+                            my $pid = open(my $cmd_fh, '-|', '/bin/sh', '-c', "{ $shell_cmd\n} 2>&1");
                             if ($pid) {
                                 while (my $out_line = <$cmd_fh>) {
                                     chomp $out_line;

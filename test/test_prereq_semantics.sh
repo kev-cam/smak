@@ -176,12 +176,47 @@ got=$(cd symlinks && timeout 120 $SMAK 2>&1)
 if [ "$got" == "$want" ]; then echo "PASS: second run (phony symlink chain, file named all)"
 else echo "FAIL: second run: make [$want] smak [$got]"; fail=1; fi
 
+# redis src/: `ifneq (...)` <tab>vpath %.c ../modules/vector-sets
+mkdir -p ivp/src ivp/mod
+echo 'int m;' > ivp/mod/m.c
+printf 'X = 1\nifneq ($(X),)\n\tvpath %%.c ../mod\nendif\nall: out/m.o\nout/m.o: m.c\n\t@mkdir -p out; echo "cc $<"; touch $@\n' > ivp/src/Makefile
+check "indented vpath in a conditional" ivp/src
+
+# redis: under -j, `$(MAKE) -C src distclean` whose recipe runs
+# `(cd ../mods && $(MAKE) clean)` was built in-process and its targets sent to
+# the job-master, which looked them up in the top makefile: nothing ran
+mkdir -p nclean/src nclean/mods
+printf 'all:\n\t@$(MAKE) --no-print-directory -C src distclean\n' > nclean/Makefile
+printf 'distclean:\n\t@(cd ../mods && $(MAKE) --no-print-directory clean)\n' > nclean/src/Makefile
+printf 'all: a.so\na.so:\n\t@touch $@\nclean:\n\t@echo CLEAN; rm -rf *.so out\n' > nclean/mods/Makefile
+for j in "" "-j4"; do
+    touch nclean/mods/a.so; mkdir -p nclean/mods/out
+    got=$(cd nclean && timeout 120 $SMAK $j 2>&1)
+    if [ "$got" == "CLEAN" ] && [ ! -e nclean/mods/a.so ] && [ ! -e nclean/mods/out ]; then
+        echo "PASS: nested sub-make goal ${j:-seq}"
+    else echo "FAIL: nested sub-make goal ${j:-seq}: [$got]"; ls nclean/mods; fail=1; fi
+done
+
+# redis: `module_tests: redis-server ; $(MAKE) -C ../tests/modules` in a
+# relayed sub-make: the relay also expanded the recursive make while
+# capturing, so the modules were built at once (before redis-server), twice
+mkdir -p mt/src mt/mods
+printf 'all:\n\t@$(MAKE) --no-print-directory -C src all\n' > mt/Makefile
+printf 'all: prog mt\nprog:\n\t@sleep 1; echo PROG; touch prog\nmt: prog\n\t@$(MAKE) --no-print-directory -C ../mods\n' > mt/src/Makefile
+printf 'all:\n\t@echo MODS\n' > mt/mods/Makefile
+for j in "" "-j4"; do
+    rm -f mt/src/prog
+    got=$(cd mt && timeout 120 $SMAK $j 2>&1 | tr '\n' ' ')
+    if [ "$got" == "PROG MODS " ]; then echo "PASS: recursive make after its prerequisite ${j:-seq}"
+    else echo "FAIL: recursive make after its prerequisite ${j:-seq}: [$got]"; fail=1; fi
+done
+
 mkdir silent
 printf 'all: a\na:\n\tmkdir -p out\n\techo quiet\n.SILENT:\n' > silent/Makefile
 check ".SILENT" silent
 
 mkdir echo
-printf 'all: a b\na:\n\tmkdir -p out\n\t@echo x; echo y\n\techo "p;q"; touch out/f; echo z\n\t-@rm -f nothere\n\t-rm -f out/g\nb:\n\techo b\n' > echo/Makefile
+printf 'all: a b\na:\n\tmkdir -p out\n\ttest -n "$$HOME"\n\t@echo x; echo y\n\techo "p;q"; touch out/f; echo z\n\t-@rm -f nothere\n\t-rm -f out/g\nb:\n\techo b\n' > echo/Makefile
 check "recipe echo" echo
 
 mkdir -p sub/s

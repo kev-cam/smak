@@ -108,4 +108,36 @@ touch newer/a.o newer/b.o newer/lib.a; touch -d '1 minute ago' newer/a.o newer/l
 want=$(cd newer && make -s 2>&1); got=$(cd newer && $SMAK -s 2>&1)
 if [ "$got" == "$want" ]; then echo "PASS: \$? seq"; else echo "FAIL: \$? seq: make [$want] smak [$got]"; fail=1; fi
 
+# redis: a recipe line ending in a shell comment (`$(AR) $@ $(OBJS)	# DLL
+# needs ...`: Perl's own exec passed "#" to ar), `VAR='' cmd` (exec'd
+# "VAR=" as the program), '' arguments, # inside $(shell ...), and a
+# comment must not hide a failing command's status
+mkdir shc
+cat > shc/Makefile <<'EOF'
+X := $(shell echo a # b)
+all: one two
+one:
+	@echo "one [$(X)]"	# trailing comment
+two:
+	@SUFFIX='' sh -c 'echo "two [$$SUFFIX]"'
+	@printf '%s|' a '' b; echo
+EOF
+check "shell comments, VAR=value prefix, empty arguments" shc
+mkdir shfail
+printf 'all:\n\t@false # fails\n\t@echo not-reached\n' > shfail/Makefile
+for j in "" "-j2"; do
+    got=$(cd shfail && $SMAK $j 2>&1); rc=$?
+    if [ $rc -ne 0 ] && ! grep -q not-reached <<<"$got"; then echo "PASS: failing command with a comment ${j:-seq}"
+    else echo "FAIL: failing command with a comment ${j:-seq} (rc=$rc)"; fail=1; fi
+done
+
+# redis: `ar rcs $@ $+` ($+ keeps duplicates, $^ drops them), and a
+# `cd sub && $(MAKE) ...` line was echoed twice
+mkdir -p plus/sub
+printf 'all:\n\tcd sub && $(MAKE) --no-print-directory X=1\n' > plus/Makefile
+printf 'all: a b a\n\t@echo "plus=[$+] hat=[$^]"\na b:\n\t@:\n' > plus/sub/Makefile
+want=$(cd plus && make --no-print-directory 2>&1 | sed 's/make/MAKE/')
+got=$(cd plus && $SMAK 2>&1 | sed "s#$SMAK#MAKE#")
+if [ "$got" == "$want" ]; then echo "PASS: \$+ \$^ and cd-sub-make echo"; else echo "FAIL: \$+ \$^: make [$want] smak [$got]"; fail=1; fi
+
 exit $fail

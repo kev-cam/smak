@@ -21,9 +21,9 @@ fail=0
 check() {  # name dir [args...]: smak output must equal make's
     local name=$1 dir=$2; shift 2
     local want got j
-    want=$(cd "$dir" && make -s --no-print-directory "$@" 2>&1)
+    want=$(cd "$dir" && rm -rf out && make -s --no-print-directory "$@" 2>&1)
     for j in "" "-j2"; do
-        got=$(cd "$dir" && timeout 120 $SMAK -s $j "$@" 2>&1)
+        got=$(cd "$dir" && rm -rf out && timeout 120 $SMAK -s $j "$@" 2>&1)
         if [ -n "$j" ]; then got=$(sort <<<"$got"); cmp=$(sort <<<"$want"); else cmp=$want; fi
         if [ "$got" == "$cmp" ]; then
             echo "PASS: $name ${j:-seq}"
@@ -64,7 +64,10 @@ cat > fe/Makefile <<'EOF'
 DIRS = d1 d2
 FILES := $(notdir $(foreach d,$(DIRS),$(wildcard $(d)/*.c)))
 # zstd: $(addprefix $(BUILD_DIR)/, $(OBJS)) - a leading blank is not a word
-W := [$(addprefix p/, a b)] [$(addsuffix .o, a b)] [$(words  a b )] [$(sort  b a)]
+# jemalloc: references inside a substitution reference's pattern
+R =
+V := $(DIRS:$(R)d%=$(R)x%.sym)
+W := [$(V)] [$(addprefix p/, a b)] [$(addsuffix .o, a b)] [$(words  a b )] [$(sort  b a)]
 all: ; @echo "[$(FILES)] [$(foreach d,a b,<$(d)>)] [$(ARFLAGS)] $(W)"
 EOF
 mkdir fe/d1 fe/d2; touch fe/d1/x.c fe/d1/y.c fe/d2/z.c
@@ -112,5 +115,36 @@ all:
 endif
 EOF
 check "ifndef with a command-line variable" cvdef
+
+# redis: `release_hdr := $(shell sh -c './mkreleasehdr.sh')` writes
+# release.h while the makefile is read; a parse loaded from smak's cache
+# must still run it (check removes out/ before each run; the -j2 run loads
+# the cache). $(shell) output newlines become spaces.
+mkdir shside
+cat > shside/Makefile <<'EOF'
+X := $(shell mkdir -p out; echo gen > out/gen.h; echo hi)
+L := $(shell printf "a\nb\n")
+all: ; @echo "X=$(X) L=[$(L)] $$(cat out/gen.h)"
+EOF
+check "\$(shell) side effects with a cached parse" shside
+
+# redis deps/jemalloc: static pattern rules (targets: tpattern: ppattern,
+# and `$(OBJS): %.o:` carrying the recipe), $(@D) $(@F) $(@:%.o=%.d)
+mkdir -p static/src
+for f in a b; do echo "int $f;" > static/src/$f.c; done
+cat > static/Makefile <<'EOF'
+OBJS := out/a.o out/b.o
+SYMS := $(OBJS:.o=.sym)
+all: $(SYMS)
+$(OBJS): out/%.o: src/%.c
+$(OBJS): CPPFLAGS += -DX
+$(SYMS): out/%.sym: out/%.o
+$(OBJS): %.o:
+	@mkdir -p $(@D)
+	@echo "cc $< -> $@ stem=$* [$(CPPFLAGS)] $(@F) $(@:%.o=%.d)"; touch $@
+$(SYMS): %.sym: ; @echo "sym $< -> $@ stem=$*"; touch $@
+EOF
+check "static pattern rules, \$(@D) \$(@F) \$(@:..)" static
+rm -rf static/out
 
 exit $fail

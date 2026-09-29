@@ -13998,6 +13998,18 @@ sub run_job_master {
         # Also fail composites whose dependencies have failed
         my $pc_count = scalar(keys %pending_composite);
         print STDERR "CHECK-IDLE[$context]: pending_composite has $pc_count entries\n" if $ENV{SMAK_IDLE_DEBUG};
+        # An existing file still queued or running for a rebuild is not done
+        # (server mode: `prog` from the previous build satisfied `all` while
+        # its relink was still queued, so the client reported success early)
+        my %unfinished;
+        if (%pending_composite) {
+            for my $t ((map { $_->{target} } @job_queue), (map { $_->{target} } values %running_jobs)) {
+                next unless defined $t;
+                $unfinished{$t} = 1;
+                (my $base = $t) =~ s{.*/}{};
+                $unfinished{$base} = 1;
+            }
+        }
         for my $comp_target (keys %pending_composite) {
             my $comp = $pending_composite{$comp_target};
             my @remaining_deps;
@@ -14011,7 +14023,7 @@ sub run_job_master {
                     print STDERR "IDLE-DEP-FAILED: '$dep' failed\n" if $ENV{SMAK_IDLE_DEBUG};
                 }
                 # Check if dep file now exists (job-master runs in project root)
-                elsif (-e $dep || exists $completed_targets{$dep}) {
+                elsif (exists $completed_targets{$dep} || (-e $dep && !$unfinished{$dep})) {
                     print STDERR "IDLE-DEP-CLEAR: '$dep' satisfied\n" if $ENV{SMAK_IDLE_DEBUG};
                 } else {
                     push @remaining_deps, $dep;

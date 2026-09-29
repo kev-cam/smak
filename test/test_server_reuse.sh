@@ -8,6 +8,9 @@
 #   - output of a reused server went to the terminal of the session that
 #     started it instead of the reconnecting client
 #   - smak-attach died when TERM is unset
+#   - an attached rebuild reported success once a.o was compiled: `all`
+#     counted the existing prog as done while its relink was still queued
+#     (htop server mode: Action.o rebuilt, nothing relinked)
 set -u
 SMAK=${SMAK:-$(cd "$(dirname "$0")/.." && pwd)/smak}
 ATTACH=$(dirname "$SMAK")/smak-attach
@@ -37,6 +40,7 @@ check "cli build + detach leaves the server running" '[ -n "$pid" ] && kill -0 $
 touch -d '1 minute ago' a.o b.o prog; touch a.c
 out=$(printf 'build\ndetach\n' | TERM= timeout 60 "$ATTACH" -pid "$pid" 2>&1)
 check "smak-attach bare build builds the default goal" 'grep -q "Build succeeded" <<<"$out" && [ a.o -nt a.c ]'
+check "the attached build relinks before it reports success" 'grep -A99 "linked prog" <<<"$out" | grep -q "Build succeeded" && [ prog -nt a.c ]'
 
 touch -d '1 minute ago' a.o b.o prog; touch b.c
 out=$(timeout 60 $SMAK -j2 2>&1)

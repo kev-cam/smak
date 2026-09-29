@@ -5700,12 +5700,12 @@ sub newer_prereqs {
     my ($target, $deps, $dir, $include_pending) = @_;
     $dir //= '.';
     my $path = sub { my $p = shift; $p =~ m{^/} ? $p : "$dir/$p" };
-    my @t = stat($path->($target));
+    my @t = Time::HiRes::stat($path->($target));
     return grep { !/dirstamp$/ } @$deps unless @t;
     my @out;
     for my $d (@$deps) {
         next if $d =~ /dirstamp$/;
-        my @st = stat($path->(resolve_vpath($d, $dir)));
+        my @st = Time::HiRes::stat($path->(resolve_vpath($d, $dir)));
         if (!@st || $st[9] > $t[9]
             || ($include_pending && exists $in_progress{$d} && $in_progress{$d} ne 'done')) {
             push @out, $d;
@@ -5734,7 +5734,7 @@ sub needs_rebuild {
     }
 
     # Get target's modification time
-    my $target_mtime = (stat($target_file))[9];
+    my $target_mtime = (Time::HiRes::stat($target_file))[9];
     return 1 unless defined $target_mtime;
 
     # Find target's dependencies and rule
@@ -5832,7 +5832,7 @@ sub needs_rebuild {
         }
 
         # Compare modification times
-        my $dep_mtime = (stat($dep))[9];
+        my $dep_mtime = (Time::HiRes::stat($dep))[9];
         return 1 if $dep_mtime > $target_mtime;
     }
 
@@ -9905,11 +9905,11 @@ sub cmd_btree {
         }
         # Check if file exists and is up-to-date
         if (-e $tgt) {
-            my $tgt_mtime = (stat($tgt))[9];
+            my $tgt_mtime = (Time::HiRes::stat($tgt))[9];
             my $deps = $all_targets{$tgt} || [];
             for my $dep (@$deps) {
                 if (-e $dep) {
-                    my $dep_mtime = (stat($dep))[9];
+                    my $dep_mtime = (Time::HiRes::stat($dep))[9];
                     if ($dep_mtime > $tgt_mtime) {
                         return 'stale';
                     }
@@ -17901,11 +17901,11 @@ sub run_job_master {
                             $needs_build{$job->{target}} = 1;  # Doesn't exist → needs build
                             next;
                         }
-                        my $target_mtime = (stat($target_path))[9];
+                        my $target_mtime = (Time::HiRes::stat($target_path))[9];
                         for my $dep (@{$job->{deps}}) {
                             my $dep_path = $dep =~ m{^/} ? $dep : "$job->{exec_dir}/$dep";
                             next unless -e $dep_path;
-                            my $dep_mtime = (stat($dep_path))[9];
+                            my $dep_mtime = (Time::HiRes::stat($dep_path))[9];
                             if ($dep_mtime > $target_mtime) {
                                 $needs_build{$job->{target}} = 1;
                                 last;

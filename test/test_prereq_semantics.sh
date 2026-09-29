@@ -231,6 +231,13 @@ for j in "" "-j2"; do
     fi
 done
 
+# redis: utils/generate-fmtargs.py checked out a fraction of a second after
+# src/fmtargs.h; make compares sub-second times and regenerates the header
+mkdir ns
+printf 'all: gen.h\ngen.h: gen.py\n\t@echo REGEN\n' > ns/Makefile
+touch -d '2026-01-01 01:00:00.100' ns/gen.h; touch -d '2026-01-01 01:00:00.900' ns/gen.py
+check "sub-second timestamps" ns
+
 # zstd lib/Makefile: `.PHONY: libx.a` whose recipe re-runs make with
 # BUILD_DIR set. The relayed job's target file exists, but being phony it
 # must still run, or a touched source is never recompiled under -j.

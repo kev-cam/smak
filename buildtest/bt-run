@@ -525,6 +525,10 @@ sub prepare {
                 my $t2 = mark();
                 run("make $makeargs $target", $bdir, 'reference');
                 $p{make_noise} = [changed_since($t2)];
+                # Asked here, not in each mode's fresh tree: reading the
+                # makefile runs its $(shell ...) (redis writes release.h),
+                # which must not happen before a mode's mark.
+                $p{default_goal} = default_goal();
                 # Products make itself does not reproduce (zlib's infcover is
                 # built with -coverage, which embeds a random stamp) cannot
                 # be compared: build once more from the configured tree.
@@ -605,7 +609,7 @@ sub run_mode {
     }
     my $log = "smak-$mode";
     # CLI sessions exit 0 whatever happens, so judge them by their output.
-    my $goal = $target || default_goal();
+    my $goal = $target || $result{prepare}{default_goal} || default_goal();
     my $cli = sub {
         my ($cmd, $input) = @_;
         my ($rc, $secs) = run($cmd, $bdir, $log, stdin => $input);

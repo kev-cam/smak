@@ -23,7 +23,7 @@ check() {  # name dir [args...]: smak output must equal make's
     local want got j
     want=$(cd "$dir" && make -s --no-print-directory "$@" 2>&1)
     for j in "" "-j2"; do
-        got=$(cd "$dir" && $SMAK -s $j "$@" 2>&1)
+        got=$(cd "$dir" && timeout 120 $SMAK -s $j "$@" 2>&1)
         if [ -n "$j" ]; then got=$(sort <<<"$got"); cmp=$(sort <<<"$want"); else cmp=$want; fi
         if [ "$got" == "$cmp" ]; then
             echo "PASS: $name ${j:-seq}"
@@ -63,7 +63,9 @@ mkdir fe
 cat > fe/Makefile <<'EOF'
 DIRS = d1 d2
 FILES := $(notdir $(foreach d,$(DIRS),$(wildcard $(d)/*.c)))
-all: ; @echo "[$(FILES)] [$(foreach d,a b,<$(d)>)] [$(ARFLAGS)]"
+# zstd: $(addprefix $(BUILD_DIR)/, $(OBJS)) - a leading blank is not a word
+W := [$(addprefix p/, a b)] [$(addsuffix .o, a b)] [$(words  a b )] [$(sort  b a)]
+all: ; @echo "[$(FILES)] [$(foreach d,a b,<$(d)>)] [$(ARFLAGS)] $(W)"
 EOF
 mkdir fe/d1 fe/d2; touch fe/d1/x.c fe/d1/y.c fe/d2/z.c
 check "foreach join, ARFLAGS" fe
@@ -75,5 +77,40 @@ all:
 	@echo "$$(echo sub) $${HOME:+home} [$(TABVAR)]"
 EOF
 check "\$\$(cmd) and tab assignment" dollar
+
+# zstd: `$(shell cc -Wa,--noexecstack ... 2>$(VOID))` was cut at the comma,
+# and conditions in inactive branches ran their $(shell) (md5 on Linux)
+mkdir cond
+cat > cond/Makefile <<'EOF'
+VOID = /dev/null
+ifeq (a,b)
+  ifeq ($(shell echo INACTIVE >&2; echo 0), 0)
+    X = bad
+  endif
+endif
+ifeq ($(shell echo a,b 2>$(VOID)),a,b)
+W = shell-comma
+else ifeq ($(shell echo ELSE-IF >&2; echo 1),1)
+W = elseif
+endif
+S := $(subst a,b,a,a) $(filter a,a b,c) $(word 2,x y,z)
+all: ; @echo "W=$(W) X=$(X) S=$(S)"
+EOF
+check "commas in the last argument, inactive branches" cond
+
+# zstd re-runs `$(MAKE) $@ BUILD_DIR=obj/..` under `ifndef BUILD_DIR`:
+# ifndef must see command-line variables (else endless recursion), and a
+# same-directory sub-make with variables must re-read the makefile
+mkdir cvdef
+cat > cvdef/Makefile <<'EOF'
+ifndef BUILD_DIR
+all:
+	@echo "no BUILD_DIR, recursing"; $(MAKE) --no-print-directory all BUILD_DIR=obj CF="a b"
+else
+all:
+	@echo "BUILD_DIR=$(BUILD_DIR) CF=$(CF)"
+endif
+EOF
+check "ifndef with a command-line variable" cvdef
 
 exit $fail

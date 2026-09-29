@@ -21,9 +21,10 @@ fail=0
 check() {  # name dir [args...]: smak output must equal make's (after cleaning)
     local name=$1 dir=$2; shift 2
     local want got j
-    want=$(cd "$dir" && rm -rf out && make --no-print-directory "$@" 2>&1 | grep -v '^make')
+    clean() { find . -name out -prune -exec rm -rf {} +; }
+    want=$(cd "$dir" && clean && make --no-print-directory "$@" 2>&1 | grep -v '^make')
     for j in "" "-j2"; do
-        got=$(cd "$dir" && rm -rf out && $SMAK $j "$@" 2>&1)
+        got=$(cd "$dir" && clean && timeout 120 $SMAK $j "$@" 2>&1)
         if [ -n "$j" ]; then got=$(sort <<<"$got"); cmp=$(sort <<<"$want"); else cmp=$want; fi
         if [ "$got" == "$cmp" ]; then
             echo "PASS: $name ${j:-seq}"
@@ -52,6 +53,76 @@ $(C)/%/x.o : x.c | $(C)/%/.
 	@echo "cc $< [$(CPPFLAGS)] stem=$*"; touch $@
 EOF
 check "order-only pattern prereqs, parse-time prereqs, target-specific +=" oo
+
+# zstd: vpath entries are used as spelled (an absolute `$(LIB_SRCDIR)/common`
+# with LIB_SRCDIR ending in / became /common/x.c), $(OUTPUT_OPTION) brings in
+# $@ after expansion, and `%-release : VAR := ...` applies to lib-release and
+# its prerequisites
+mkdir -p zv/sub/common
+touch zv/sub/common/q.c
+cat > zv/sub/inc.mk <<'EOF'
+D ?= $(dir $(realpath $(lastword $(MAKEFILE_LIST))))
+vpath %.c $(D)/common
+EOF
+cat > zv/Makefile <<'EOF'
+include sub/inc.mk
+F = -g
+all: lib-release
+%-release : F := -O3
+%-release : %
+	@echo "release $* F=$(F)"
+lib: out/q.o
+	@echo "lib F=$(F)"
+out/%.o: %.c
+	@mkdir -p out; echo "cc $< $(OUTPUT_OPTION)"
+EOF
+check "vpath spelling, OUTPUT_OPTION, pattern-specific variables" zv
+
+# zstd: a recipe line continued inside $(if ...) expands to `    @echo ...`
+# (make finds @ after the whitespace); under -j a builtin line was run by
+# the client and again by the job-master
+mkdir ifat
+printf 'all:\n\t$(if $(X),\\\n    @echo multi,\\\n    @echo single $(X))\n\t@echo done\n\t@sleep 0; echo ext\n' > ifat/Makefile
+check "continued \$(if) recipe line, mixed builtin/external lines" ifat
+
+# zstd programs/: objects depend on $(B)/%.d, declared as `$(DEPFILES):`
+# (no recipe, no prerequisites). A missing one counts as updated; a relayed
+# sub-make submitted it as a dependency nothing produces (-j hang).
+mkdir -p dfile/sub
+printf 'int x;\n' > dfile/sub/x.c
+printf 'all:\n\t@$(MAKE) --no-print-directory -C sub\n' > dfile/Makefile
+cat > dfile/sub/Makefile <<'EOF'
+B = out
+all: $(B)/x.o
+$(B)/%.o : %.c $(B)/%.d | $(B)
+	@echo "cc $@"; touch $@ $(B)/$*.d
+$(B): ; @mkdir -p $@
+DEPFILES := $(B)/x.d
+$(DEPFILES):
+include $(wildcard $(DEPFILES))
+EOF
+check "empty explicit targets as prerequisites in a relayed sub-make" dfile
+
+# zstd lib/: `libzstd.a: ; $(MAKE) $@ BUILD_DIR=..` in a relayed sub-make
+# submits the target whose job is running it (-j deadlock); the inner jobs
+# must use the relay's prerequisites, not this makefile's `%.o: %.c`, and
+# run builtins (mkdir) in their own directory
+mkdir -p self/sub
+printf 'all:\n\t@$(MAKE) --no-print-directory -C sub\n' > self/Makefile
+cat > self/sub/Makefile <<'EOF'
+all: lib
+lib: out/a.a
+ifndef B
+out/a.a:
+	@$(MAKE) --no-print-directory $@ B=out
+else
+out/a.a: $(B)/x.o
+	@echo "ar $@ $^"; touch $@
+$(B)/x.o:
+	@mkdir -p $(B); echo "cc $@"; touch $@
+endif
+EOF
+check "same target re-made by a relayed sub-make" self
 
 mkdir silent
 printf 'all: a\na:\n\tmkdir -p out\n\techo quiet\n.SILENT:\n' > silent/Makefile

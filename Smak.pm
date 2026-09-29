@@ -466,7 +466,9 @@ sub start_job_server {
         my $timeout = 10;
         my $start = time();
         until (-f $port_file && port_file_token($port_file) eq $port_token) {
-            if (time() - $start > $timeout) {
+            # Keep waiting while it is alive (slow under load), up to a cap
+            if (time() - $start > $timeout
+                && (waitpid($job_server_pid, WNOHANG) != 0 || time() - $start > 12 * $timeout)) {
                 die "Job-master failed to start (no port file)\n";
             }
             select(undef, undef, undef, 0.1);
@@ -633,7 +635,9 @@ sub strip_command_prefixes {
     my $ignore_errors = 0;
     my $silent = 0;
 
-    # Strip leading @ (silent) or - (ignore errors) prefixes
+    # Strip leading @ (silent) or - (ignore errors) prefixes; make looks
+    # past leading whitespace (`$(if $(X),\<nl>    @echo ...)` expands to one)
+    $cmd =~ s/^\s+//;
     while ($cmd =~ s/^[@+-]//) {
         $silent = 1 if $& eq '@';
         $ignore_errors = 1 if $& eq '-';
@@ -730,9 +734,9 @@ sub is_builtin_command {
     my ($cmd) = @_;
     return 0 unless defined $cmd;
 
-    # Strip command prefixes
+    # Strip command prefixes (make finds them after leading whitespace)
     my $clean_cmd = $cmd;
-    $clean_cmd =~ s/^[@+-]+//;
+    $clean_cmd =~ s/^\s*[@+-]+//;
     $clean_cmd =~ s/^\s+|\s+$//g;
 
     # Recursive make/smak calls are builtins - the job-server forks directly
@@ -862,9 +866,11 @@ sub execute_builtin {
 
         for my $dir (@dirs) {
             if (-d $dir) {
-                # Directory already exists - just warn, don't fail
-                warn "mkdir: directory '$dir' already exists (continuing)\n" unless $silent;
-                next;  # Continue with next directory
+                # As the real mkdir: fine with -p, an error without it
+                next if $parents;
+                print STDERR "mkdir: cannot create directory '$dir': File exists\n";
+                return 1 unless $ignore_errors;
+                next;
             }
             if ($parents) {
                 make_path($dir, {error => \my $err});
@@ -1600,6 +1606,28 @@ sub is_silent_target {
     return 0;
 }
 
+# ifdef/ifndef and `?=`: the variable has a non-empty value, counting
+# command-line variables (`$(MAKE) $@ BUILD_DIR=obj/..` in zstd re-reads the
+# makefile expecting `ifndef BUILD_DIR` to be false).
+sub var_has_value {
+    my ($var) = @_;
+    return 1 if defined $cmd_vars{$var} && $cmd_vars{$var} ne '';
+    return exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+}
+
+# A missing explicit target with no prerequisites, no recipe and no
+# pattern rule (zstd: `$(DEPFILES):` for its .d files) counts as updated;
+# nothing produces it, so a relay must not submit it as a dependency.
+sub is_empty_explicit_target {
+    my ($t) = @_;
+    my $key = "$makefile\t$t";
+    return 0 unless exists $fixed_deps{$key};
+    return 0 if @{$fixed_deps{$key} || []};
+    return 0 if ($fixed_rule{$key} // '') =~ /\S/;
+    return 0 if find_matching_patterns($t);
+    return 1;
+}
+
 sub classify_target {
     my ($target) = @_;
     if ($target =~ /^\./) {
@@ -1682,13 +1710,23 @@ sub apply_target_specific_vars {
     my ($target) = @_;
     my %saved;
     my $key = "$makefile\t$target";
-    return \%saved unless exists $target_specific_vars{$key};
+    # Pattern-specific values (`%-release : DEBUGFLAGS :=`, zstd) come
+    # first, then the target's own, as in GNU make.
+    my @mods;
+    for my $pkey (grep { /%/ } keys %target_specific_vars) {
+        my ($mf, $pat) = split /\t/, $pkey, 2;
+        next unless $mf eq $makefile && defined $pat;
+        my $re = join('(.*)', map { quotemeta } split(/%/, $pat, 2));
+        push @mods, @{$target_specific_vars{$pkey}} if $target =~ /^$re$/s;
+    }
+    push @mods, @{$target_specific_vars{$key}} if exists $target_specific_vars{$key};
+    return \%saved unless @mods;
     # Already in effect (the queue and the recipe path both apply them, and
     # a target can be reached again below itself): `+=` must not stack.
     return \%saved if $tsv_active{$key};
     $tsv_active{$key} = 1;
     $saved{"\0active"} = $key;
-    for my $mod (@{$target_specific_vars{$key}}) {
+    for my $mod (@mods) {
         my ($var, $op, $value) = @{$mod}{qw(var op value)};
         # Only save the original value once per variable (first modification wins)
         $saved{$var} = exists $MV{$var} ? $MV{$var} : undef unless exists $saved{$var};
@@ -1703,7 +1741,7 @@ sub apply_target_specific_vars {
             my $expanded = expand_vars($make_syntax);
             $MV{$var} = transform_make_vars($expanded);
         } elsif ($op eq '?=') {
-            unless (exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '') {
+            unless (var_has_value($var)) {
                 $MV{$var} = $value;
             }
         } else {
@@ -1797,6 +1835,9 @@ sub expand_vars {
         }
 
         my $content = substr($text, $start + 2, $pos - $start - 3);
+        # Backslash-newline inside a reference is one space (a recipe line
+        # `$(if $(X),\<nl>  @echo a,\<nl>  @echo b)`, zstd lib/Makefile)
+        $content =~ s/\\\n\s*/ /g;
         my $replacement;
 
         # Check if it's a function call (contains space or comma)
@@ -1825,6 +1866,22 @@ sub expand_vars {
                 }
             }
             push @args, $current if $current ne '';
+
+            # GNU make splits only as many arguments as the function takes;
+            # the last one keeps its commas: `$(shell cc -Wa,--noexecstack ...)`
+            # (zstd) ran `cc -Wa` without its 2>/dev/null.
+            my %nargs = (
+                map({ $_ => 1 } qw(shell info warning error wildcard strip sort
+                    words firstword lastword dir notdir suffix basename realpath
+                    abspath eval value origin flavor)),
+                map({ $_ => 2 } qw(filter filter-out findstring addsuffix
+                    addprefix join word)),
+                map({ $_ => 3 } qw(subst patsubst wordlist foreach if)),
+            );
+            if (my $n = $nargs{$func}) {
+                splice(@args, $n - 1, @args - $n + 1, join(',', @args[$n - 1 .. $#args]))
+                    if @args > $n;
+            }
 
             # Strip leading whitespace from the FIRST argument only
             # (the space between the function name and first arg).
@@ -1857,7 +1914,7 @@ sub expand_vars {
                     my $regex = quotemeta($pattern);
                     $regex =~ s/\\%/(.*)/g;
                     $regex = "^$regex\$";
-                    my @words = split /\s+/, $text;
+                    my @words = split ' ', $text;
                     @words = map {
                         if (/^$regex/) {
                             my $stem = $1;
@@ -1894,8 +1951,8 @@ sub expand_vars {
                 if (@args >= 2) {
                     my $patterns = $args[0];
                     my $text = $args[1];
-                    my @patterns = split /\s+/, $patterns;
-                    my @words = split /\s+/, $text;
+                    my @patterns = split ' ', $patterns;
+                    my @words = split ' ', $text;
                     my @result;
                     for my $word (@words) {
                         for my $pat (@patterns) {
@@ -1914,8 +1971,8 @@ sub expand_vars {
                 if (@args >= 2) {
                     my $patterns = $args[0];
                     my $text = $args[1];
-                    my @patterns = split /\s+/, $patterns;
-                    my @words = split /\s+/, $text;
+                    my @patterns = split ' ', $patterns;
+                    my @words = split ' ', $text;
                     my @result;
                     for my $word (@words) {
                         my $matched = 0;
@@ -1934,7 +1991,7 @@ sub expand_vars {
             } elsif ($func eq 'sort') {
                 # $(sort list)
                 if (@args >= 1) {
-                    my @words = split /\s+/, $args[0];
+                    my @words = split ' ', $args[0];
                     my %seen;
                     @words = grep { !$seen{$_}++ } sort @words;
                     $replacement = join(' ', @words);
@@ -1943,60 +2000,60 @@ sub expand_vars {
                 # $(word n,text)
                 if (@args >= 2) {
                     my ($n, $text) = @args;
-                    my @words = split /\s+/, $text;
+                    my @words = split ' ', $text;
                     $replacement = $words[$n - 1] || '';
                 }
             } elsif ($func eq 'wordlist') {
                 # $(wordlist s,e,text)
                 if (@args >= 3) {
                     my ($s, $e, $text) = @args;
-                    my @words = split /\s+/, $text;
+                    my @words = split ' ', $text;
                     my @result = @words[($s-1)..($e-1)];
                     $replacement = join(' ', grep defined, @result);
                 }
             } elsif ($func eq 'words') {
                 # $(words text)
                 if (@args >= 1) {
-                    my @words = split /\s+/, $args[0];
+                    my @words = split ' ', $args[0];
                     $replacement = scalar(@words);
                 }
             } elsif ($func eq 'firstword') {
                 # $(firstword names...)
                 if (@args >= 1) {
-                    my @words = split /\s+/, $args[0];
+                    my @words = split ' ', $args[0];
                     $replacement = $words[0] || '';
                 }
             } elsif ($func eq 'lastword') {
                 # $(lastword names...)
                 if (@args >= 1) {
-                    my @words = split /\s+/, $args[0];
+                    my @words = split ' ', $args[0];
                     $replacement = $words[-1] || '';
                 }
             } elsif ($func eq 'dir') {
                 # $(dir names...)
                 if (@args >= 1) {
-                    my @words = split /\s+/, $args[0];
+                    my @words = split ' ', $args[0];
                     @words = map { m{(.*/)} ? $1 : './' } @words;
                     $replacement = join(' ', @words);
                 }
             } elsif ($func eq 'notdir') {
                 # $(notdir names...)
                 if (@args >= 1) {
-                    my @words = split /\s+/, $args[0];
+                    my @words = split ' ', $args[0];
                     @words = map { s{.*/}{}r } @words;
                     $replacement = join(' ', @words);
                 }
             } elsif ($func eq 'suffix') {
                 # $(suffix names...)
                 if (@args >= 1) {
-                    my @words = split /\s+/, $args[0];
+                    my @words = split ' ', $args[0];
                     @words = map { /(\.[^.\/]*)$/ ? $1 : '' } @words;
                     $replacement = join(' ', @words);
                 }
             } elsif ($func eq 'basename') {
                 # $(basename names...)
                 if (@args >= 1) {
-                    my @words = split /\s+/, $args[0];
+                    my @words = split ' ', $args[0];
                     @words = map { s/\.[^.\/]*$//r } @words;
                     $replacement = join(' ', @words);
                 }
@@ -2004,7 +2061,7 @@ sub expand_vars {
                 # $(addsuffix suffix,names...)
                 if (@args >= 2) {
                     my ($suffix, $names) = @args;
-                    my @words = split /\s+/, $names;
+                    my @words = split ' ', $names;
                     @words = map { $_ . $suffix } @words;
                     $replacement = join(' ', @words);
                 }
@@ -2012,15 +2069,15 @@ sub expand_vars {
                 # $(addprefix prefix,names...)
                 if (@args >= 2) {
                     my ($prefix, $names) = @args;
-                    my @words = split /\s+/, $names;
+                    my @words = split ' ', $names;
                     @words = map { $prefix . $_ } @words;
                     $replacement = join(' ', @words);
                 }
             } elsif ($func eq 'join') {
                 # $(join list1,list2)
                 if (@args >= 2) {
-                    my @list1 = split /\s+/, $args[0];
-                    my @list2 = split /\s+/, $args[1];
+                    my @list1 = split ' ', $args[0];
+                    my @list2 = split ' ', $args[1];
                     my @result;
                     for (my $i = 0; $i < @list1 || $i < @list2; $i++) {
                         push @result, ($list1[$i] // '') . ($list2[$i] // '');
@@ -2033,7 +2090,7 @@ sub expand_vars {
                 # non-wildcard pattern verbatim even when the file is
                 # missing, so filter to -e.
                 if (@args >= 1) {
-                    my @patterns = split /\s+/, $args[0];
+                    my @patterns = split ' ', $args[0];
                     my @files;
                     for my $pattern (@patterns) {
                         push @files, grep { -e $_ } glob($pattern);
@@ -2056,7 +2113,7 @@ sub expand_vars {
                     my ($var, $list, $text) = @args;
                     # Expand the list to get the words to iterate over
                     $list = expand_vars($list, $depth + 1);
-                    my @words = split /\s+/, $list;
+                    my @words = split ' ', $list;
                     my @results;
                     for my $word (@words) {
                         # Skip empty words
@@ -2083,7 +2140,7 @@ sub expand_vars {
                 # $(realpath names...)
                 if (@args >= 1) {
                     use Cwd 'abs_path';
-                    my @paths = split /\s+/, $args[0];
+                    my @paths = split ' ', $args[0];
                     my @resolved;
                     for my $path (@paths) {
                         next if $path eq '';
@@ -2097,7 +2154,7 @@ sub expand_vars {
                 # $(abspath names...)
                 if (@args >= 1) {
                     use Cwd 'abs_path';
-                    my @paths = split /\s+/, $args[0];
+                    my @paths = split ' ', $args[0];
                     my @resolved;
                     for my $path (@paths) {
                         next if $path eq '';
@@ -2198,7 +2255,7 @@ sub expand_vars {
             my $regex = quotemeta($from);
             $regex =~ s/\\%/(.*)/g;
             $regex = "^$regex\$";
-            my @words = split /\s+/, $val;
+            my @words = split ' ', $val;
             @words = map {
                 if (/^$regex/) {
                     my $stem = $1;
@@ -2221,6 +2278,14 @@ sub expand_vars {
         $replacement //= '';
         my $match_len = $pos - $start;
         $text = substr($text, 0, $start) . $replacement . substr($text, $pos);
+    }
+
+    # The last replacement may have brought in automatic variables
+    # (OUTPUT_OPTION = -o $@) after the loop's last substitution pass.
+    if (%auto_vars) {
+        for my $var (keys %auto_vars) {
+            $text =~ s/\$\Q$var\E/$auto_vars{$var}/g;
+        }
     }
 
     return $text;
@@ -2527,7 +2592,7 @@ sub handle_define {
             $MV{$var} = $add;
         }
     } elsif ($op eq '?=') {
-        unless (exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '') {
+        unless (var_has_value($var)) {
             $MV{$var} = transform_make_vars($value);
         }
     } else {
@@ -2671,6 +2736,31 @@ sub parse_makefile {
     $MV{'COMPILE.c'} = '$(CC) $(CFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c';
     $MV{'COMPILE.cc'} = '$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c';
     $MV{'LINK.o'} = '$(CC) $(LDFLAGS) $(TARGET_ARCH)';
+    # The rest of GNU make's built-in command variables (zstd compiles its
+    # .S files with $(COMPILE.S))
+    my %builtin_cmd_vars = (
+        'COMPILE.C'    => '$(COMPILE.cc)',
+        'COMPILE.cpp'  => '$(COMPILE.cc)',
+        'COMPILE.S'    => '$(CC) $(ASFLAGS) $(CPPFLAGS) $(TARGET_MACH) -c',
+        'COMPILE.s'    => '$(AS) $(ASFLAGS) $(TARGET_MACH)',
+        'COMPILE.m'    => '$(OBJC) $(OBJCFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c',
+        'COMPILE.f'    => '$(FC) $(FFLAGS) $(TARGET_ARCH) -c',
+        'COMPILE.F'    => '$(FC) $(FFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c',
+        'LINK.c'       => '$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $(TARGET_ARCH)',
+        'LINK.cc'      => '$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) $(TARGET_ARCH)',
+        'LINK.C'       => '$(LINK.cc)',
+        'LINK.cpp'     => '$(LINK.cc)',
+        'LINK.S'       => '$(CC) $(ASFLAGS) $(CPPFLAGS) $(LDFLAGS) $(TARGET_MACH)',
+        'LINK.s'       => '$(CC) $(ASFLAGS) $(LDFLAGS) $(TARGET_MACH)',
+        'LINK.m'       => '$(OBJC) $(OBJCFLAGS) $(CPPFLAGS) $(LDFLAGS) $(TARGET_ARCH)',
+        'LINK.f'       => '$(FC) $(FFLAGS) $(LDFLAGS) $(TARGET_ARCH)',
+        'LINK.F'       => '$(FC) $(FFLAGS) $(CPPFLAGS) $(LDFLAGS) $(TARGET_ARCH)',
+        'PREPROCESS.S' => '$(CC) -E $(CPPFLAGS)',
+        'LEX.l'        => '$(LEX) $(LFLAGS) -t',
+        'YACC.y'       => '$(YACC) $(YFLAGS)',
+        'LINT.c'       => '$(LINT) $(LINTFLAGS) $(CPPFLAGS) $(TARGET_ARCH)',
+    );
+    $MV{$_} //= $builtin_cmd_vars{$_} for keys %builtin_cmd_vars;
     $MV{'OUTPUT_OPTION'} = '-o $@';
 
     # Set directory variables (PWD and CURDIR should be the same)
@@ -2827,7 +2917,9 @@ sub parse_makefile {
 
             # Parse ifeq: ifeq (arg1,arg2) or ifeq "arg1" "arg2"
             my @parsed = parse_ifeq_args($args);
-            if (@parsed == 2) {
+            # Not expanded inside an inactive branch: make doesn't run
+            # $(shell) there (zstd probes `md5` only on Darwin)
+            if (@parsed == 2 && $cond_stack[-1]{active}) {
                 my ($arg1, $arg2) = @parsed;
                 $arg1 = expand_vars($arg1);
                 $arg2 = expand_vars($arg2);
@@ -2847,7 +2939,9 @@ sub parse_makefile {
             my $result = 0;
 
             my @parsed = parse_ifeq_args($args);
-            if (@parsed == 2) {
+            # Not expanded inside an inactive branch: make doesn't run
+            # $(shell) there (zstd probes `md5` only on Darwin)
+            if (@parsed == 2 && $cond_stack[-1]{active}) {
                 my ($arg1, $arg2) = @parsed;
                 $arg1 = expand_vars($arg1);
                 $arg2 = expand_vars($arg2);
@@ -2866,7 +2960,7 @@ sub parse_makefile {
         }
         elsif ($line =~ /^\s*ifdef\s+(\S+)$/) {
             my $var = $1;
-            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            my $result = var_has_value($var);
             warn "DEBUG: ifdef $var => defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
 
             my $parent_active = $cond_stack[-1]{active};
@@ -2876,7 +2970,7 @@ sub parse_makefile {
         }
         elsif ($line =~ /^\s*ifndef\s+(\S+)$/) {
             my $var = $1;
-            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            my $result = var_has_value($var);
             $result = !$result;  # invert for ifndef
             warn "DEBUG: ifndef $var => defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
 
@@ -2916,7 +3010,7 @@ sub parse_makefile {
                 my $is_neq = ($rest =~ /^ifneq/);
                 my $result = 0;
                 my @parsed = parse_ifeq_args($args);
-                if (@parsed == 2) {
+                if (@parsed == 2 && $parent_active && !$cond->{any_true}) {
                     my ($arg1, $arg2) = @parsed;
                     $arg1 = expand_vars($arg1);
                     $arg2 = expand_vars($arg2);
@@ -2936,7 +3030,7 @@ sub parse_makefile {
                 # "else ifdef VAR" or "else ifndef VAR"
                 my $var = $1;
                 my $is_ndef = ($rest =~ /^ifndef/);
-                my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+                my $result = var_has_value($var);
                 $result = !$result if $is_ndef;
                 warn "DEBUG: else " . ($is_ndef ? "ifndef" : "ifdef") . " $var = $result\n" if $ENV{SMAK_DEBUG};
                 if ($cond->{any_true}) {
@@ -3140,7 +3234,7 @@ sub parse_makefile {
                 $MV{$var} = $expanded;
             } elsif ($op eq '?=') {
                 # ?= is conditional assignment - only set if not already defined
-                unless (exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '') {
+                unless (var_has_value($var)) {
                     $MV{$var} = $value;
                 }
             } else {
@@ -3624,7 +3718,9 @@ sub parse_included_makefile {
             my $result = 0;
 
             my @parsed = parse_ifeq_args($args);
-            if (@parsed == 2) {
+            # Not expanded inside an inactive branch: make doesn't run
+            # $(shell) there (zstd probes `md5` only on Darwin)
+            if (@parsed == 2 && $cond_stack[-1]{active}) {
                 my ($arg1, $arg2) = @parsed;
                 $arg1 = expand_vars($arg1);
                 $arg2 = expand_vars($arg2);
@@ -3643,7 +3739,7 @@ sub parse_included_makefile {
         elsif ($line =~ /^\s*ifdef\s+(\S+)$/ || $line =~ /^\s*ifndef\s+(\S+)$/) {
             my $var = $1;  # Capture $1 BEFORE doing another regex match
             my $is_ifdef = ($line =~ /ifdef/);
-            my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+            my $result = var_has_value($var);
             $result = !$result if !$is_ifdef;
             warn "DEBUG(include): $line => $var defined=" . (exists $MV{$var} ? "yes" : "no") . ", result=$result\n" if $ENV{SMAK_DEBUG};
 
@@ -3681,7 +3777,7 @@ sub parse_included_makefile {
                 my $is_neq = ($rest =~ /^ifneq/);
                 my $result = 0;
                 my @parsed = parse_ifeq_args($args);
-                if (@parsed == 2) {
+                if (@parsed == 2 && $parent_active && !$cond->{any_true}) {
                     my ($arg1, $arg2) = @parsed;
                     $arg1 = expand_vars($arg1);
                     $arg2 = expand_vars($arg2);
@@ -3700,7 +3796,7 @@ sub parse_included_makefile {
             elsif ($rest =~ /^ifdef\s+(\S+)$/ || $rest =~ /^ifndef\s+(\S+)$/) {
                 my $var = $1;
                 my $is_ndef = ($rest =~ /^ifndef/);
-                my $result = exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '';
+                my $result = var_has_value($var);
                 $result = !$result if $is_ndef;
                 if ($cond->{any_true}) {
                     $cond->{active} = 0;
@@ -3835,7 +3931,7 @@ sub parse_included_makefile {
                 $MV{$var} = $expanded;
             } elsif ($op eq '?=') {
                 # ?= is conditional assignment - only set if not already defined
-                unless (exists $MV{$var} && defined $MV{$var} && $MV{$var} ne '') {
+                unless (var_has_value($var)) {
                     $MV{$var} = $value;
                 }
             } else {
@@ -4357,7 +4453,11 @@ sub save_state_cache {
 
     warn "DEBUG: Saving state to '$cache_file'\n" if $ENV{SMAK_DEBUG};
 
-    open(my $fh, '>', $cache_file) or do {
+    # Written to a private file and renamed into place: smak processes
+    # sharing the cache dir (parallel test runs) must never load a
+    # half-written cache.
+    my $tmp_cache = "$cache_file.$$.tmp";
+    open(my $fh, '>', $tmp_cache) or do {
         warn "WARNING: Cannot write cache file '$cache_file': $!\n";
         return;
     };
@@ -4456,7 +4556,11 @@ sub save_state_cache {
     # Ensure do() returns a true value
     print $fh "1;\n";
 
-    close($fh);
+    if (close($fh)) {
+        rename($tmp_cache, $cache_file) or unlink($tmp_cache);
+    } else {
+        unlink($tmp_cache);
+    }
     warn "DEBUG: State saved successfully\n" if $ENV{SMAK_DEBUG};
 }
 
@@ -4639,13 +4743,13 @@ sub resolve_vpath {
             print STDERR "DEBUG vpath: '$file' matches pattern '$pattern'\n" if $ENV{SMAK_DEBUG};
             # File matches this vpath pattern, search directories
             for my $vpath_dir (@{$vpath{$pattern}}) {
+                # make uses the path as the vpath entry spells it (absolute
+                # stays absolute: zstd's `$(LIB_SRCDIR)/common` is `.../lib//common`,
+                # which stripping "$dir/" turned into /common/x.c)
                 my $candidate = "$vpath_dir/$file";
-                # Make path relative to working directory
-                $candidate = $candidate =~ m{^/} ? $candidate : "$dir/$candidate";
-                print STDERR "DEBUG vpath:   trying '$candidate'\n" if $ENV{SMAK_DEBUG};
-                if (-e $candidate) {
-                    # Return relative path from $dir
-                    $candidate =~ s{^\Q$dir\E/}{};
+                my $check = $candidate =~ m{^/} ? $candidate : "$dir/$candidate";
+                print STDERR "DEBUG vpath:   trying '$check'\n" if $ENV{SMAK_DEBUG};
+                if (-e $check) {
                     print STDERR "DEBUG vpath: ✓ resolved '$file' → '$candidate' via vpath\n" if $ENV{SMAK_DEBUG};
                     $vpath_cache{$cache_key} = $candidate;
                     return $candidate;
@@ -5203,6 +5307,10 @@ sub parse_make_command {
 # Helper function to get first target from a makefile
 sub get_first_target {
     my ($mf) = @_;
+
+    # The parser records make's default goal; the hash walk below is in
+    # random order (a `-C sub` sub-make built `out/x.d` instead of `all`)
+    return $default_target if defined $default_target && $default_target ne '';
 
     # Look for first non-special target in this makefile
     for my $key (keys %fixed_deps) {
@@ -6480,6 +6588,25 @@ sub build_target {
         }
 
         local $silent_mode = 1 if is_silent_target($target);
+
+        # Under -j the job-master runs the target's whole recipe from its own
+        # copy of the rules, so if any line has to go there, send the target
+        # once and run nothing here (a builtin line run here as well printed
+        # twice: `$(if ..,@echo a,@echo b)` + `@echo done` in zstd).
+        if ($job_server_socket && 0 != $jobs) {
+            my $needs_server = @deps > 0;
+            for my $l (split /\n/, $expanded) {
+                next unless $l =~ /\S/;
+                my ($t) = strip_command_prefixes($l);
+                $needs_server = 1 unless is_builtin_command($t);
+            }
+            if ($needs_server) {
+                use Cwd 'getcwd';
+                submit_job($target, $expanded, getcwd());
+                $expanded = '';
+            }
+        }
+
         # Execute each command line
         for my $cmd_line (split /\n/, $expanded) {
             my $echoed_line = 0;  # a sub-make line is echoed before it runs
@@ -6793,7 +6920,13 @@ sub build_target {
                     }
                     next;
                 } else {
-                    # No -f or -C options, build targets in current makefile
+                    # No -f or -C options, build targets in current makefile.
+                    # Not with command-line variables: the makefile must be
+                    # read again with them (zstd: `$(MAKE) $@ BUILD_DIR=obj/..`
+                    # selects the `else` side of `ifndef BUILD_DIR`).
+                    if ($sub_vars_ref && %$sub_vars_ref) {
+                        goto EXECUTE_EXTERNAL_COMMAND;
+                    }
                     # Before recursing into sub-targets, build the parent's dependencies
                     # This handles cases like: all: gitsha.h config.h; $(MAKE) all-am
                     # where gitsha.h and config.h must be built before all-am
@@ -11292,6 +11425,9 @@ sub run_job_master {
         print $port_fh "$observer_port\n";
         print $port_fh "$master_port\n";
         print $port_fh "token $Smak::port_token\n" if defined $Smak::port_token;
+        # The smak that started (and so is using) this server; kill_old_js
+        # leaves it alone while that process runs
+        print $port_fh "owner " . getppid() . "\n";
         close($port_fh);
         rename("$port_file.tmp", $port_file) or warn "Cannot rename port file: $!\n";
 
@@ -11450,6 +11586,7 @@ sub run_job_master {
     }
 
     # Spawn workers
+    my %startup_worker_pids;
     for (my $i = 0; $i < @worker_assignments; $i++) {
         my $wa = $worker_assignments[$i];
         my $pid = fork();
@@ -11476,6 +11613,7 @@ sub run_job_master {
                 exit 99;
             }
         }
+        $startup_worker_pids{$pid} = 1;
         vprint "Spawned worker $i ($wa->{type}" .
                ($wa->{type} eq 'remote' ? " on $wa->{host}" : "") .
                ", PID $pid)\n";
@@ -11493,7 +11631,13 @@ sub run_job_master {
 
     # Wait for workers to connect — proceed with partial set if some fail
     while ($workers_connected < $num_workers) {
-        if (time() - $start_time > $startup_timeout) {
+        # On a loaded machine (the regression suite runs ~24 smaks on 4
+        # cores) live workers can take longer than $startup_timeout to
+        # connect; dying then showed up as "Job-master connection lost during
+        # worker startup". Keep waiting while they are alive, up to a cap.
+        my $waited = time() - $start_time;
+        if ($waited > $startup_timeout && ($workers_connected > 0 || !%startup_worker_pids
+                                           || $waited > 12 * $startup_timeout)) {
             if ($workers_connected > 0) {
                 warn "smak: Warning: Only $workers_connected of $num_workers workers connected, proceeding\n";
                 last;
@@ -11502,6 +11646,7 @@ sub run_job_master {
         }
         # Check if any worker children have already exited (SSH failure, etc.)
         while ((my $dead = waitpid(-1, WNOHANG)) > 0) {
+            next unless delete $startup_worker_pids{$dead};
             my $exit = $? >> 8;
             warn "smak: Worker process $dead exited early (status $exit)\n" if $exit != 0;
             $num_workers-- if $num_workers > $workers_connected;
@@ -12286,14 +12431,22 @@ sub run_job_master {
     # Layer 0 = leaves (no buildable deps), higher layers depend on lower layers
     # Returns the layer number for this target
     sub compute_target_layer {
-        my ($deps_ref) = @_;
+        my ($deps_ref, $seen) = @_;
         my $max_dep_layer = -1;
+        $seen //= {};
 
         for my $dep (@$deps_ref) {
             next unless defined $dep && $dep =~ /\S/;
             # If dependency has a layer, it needs building
             if (exists $target_layer{$dep}) {
                 my $dep_layer = $target_layer{$dep};
+                $max_dep_layer = $dep_layer if $dep_layer > $max_dep_layer;
+            } elsif ($pending_composite{$dep} && !$seen->{$dep}++) {
+                # A recipe-less target (zstd's `lib: libzstd.a libzstd`) has no
+                # job of its own: count its prerequisites, or a job depending
+                # on it (`lib-release`) sits in their layer, which then never
+                # drains.
+                my $dep_layer = compute_target_layer($pending_composite{$dep}{deps}, $seen) - 1;
                 $max_dep_layer = $dep_layer if $dep_layer > $max_dep_layer;
             }
             # Source files (no layer) don't contribute
@@ -13784,7 +13937,8 @@ sub run_job_master {
         }
 
         # If no deps found by exact match, try pattern matching (like dispatch_jobs does)
-        if (!@deps) {
+        # - not for a relay's job: its makefile's rules are not ours
+        if (!@deps && !$target_to_child{$target}) {
             for my $match (find_matching_patterns($target)) {
                 my ($pkey, $match_stem) = @$match;
                 {
@@ -14069,7 +14223,10 @@ sub run_job_master {
             # jobs at different layer depths to the same queue.  Disable the
             # layer gate so the dep check alone controls dispatch ordering —
             # this prevents cross-relay deadlocks (Gotcha #28).
-            my $bypass_layers = keys(%builtin_fork_pipes) > 0;
+            # The same holds for sub-makes run by workers (zstd's
+            # `+$(MAKE) $@ BUILD_DIR=..`) and relays already connected.
+            my $bypass_layers = keys(%builtin_fork_pipes) > 0 || @child_sockets > 0
+                || grep { runs_sub_make($running_jobs{$_}{command}) } keys %running_jobs;
             for my $i (0 .. $#job_queue) {
                 my $job;
                 my $target;
@@ -14122,6 +14279,10 @@ sub run_job_master {
                 if ($job->{deps} && @{$job->{deps}}) {
                     @deps = @{$job->{deps}};
                     print STDERR "DEBUG dispatch: Using stored deps for '$target': [" . join(", ", @deps) . "]\n" if $ENV{SMAK_DEBUG};
+                } elsif ($job->{from_child}) {
+                    # A relay sends its own makefile's prerequisites (none
+                    # here); this makefile's rules (`%.o: %.c`) don't apply.
+                    $has_explicit_rule = 1;
                 } elsif (exists $fixed_deps{$key}) {
                     @deps = @{$fixed_deps{$key} || []};
                     # Check if there's an explicit rule for this target
@@ -14160,7 +14321,7 @@ sub run_job_master {
                 }
 
                 # Fall back to pattern rules if no deps found
-                if (!@deps) {
+                if (!@deps && !$job->{from_child}) {
                     my $job_dir = $job->{dir} || '.';
                     DISPATCH_PATTERN: for my $match (find_matching_patterns($target)) {
                         my ($pkey, $match_stem) = @$match;
@@ -14801,6 +14962,16 @@ sub run_job_master {
                     # First part has no preceding separator
                     unshift @separators, '';
 
+                    # Builtins run here must run where the job would (a relay's
+                    # `mkdir -p obj; ... touch obj/x.o` made obj/ in our cwd)
+                    my $inline_saved_dir;
+                    my $inline_dir = $peek_job->{exec_dir} || $peek_job->{dir};
+                    if ($inline_dir && $inline_dir ne '.') {
+                        use Cwd 'getcwd';
+                        $inline_saved_dir = getcwd();
+                        chdir($inline_dir) or undef $inline_saved_dir;
+                    }
+
                     my $all_expanded = 1;
                     my $builtin_forked = 0;  # Set when we fork for recursive make
                     my @remaining_parts;  # Parts that need worker dispatch
@@ -14827,6 +14998,10 @@ sub run_job_master {
                         if ($cmd_part =~ m{^(?:perl\s+)?(?:\.\.?/|/)?[\w/.-]*(?:smak(?:\.pl)?|make)(?:\s+-\S+)*\s+(?:-C|-f)\s+(\S+)}) {
                             # Recursive make - collect all remaining recursive make commands
                             # and fork each one separately for parallel execution
+                            # Fork from the job-master's own directory (the
+                            # child changes to exec_dir, which may be relative)
+                            chdir($inline_saved_dir) if defined $inline_saved_dir;
+
                             # They run in order in one child, like the shell/make
                             # would: `$(MAKE) -C programs && ln -sf programs/lz4 .`
                             # must not link before the sub-make is done, and a
@@ -15022,6 +15197,8 @@ sub run_job_master {
                             }
                         }
                     }
+
+                    chdir($inline_saved_dir) if defined $inline_saved_dir;
 
                     # If we forked for a recursive make, skip to next job
                     if ($builtin_forked) {
@@ -17081,6 +17258,29 @@ sub run_job_master {
                                       ? "$exec_dir/$_" : $_ } @deps;
                         @siblings = map { ($_ !~ m{^/} && $exec_dir ne '.' && $exec_dir ne '')
                                       ? "$exec_dir/$_" : $_ } @siblings;
+
+                        # `libzstd.a: ; $(MAKE) $@ BUILD_DIR=..` (zstd): the
+                        # sub-make submits the very target whose job is running
+                        # it, which then never runs and the outer job never
+                        # ends. Give the inner job a path-equivalent name.
+                        our %child_target_alias;
+                        my $alias = $child_target_alias{$socket} //= {};
+                        if (grep { ($running_jobs{$_}{target} // '') eq $target
+                                   && runs_sub_make($running_jobs{$_}{command}) } keys %running_jobs) {
+                            my $orig = $target;
+                            (my $inner = $target) =~ s{([^/]+)$}{./$1};
+                            print STDERR "Child job '$orig' is the target of the running sub-make; queued as '$inner'\n" if $ENV{SMAK_DEBUG};
+                            $alias->{$orig} = $inner;
+                            $target = $inner;
+                            # Jobs this relay already queued may depend on it
+                            for my $qj (@job_queue) {
+                                next unless $qj->{from_child} && ($target_to_child{$qj->{target}} // 0) == $socket;
+                                for my $d (@{$qj->{deps} || []}) {
+                                    $d = $inner if $d eq $orig;
+                                }
+                            }
+                        }
+                        @deps = map { $alias->{$_} // $_ } @deps;
 
                         # Track this job belongs to this child socket
                         $child_job_targets{$socket}{$target} = 1;

@@ -18,6 +18,7 @@ set -u
 SMAK=${SMAK:-$(cd "$(dirname "$0")/.." && pwd)/smak}
 command -v make >/dev/null || { echo "SKIP: GNU make not installed"; exit 77; }
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; cd "$d"
+unset USR_SMAK_OPT   # the seq runs check output order; the suite's modes set -j
 fail=0
 
 check() {  # name dir [args...]: smak output must equal make's

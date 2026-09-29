@@ -233,6 +233,60 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   failure (`smak: *** [all] Error 1`).
   Tests: `test/test_prereq_semantics.sh`.
 
+### zstd: conditionals, commas, command-line variables, vpath spelling
+- [x] **FIXED (2026-09-28):** found by smak-buildtest on zstd:
+  - Every function split its arguments at every comma:
+    `$(shell cc -Wa,--noexecstack ... 2>$(VOID))` ran `cc -Wa` without the
+    redirect ("unrecognized option -Wa" on every run). Functions now split
+    only as many arguments as they take.
+  - `ifeq`/`else ifeq` arguments were expanded inside inactive branches,
+    running `$(shell md5 ...)` meant for Darwin.
+  - `ifdef`/`ifndef`/`?=` ignored command-line variables: zstd's
+    `$(MAKE) $@ BUILD_DIR=obj/..` under `ifndef BUILD_DIR` recursed without
+    end. A same-directory `$(MAKE) target VAR=..` was also built in-process
+    with the variables dropped; it now runs a real sub-make.
+  - vpath results were made relative by stripping "$dir/", which turned
+    `/src/lib//common/x.c` into `/common/x.c`; make uses the entry as
+    spelled.
+  - `-o $@` from `$(OUTPUT_OPTION)` stayed unexpanded (automatic variables
+    brought in by the last expansion step were not substituted).
+  - Pattern-specific variables (`%-release : DEBUGFLAGS :=`) were ignored,
+    so the flags hash (object directory) differed from make's.
+  - A recipe line continued inside `$(if ..,\` expands to `    @echo ..`:
+    the `@` after whitespace was passed to the shell. Under -j, a target
+    whose recipe mixed builtin and other lines ran the builtin lines in the
+    client and again in the job-master; the client now sends such a target
+    once.
+  Tests: `test/test_make_functions.sh`, `test/test_prereq_semantics.sh`.
+
+### zstd -j: relayed sub-makes deadlocked; more missing defaults
+- [x] **FIXED (2026-09-29):** zstd builds through three levels of sub-make
+  (`-C lib lib-release` → `$(MAKE) libzstd.a BUILD_DIR=obj/conf_<hash>`),
+  and `smak -j4` hung in several ways, one after the other:
+  - The inner sub-make submits `libzstd.a`, the very target whose job is
+    running it: the job-master saw it as running and never dispatched it.
+    The inner job is now queued under a path-equivalent name (`dir/./x`).
+  - Recipe-less targets (`lib: libzstd.a libzstd`) are never submitted by
+    a relay, so jobs depending on them waited forever; the relay now
+    depends on their prerequisites instead. Likewise `$(DEPFILES):` (no
+    recipe, no prerequisites) is not submitted as a dependency.
+  - A job depending on a composite target sat in its prerequisites' layer
+    (never drained); sub-makes run by workers (not only job-master forks)
+    now lift the layer gate, as the relays' jobs come in at other depths.
+  - A relay job with no prerequisites was given this makefile's pattern
+    prerequisites (`%.o: %.c` → a missing `obj/x.c`).
+  - Builtins the job-master runs inline ran in its own directory, not the
+    job's (`mkdir -p obj` made obj/ at the top).
+  - `get_first_target` walked a hash: a `-C sub` sub-make without a goal
+    built a random target (`out/x.d`) instead of the default goal.
+  Also: `$(COMPILE.S)` and the other built-in `COMPILE.*`/`LINK.*`/
+  `PREPROCESS.S` variables were missing (zstd's `.S` objects ran ` -o x.o`
+  and a `-` prefix hid the failure); word functions counted a leading blank
+  as an empty word (`$(addprefix $(DIR)/, $(OBJS))` linked `obj/`);
+  `mkdir` without `-p` on an existing directory now fails as the real one
+  does; the parse cache is written atomically.
+  Tests: `test/test_prereq_semantics.sh`, `test/test_make_functions.sh`.
+
 ### VPATH-resolved `$<` gets a `./` prefix, so binaries differ from make's
 - [ ] **Symptom (smak-buildtest, iverilog):** smak compiles
   `-c ./../libmisc/LineInfo.cc` where make uses `-c ../libmisc/LineInfo.cc`.
@@ -473,6 +527,20 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   test_ssh_localhost entry). The underlying non-deterministic race itself was
   not reproduced in the current suite (33->34/39 pass; the rest were the
   IO::Pty harness dep). Leaving open pending a confirmed repro.
+
+### Parallel runs in one directory shut down each other's job servers
+- [x] **FIXED (2026-09-29):** `set kill_old_js = 1` (test/.smak.rc) sends
+  SHUTDOWN to the server `.smak.connect` points to, which in a directory
+  used by several smaks at once (run-regression -j runs its interactive
+  tests in test/) is another run's live server: "Job-master connection lost
+  during worker startup", SIGPIPE (rc 141) and other "flaky" failures. The
+  port file now records the owning smak (`owner <pid>`); a server whose
+  owner still runs is left alone. The job-master also waits for live but
+  slow workers (loaded machine) instead of dying after 10 s, and the
+  client waits for a live job-master's port file.
+  After this the full suite passed (47/47, 2 skipped) for the first time,
+  including test_autorescan and test_scanner below; they may have been
+  victims of this too, but are left open until seen stable.
 
 ### autorescan misses post-deletion rebuild
 - [ ] **Symptom:** `FAIL: test_auto.o was not rebuilt after deletion`

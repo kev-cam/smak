@@ -283,13 +283,20 @@ if ($reconnect || $kill_old_js) {
         if (open(my $port_fh, '<', $connect_file)) {
             my $observer_port = <$port_fh>;
             my $master_port = <$port_fh>;
+            my ($owner) = map { /^owner (\d+)/ ? $1 : () } <$port_fh>;
             close($port_fh);
 
             if ($observer_port && $master_port) {
                 chomp($observer_port, $master_port);
 
-                # If kill_old_js is set, try to shutdown old server
-                if ($kill_old_js) {
+                # If kill_old_js is set, try to shutdown old server -- unless
+                # the smak that started it is still running: .smak.connect is
+                # per directory, and parallel runs there (the regression
+                # suite's test/, with `set kill_old_js = 1`) shut down each
+                # other's live servers ("connection lost during worker startup").
+                if ($kill_old_js && $owner && $owner != $$ && kill(0, $owner)) {
+                    warn "Not shutting down job server of running smak $owner\n" if $ENV{SMAK_DEBUG};
+                } elsif ($kill_old_js) {
                     my $shutdown_socket = IO::Socket::INET->new(
                         PeerHost => '127.0.0.1',
                         PeerPort => $master_port,
@@ -1185,6 +1192,21 @@ if ($ENV{SMAK_JOB_SERVER}) {
             }
 
             my @deps = @{$info->{deps} || []};
+            # Recipe-less targets are not submitted (zstd: `lib: libzstd.a
+            # libzstd`, needed by lib-release): depend on what they depend on,
+            # or the job-server waits for a job that never comes.
+            my %seen_composite;
+            my $flatten;
+            $flatten = sub {
+                map {
+                    my $ci = $Smak::capture_targets->{$_};
+                    ($ci && !((($ci->{expanded_rule} || $ci->{rule} || '') =~ /\S/))
+                        && @{$ci->{deps} || []} && !-e $_ && !$seen_composite{$_}++)
+                        ? $flatten->(@{$ci->{deps} || []}) : ($_)
+                } @_;
+            };
+            @deps = $flatten->(@deps);
+            @deps = grep { -e $_ || !Smak::is_empty_explicit_target($_) } @deps;
             my $silent_target = Smak::is_silent_target($target);  # .SILENT: here
 
             # Re-express target/deps/siblings relative to exec_dir. Capture keys

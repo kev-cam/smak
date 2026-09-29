@@ -760,6 +760,18 @@ Tests need these Perl/system packages installed:
 - `which` (Tumbleweed): nvc's autoconf macro uses `which llvm-config`.
 
 ## Recently fixed (kept for context)
+- 2026-09-29 — smak-buildtest round (each has a regression test):
+  zstd `-j` incremental (relayed .PHONY sub-make targets always run);
+  server-mode `all` reported done while a relink was still queued
+  (existing file counted as done); parse cache ignored included makefiles
+  (automake .deps/*.Po header deps were lost); sub-second timestamps
+  (redis fmtargs.h); suffix rule whose source another suffix rule makes
+  (tmux cmd-parse.o got the built-in %.o: %.c); recipe backslash-newline
+  kept for the shell and echo; `smak -n` printed `a && b && c`;
+  SmakCMake `default_target`; CMake interpreter: modules from the cmake
+  on PATH, check_type_size, file(STRINGS), *_OUTPUT_NAME, .manifest
+  sources; extra worker's "Connection closed before environment
+  received" at shutdown.
 - 2026-04-25 — Perl precedence warning at `Smak.pm:4487`
   (`! $x =~ /\.dat$/` → `$x !~ /\.dat$/`). Was contaminating test diff
   output and causing test_command_prefixes / test_suffix_rules /

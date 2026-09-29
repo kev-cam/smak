@@ -85,6 +85,11 @@ echo x > dotslash/lib/x.c
 printf 'srcdir = .\nall: x.o\n%%.o: $(srcdir)/../lib/%%.c\n\t@echo "cc $<"\n' > dotslash/sub/Makefile
 check "pattern prerequisite ./ prefix" dotslash/sub
 rm -f dotslash/sub/x.o
+# iverilog: VPATH holds variable references, and a VPATH search result
+# keeps its ./ (`VPATH = $(srcdir) $(srcdir)/libmisc` gives ./libmisc/x.cc)
+mkdir -p vpv/libmisc; echo x > vpv/libmisc/x.cc
+printf 'srcdir = .\nVPATH = $(srcdir) $(srcdir)/libmisc\nall: x.o\n%%.o: %%.cc\n\t@echo "cc $<"\n' > vpv/Makefile
+check "VPATH with variables keeps ./" vpv
 
 mkdir comments
 cat > comments/Makefile <<'EOF2'

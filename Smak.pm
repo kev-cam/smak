@@ -3556,18 +3556,13 @@ sub parse_makefile {
                 $MV{$var} = $value;
             }
 
-            # Handle VPATH variable specially
-            # VPATH is equivalent to "vpath % <directories>"
+            # VPATH: searched for every file after the vpath directives. Kept
+            # under its own key, recomputed from the whole expanded value
+            # (iverilog: `VPATH = $(srcdir) $(srcdir)/libmisc` with srcdir=.
+            # must give ./libmisc/x.cc, as make spells it)
             if ($var eq 'VPATH') {
-                # Split directories by whitespace or colon
-                my @dirs = split /[\s:]+/, $value;
-                @dirs = grep { $_ ne '' } @dirs;
-                # VPATH applies to all files (% pattern)
-                if (exists $vpath{'%'}) {
-                    push @{$vpath{'%'}}, @dirs;
-                } else {
-                    $vpath{'%'} = \@dirs;
-                }
+                my @dirs = grep { $_ ne '' } split /[\s:]+/, expand_dep_text($MV{VPATH} // '');
+                if (@dirs) { $vpath{"\tVPATH"} = \@dirs } else { delete $vpath{"\tVPATH"} }
                 warn "DEBUG: VPATH set to " . join(", ", @dirs) . " (vpath % pattern)\n" if $ENV{SMAK_DEBUG};
             }
 
@@ -5023,6 +5018,9 @@ sub _quote_string {
 
 # Cache for vpath resolutions to avoid repeated lookups
 our %vpath_cache;
+# Names that are vpath search results: they keep their spelling (a leading
+# ./ included), unlike prerequisite names written in the makefile
+our %vpath_found;
 
 # Resolve a file through vpath directories
 sub resolve_vpath {
@@ -5075,13 +5073,14 @@ sub resolve_vpath {
         print STDERR "DEBUG vpath: No vpath patterns defined!\n";
     }
 
-    # Try vpath patterns
-    for my $pattern (keys %vpath) {
+    # Try vpath patterns, then VPATH
+    for my $pattern ((sort grep { $_ ne "\tVPATH" } keys %vpath),
+                     (exists $vpath{"\tVPATH"} ? "\tVPATH" : ())) {
         # Convert pattern to regex (% matches anything)
         my $pattern_re = quotemeta($pattern);
         $pattern_re =~ s/\\%/.*?/g;
 
-        if ($file =~ /^$pattern_re$/) {
+        if ($pattern eq "\tVPATH" || $file =~ /^$pattern_re$/) {
             print STDERR "DEBUG vpath: '$file' matches pattern '$pattern'\n" if $ENV{SMAK_DEBUG};
             # File matches this vpath pattern, search directories
             for my $vpath_dir (@{$vpath{$pattern}}) {
@@ -5094,6 +5093,7 @@ sub resolve_vpath {
                 if (-e $check) {
                     print STDERR "DEBUG vpath: ✓ resolved '$file' → '$candidate' via vpath\n" if $ENV{SMAK_DEBUG};
                     $vpath_cache{$cache_key} = $candidate;
+                    $vpath_found{$candidate} = 1;
                     return $candidate;
                 }
             }
@@ -6917,7 +6917,7 @@ sub build_target {
 
         # Resolve source prerequisite through VPATH if $< appears in the recipe
         # (leading ./ dropped from the name first, as GNU make does)
-        $source_prereq =~ s{^(?:\./)+(?=.)}{};
+        $source_prereq =~ s{^(?:\./)+(?=.)}{} unless $vpath_found{$source_prereq};
         my $resolved_source_prereq = $source_prereq;
         if ($converted =~ /\$</ && $source_prereq) {
             use Cwd 'getcwd';
@@ -12386,7 +12386,8 @@ sub run_job_master {
             # GNU make records prerequisite names without a leading ./
             # (`%.o: $(srcdir)/../lib/%.cc` with srcdir=. gives ../lib/x.cc);
             # a VPATH search result keeps its directory as written.
-            (my $name = $dep) =~ s{^(?:\./)+(?=.)}{};
+            my $name = $dep;
+            $name =~ s{^(?:\./)+(?=.)}{} unless $vpath_found{$dep};
             $first_prereq = resolve_vpath($name, $dir);
             last;
         }

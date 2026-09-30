@@ -58,6 +58,7 @@ sub parse_simple_command {
     $cmd =~ s/\s+2>&1\s*$//;
 
     # Shell metacharacters that require shell interpretation
+    return () if $cmd =~ /\\\n/;               # backslash-newline continuation
     return () if $cmd =~ /\|/;                  # Pipes
     return () if $cmd =~ /`/;                   # Backticks
     return () if $cmd =~ /\$/;                  # Variables
@@ -68,6 +69,8 @@ sub parse_simple_command {
     return () if $cmd =~ /\[\[/;                # Bash conditionals
     return () if $cmd =~ /[&]{2}|[|]{2}/;       # && or ||
     return () if $cmd =~ /^\s*\(/;              # Subshell
+    return () if $cmd =~ /^\s*[A-Za-z_]\w*=/;   # VAR=value cmd (redis: PROG_SUFFIX='' scripts/build.sh)
+    return () if $cmd =~ /(?:^|\s)#/;           # shell comment (redis lua: `$(AR) $@ ...	# DLL ...`)
 
     # Shell keywords that require shell interpretation
     # These are control flow keywords that can't be exec'd directly
@@ -80,6 +83,7 @@ sub parse_simple_command {
     # Parse into words, handling quotes
     my @words;
     my $current = '';
+    my $quoted = 0;   # the word had quotes: '' is an (empty) argument
     my $in_single = 0;
     my $in_double = 0;
     my $escaped = 0;
@@ -92,16 +96,19 @@ sub parse_simple_command {
             $escaped = 1;
         } elsif ($char eq "'" && !$in_double) {
             $in_single = !$in_single;
+            $quoted = 1;
         } elsif ($char eq '"' && !$in_single) {
             $in_double = !$in_double;
+            $quoted = 1;
         } elsif ($char =~ /\s/ && !$in_single && !$in_double) {
-            push @words, $current if $current ne '';
+            push @words, $current if $current ne '' || $quoted;
             $current = '';
+            $quoted = 0;
         } else {
             $current .= $char;
         }
     }
-    push @words, $current if $current ne '';
+    push @words, $current if $current ne '' || $quoted;
 
     # If quotes weren't balanced, fall back to shell
     return () if $in_single || $in_double;
@@ -152,8 +159,11 @@ sub execute_command_direct {
         close($write_fh);
         return ($pid, $read_fh, 1);  # 1 = is_direct
     } else {
-        # Need shell - use open with shell
-        my $pid = open(my $cmd_fh, '-|', "$cmd 2>&1");
+        # Need shell. Run /bin/sh explicitly: given "cmd 2>&1", Perl handles
+        # the 2>&1 itself and, seeing no metacharacter it knows (# is not
+        # one), execs the words directly (redis lua: `ar rc x.a *.o	# DLL`
+        # passed "#", "DLL", ... to ar).
+        my $pid = open(my $cmd_fh, '-|', '/bin/sh', '-c', "{ $cmd\n} 2>&1");
         return ($pid, $cmd_fh, 0) if $pid;  # 0 = is_shell
         return (undef, undef, 0);
     }
@@ -166,29 +176,91 @@ sub execute_builtin {
 
     # Strip @ and - prefixes
     my $clean_cmd = $cmd;
-    $clean_cmd =~ s/^[@-]+//;
-    $clean_cmd =~ s/^\s+//;
+    $clean_cmd =~ s/^[@+-]+//;
+    $clean_cmd =~ s/^\s+|\s+$//g;
 
-    if ($clean_cmd =~ /^rm\s+(.*)$/) {
-        my $args = $1;
-        my $force = ($args =~ s/\s*-[rf]+\s*/ /g);  # Remove -r, -f flags
-        $args =~ s/^\s+|\s+$//g;
-        my @files = split(/\s+/, $args);
-        for my $file (@files) {
-            unlink($file) or ($force ? 1 : return 1);
+    # Only plain words are handled here; anything the shell would interpret
+    # (operators, substitutions, escapes, quoting) goes to the shell.  A
+    # builtin that half-understood "mkdir -p src && if ..." created a
+    # directory named "src && if test -x ." and skipped the rest.
+    return undef if $clean_cmd =~ /[;&|<>`\$(){}\\~#\n]/;
+    if ($clean_cmd =~ /^echo\s+(.*)$/s) {
+        my $text = $1;
+        return undef if $text =~ /^-/;
+        if ($text =~ /["']/) {
+            return undef unless $text =~ /^"([^"]*)"$/ || $text =~ /^'([^']*)'$/;
+            $text = $1;
+        } else {
+            return undef if $text =~ /[*?\[\]]/;
+            $text = join(' ', split(/\s+/, $text));
+        }
+        print $socket "OUTPUT $text\n" if $socket;
+        return 0;
+    }
+    return undef if $clean_cmd =~ /["']/;
+    my ($prog, @args) = split(/\s+/, $clean_cmd);
+    return undef unless defined $prog;
+
+    if ($prog eq 'rm') {
+        my ($force, $recursive) = (0, 0);
+        my @files;
+        for my $a (@args) {
+            if ($a =~ /^-([rRf]+)$/) {
+                my $flags = $1;   # (a successful match below resets $1)
+                $force = 1 if $flags =~ /f/;
+                $recursive = 1 if $flags =~ /[rR]/;
+            } elsif ($a =~ /^-/) {
+                return undef;
+            } elsif ($a =~ /[*?\[]/) {
+                push @files, glob($a);
+            } else {
+                push @files, $a;
+            }
+        }
+        my $rc = 0;
+        for my $f (@files) {
+            if (-d $f && !-l $f) {
+                if ($recursive) { remove_tree($f); }
+                else { print $socket "OUTPUT rm: cannot remove '$f': Is a directory\n" if $socket; $rc = 1; }
+            } elsif (-e $f || -l $f) {
+                unless (unlink($f)) {
+                    print $socket "OUTPUT rm: cannot remove '$f': $!\n" if $socket;
+                    $rc = 1;
+                }
+            } elsif (!$force) {
+                print $socket "OUTPUT rm: cannot remove '$f': No such file or directory\n" if $socket;
+                $rc = 1;
+            }
+        }
+        return $rc;
+    }
+
+    return undef if $clean_cmd =~ /[*?\[\]]/;   # globs: only rm expands them here
+
+    if ($prog eq 'mkdir') {
+        my $parents = 0;
+        my @dirs;
+        for my $a (@args) {
+            if ($a eq '-p') { $parents = 1; }
+            elsif ($a =~ /^-/) { return undef; }
+            else { push @dirs, $a; }
+        }
+        return undef unless @dirs;
+        for my $d (@dirs) {
+            if ($parents) {
+                make_path($d) unless -d $d;
+                next if -d $d;
+            } else {
+                next if mkdir($d);
+            }
+            print $socket "OUTPUT mkdir: cannot create directory '$d': $!\n" if $socket;
+            return 1;
         }
         return 0;
     }
 
-    if ($clean_cmd =~ /^mkdir\s+(?:-p\s+)?(.*)$/) {
-        my $dir = $1;
-        $dir =~ s/^\s+|\s+$//g;
-        make_path($dir);
-        return 0;
-    }
-
-    if ($clean_cmd =~ /^mv\s+(?:-\w+\s+)*(\S+)\s+(\S+)\s*$/) {
-        my ($src, $dst) = ($1, $2);
+    if ($prog eq 'mv' && @args == 2 || ($prog eq 'mv' && @args == 3 && $args[0] eq '-f')) {
+        my ($src, $dst) = @args[-2, -1];
         if (!move($src, $dst)) {
             print $socket "OUTPUT mv: cannot move '$src' to '$dst': $!\n" if $socket;
             return 1;
@@ -196,8 +268,8 @@ sub execute_builtin {
         return 0;
     }
 
-    if ($clean_cmd =~ /^cp\s+(\S+)\s+(\S+)\s*$/) {
-        my ($src, $dst) = ($1, $2);
+    if ($prog eq 'cp' && @args == 2 && $args[0] !~ /^-/) {
+        my ($src, $dst) = @args;
         if (!copy($src, $dst)) {
             print $socket "OUTPUT cp: cannot copy '$src' to '$dst': $!\n" if $socket;
             return 1;
@@ -205,34 +277,20 @@ sub execute_builtin {
         return 0;
     }
 
-    if ($clean_cmd =~ /^touch\s+(\S+)\s*$/) {
-        my $file = $1;
-        if (-e $file) {
-            utime(undef, undef, $file);
-        } else {
-            open(my $fh, '>', $file) or return 1;
-            close($fh);
+    if ($prog eq 'touch' && @args && !grep { /^-/ } @args) {
+        for my $file (@args) {
+            if (-e $file) {
+                utime(undef, undef, $file) or return 1;
+            } else {
+                open(my $fh, '>', $file) or return 1;
+                close($fh);
+            }
         }
         return 0;
     }
 
-    if ($clean_cmd =~ /^(true|:)\s*$/) {
-        return 0;
-    }
-
-    if ($clean_cmd =~ /^false\s*$/) {
-        return 1;
-    }
-
-    if ($clean_cmd =~ /^echo\s+(.*)$/) {
-        my $text = $1;
-        # Don't handle as builtin if shell metacharacters are present
-        return undef if $text =~ /[>|<;&`\$]/;
-        # Strip surrounding quotes (like shell would)
-        $text =~ s/^"(.*)"$/$1/s || $text =~ s/^'(.*)'$/$1/s;
-        print $socket "OUTPUT $text\n" if $socket;
-        return 0;
-    }
+    return 0 if ($prog eq 'true' || $prog eq ':') && !@args;
+    return 1 if $prog eq 'false' && !@args;
 
     return undef;  # Not a built-in
 }
@@ -249,7 +307,13 @@ sub run_worker {
         PeerPort => $port,
         Proto    => 'tcp',
         Timeout  => 10,
-    ) or die "Cannot connect to master at $host:$port: $!\n";
+    );
+    unless ($socket) {
+        # An extra worker started for blocked sub-makes may arrive after the
+        # build has finished and the job-master has gone: nothing to report.
+        exit(0) if $ENV{SMAK_EXTRA_WORKER};
+        die "Cannot connect to master at $host:$port: $!\n";
+    }
 
     $socket->autoflush(1);
     # Disable Nagle's algorithm for low latency - always needed for responsive dispatch
@@ -293,7 +357,10 @@ sub run_worker {
     my $env_done = 0;
     while (1) {
         my $line = $read_line->();
-        die "Connection closed before environment received\n" unless defined $line;
+        unless (defined $line) {
+            exit(0) if $ENV{SMAK_EXTRA_WORKER};  # job-master finished meanwhile
+            die "Connection closed before environment received\n";
+        }
 
         if ($line eq 'ENV_START') {
             next;
@@ -314,6 +381,15 @@ sub run_worker {
         if ($line eq 'SHUTDOWN') {
             print STDERR "Worker shutting down on master request\n" if $ENV{SMAK_DEBUG} || $ENV{SMAK_VERBOSE};
             last;
+        }
+
+        # Job server detached from its client: let go of the client's
+        # terminal/pipe (task output travels over the socket anyway).
+        if ($line eq 'STDIO_NULL') {
+            open(STDIN, '<', '/dev/null');
+            open(STDOUT, '>', '/dev/null');
+            open(STDERR, '>', '/dev/null');
+            next;
         }
 
         # Handle CLI owner change
@@ -345,6 +421,10 @@ sub run_worker {
                 my $count = $2;
                 for (1..$count) {
                     my $cmd = $read_line->();
+                    if (defined $cmd) {
+                        $cmd =~ s/\x00DOLLAR\x00/\$/g;   # literal $ from $$
+                        $cmd =~ s/\x00BSNL\x00/\\\n/g;  # recipe backslash-newline
+                    }
                     push @external_commands, $cmd if defined $cmd && $cmd ne '';
                 }
 
@@ -355,6 +435,10 @@ sub run_worker {
                     my $count = $1;
                     for (1..$count) {
                         my $cmd = $read_line->();
+                        if (defined $cmd) {
+                            $cmd =~ s/\x00DOLLAR\x00/\$/g;
+                            $cmd =~ s/\x00BSNL\x00/\\\n/g;
+                        }
                         push @trailing_builtins, $cmd if defined $cmd && $cmd ne '';
                     }
                 }
@@ -386,8 +470,9 @@ sub run_worker {
             my $exit_code = 0;
 
             if ($is_dry_run) {
-                # DRY-RUN MODE: Print command
-                print $socket "OUTPUT $command\n";
+                # DRY-RUN MODE: the job-master prints the recipe lines, one
+                # per line as make -n does (joined here they came out as
+                # `a && b && c`)
                 $socket->flush();
             } else {
                 # REGULAR MODE: Execute commands using direct exec where possible
@@ -406,7 +491,7 @@ sub run_worker {
                     # Not a built-in, execute externally
                     # Strip @ (silent) and - (ignore errors) prefixes that make understands
                     my $run_cmd = $ext_cmd;
-                    $run_cmd =~ s/^[@-]+//;
+                    $run_cmd =~ s/^[@+-]+//;
                     $run_cmd =~ s/^\s+//;
                     my ($pid, $cmd_fh, $is_direct) = execute_command_direct($run_cmd);
                     if ($pid) {
@@ -431,9 +516,9 @@ sub run_worker {
                             # Not a built-in, fall back to shell
                             # Strip @ (silent) and - (ignore errors) prefixes
                             my $shell_cmd = $builtin_cmd;
-                            $shell_cmd =~ s/^[@-]+//;
+                            $shell_cmd =~ s/^[@+-]+//;
                             $shell_cmd =~ s/^\s+//;
-                            my $pid = open(my $cmd_fh, '-|', "$shell_cmd 2>&1");
+                            my $pid = open(my $cmd_fh, '-|', '/bin/sh', '-c', "{ $shell_cmd\n} 2>&1");
                             if ($pid) {
                                 while (my $out_line = <$cmd_fh>) {
                                     chomp $out_line;

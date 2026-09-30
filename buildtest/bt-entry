@@ -1,0 +1,36 @@
+#!/bin/sh
+# bt-entry ROLE [CMD...] - container entry point for smak-buildtest.
+#   node   start sshd in the foreground (a build worker "machine")
+#   head   set up ssh client config, then run CMD (normally bt-run)
+# The run's key pair is mounted read-only at /bt-ssh.
+set -e
+role=$1; shift
+
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+if [ -f /bt-ssh/id_ed25519 ]; then
+    cp /bt-ssh/id_ed25519 /bt-ssh/id_ed25519.pub /root/.ssh/
+    chmod 600 /root/.ssh/id_ed25519
+    cp /bt-ssh/id_ed25519.pub /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+fi
+cat > /root/.ssh/config <<'EOF'
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+    BatchMode yes
+    ConnectTimeout 10
+EOF
+# Non-interactive ssh sessions need the same PATH and USER as the head.
+# /work/.bt-wrap holds bt-run's job-placement wrappers during multi mode.
+printf 'PATH=/work/.bt-wrap:%s\nUSER=root\n' "$PATH" > /root/.ssh/environment
+
+case "$role" in
+    node)
+        exec /usr/sbin/sshd -D -e ;;
+    head)
+        exec "$@" ;;
+    *)
+        echo "bt-entry: unknown role '$role'" >&2; exit 2 ;;
+esac

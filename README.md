@@ -26,3 +26,4 @@ ngspice (+ OpenVAF)
 ## Documentation
 
 - [docs/cmake.md](docs/cmake.md) — Building CMake projects with smak (including interpreting CMakeLists.txt directly, without running cmake)
+- [buildtest/README.md](buildtest/README.md) — `smak-buildtest`: build GitHub make/cmake projects in podman/docker containers on any distro, comparing plain make with smak sequential, `-jN`, persistent job server and multi-machine modes

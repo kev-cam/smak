@@ -1,0 +1,1016 @@
+#!/usr/bin/perl
+# bt-run - build one project with make and with smak in several modes, and
+# compare the results.  Runs inside a smak-buildtest container (or on any
+# host that has the toolchain); smak-buildtest drives it.
+#
+#   bt-run --project NAME --list FILE [--list FILE...] --src DIR --work DIR
+#          --results DIR [--modes seq,par,server,multi,interp] [-j N]
+#          [--nodes host:N,host:N] [--local-workers N] [--no-autopkg]
+#          [--timeout SEC] [--smak DIR]
+#   bt-run --report RUNDIR          summarize result.json files under RUNDIR
+#
+# Phases for a project:
+#   prepare    copy the pristine source, bootstrap/configure, then build with
+#              plain make as the reference.  Configure or build failures are
+#              diagnosed (missing pkg-config module, header, program, library,
+#              cmake package, autoconf macro) and, with autopkg on, the
+#              matching distro packages are installed and the phase retried.
+#   modes      for every smak mode restore the configured tree, build, and
+#              check: exit status, artifacts vs. the make reference, a
+#              follow-up `make` finds nothing to do, a no-op smak re-run
+#              rebuilds nothing, and touching one source rebuilds its object.
+
+use strict;
+use warnings;
+use Cwd qw(abs_path getcwd);
+use Digest::MD5 ();
+use File::Basename qw(basename dirname);
+use File::Find ();
+use File::Path qw(make_path remove_tree);
+use Getopt::Long qw(:config no_ignore_case bundling_values);
+use JSON::PP ();
+use POSIX qw(strftime);
+use Text::ParseWords qw(shellwords);
+use Time::HiRes qw(time sleep);
+
+my $SELF_DIR = dirname(abs_path($0));
+
+my %opt = (
+    modes    => 'seq,par,server',
+    jobs     => 4,
+    autopkg  => 1,
+    timeout  => 1800,
+    smak     => dirname($SELF_DIR),
+    'local-workers' => 1,
+);
+my @lists;
+GetOptions(\%opt, 'project=s', 'list=s' => \@lists, 'src=s', 'work=s',
+           'results=s', 'modes=s', 'jobs|j=i', 'nodes=s', 'local-workers=i',
+           'autopkg!', 'timeout=i', 'smak=s', 'report=s', 'distro=s',
+           'help|h')
+    or die "bt-run: bad options (see --help)\n";
+
+if ($opt{help}) { system('sed', '-n', '2,22p', $0); exit 0; }
+if ($opt{report}) { exit report($opt{report}); }
+
+for (qw(project src work results)) {
+    die "bt-run: --$_ is required\n" unless $opt{$_};
+}
+push @lists, "$SELF_DIR/projects.list" unless @lists;
+
+my $SMAK   = "$opt{smak}/smak";
+my $ATTACH = "$opt{smak}/smak-attach";
+my $J      = $opt{jobs};
+my $family = `sh $SELF_DIR/bt-pkg family`; chomp $family;
+my $json   = JSON::PP->new->pretty->canonical;
+
+my %spec = load_spec($opt{project}, @lists);
+my $work = $opt{work};
+my $tree = "$work/tree";          # every build happens at this one path
+my $conf = "$work/configured";    # snapshot after configure
+my $res  = $opt{results};
+make_path("$res/logs", $work);
+
+my %result = (
+    project => $opt{project}, url => $spec{url}, distro => $opt{distro} // os_name(),
+    family => $family, jobs => $J, started => strftime('%Y-%m-%dT%H:%M:%S', localtime),
+    packages_installed => [], modes => {},
+);
+$result{commit} = `git -C $opt{src} rev-parse --short HEAD 2>/dev/null` // '';
+chomp $result{commit};
+$result{smak_commit} = `git -C $opt{smak} rev-parse --short HEAD 2>/dev/null` // '';
+chomp $result{smak_commit};
+
+# Tools like dnsmasq's get-version run git in the copied tree; the copy is
+# owned by whoever ran the container, so mark every directory safe.
+system('git config --global --add safe.directory "*" 2>/dev/null');
+
+my %pkg_done;      # packages already installed (or attempted)
+my %apt_file_ready;
+
+my $sys = $spec{system} || detect_system($opt{src});
+$result{system} = $sys;
+my $bdir_rel = $sys eq 'cmake' ? ($spec{builddir} || '_build') : ($spec{subdir} || '.');
+my $bdir = $bdir_rel eq '.' ? $tree : "$tree/$bdir_rel";
+my $makeargs = $spec{make} // '';
+my $target   = $spec{target} // '';
+my $timeout  = $spec{timeout} || $opt{timeout};
+
+install_declared_deps();
+my $prep = prepare();
+$result{prepare} = $prep;
+save();
+if ($prep->{status} ne 'PASS') {
+    print "bt-run: $opt{project}: prepare failed ($prep->{status})\n";
+    exit 0;
+}
+
+# smak builds get a budget scaled from the make build, so a hang costs
+# minutes rather than the full --timeout.
+unless ($spec{timeout}) {
+    my $ref = $prep->{reference}{time} || 60;
+    my $t = 6 * $ref + 60;
+    $t = 180 if $t < 180;
+    $timeout = $t < $opt{timeout} ? int($t) : $opt{timeout};
+}
+$result{mode_timeout} = $timeout;
+
+my %ref_art   = map { $_ => 1 } @{ $prep->{artifacts} };
+my %noise     = map { $_ => 1 } @{ $prep->{make_noise} };
+my @products  = @{ $prep->{products} };
+
+for my $mode (split /,/, $opt{modes}) {
+    next if $mode eq 'interp' && $sys ne 'cmake';
+    if ($mode eq 'multi' && !$opt{nodes}) {
+        $result{modes}{multi} = { status => 'SKIP', notes => ['no --nodes given'] };
+        next;
+    }
+    print "bt-run: $opt{project}: mode $mode\n";
+    my $r = eval { run_mode($mode) };
+    $r = { status => 'ERROR', notes => ["harness error: $@"] } if $@;
+    $result{modes}{$mode} = $r;
+    kill_leftovers($r);
+    save();
+}
+$result{finished} = strftime('%Y-%m-%dT%H:%M:%S', localtime);
+save();
+print "bt-run: $opt{project}: done\n";
+exit 0;
+
+# ---------------------------------------------------------------------------
+# spec / detection
+
+sub load_spec {
+    my ($name, @files) = @_;
+    for my $f (@files) {
+        open(my $fh, '<', $f) or next;
+        while (my $line = <$fh>) {
+            next if $line =~ /^\s*(#|$)/;
+            my @w = shellwords($line);
+            next unless @w >= 2 && $w[0] eq $name;
+            my %s = (name => $w[0], url => $w[1]);
+            for my $kv (@w[2 .. $#w]) {
+                my ($k, $v) = $kv =~ /^([\w.]+)=(.*)$/s or next;
+                $s{$k} = $v;
+            }
+            return %s;
+        }
+    }
+    die "bt-run: project '$name' not found in @files\n";
+}
+
+sub detect_system {
+    my ($d) = @_;
+    return 'autotools' if -x "$d/configure" || -f "$d/configure";
+    return 'make'      if grep { -f "$d/$_" } qw(GNUmakefile Makefile makefile);
+    return 'autotools' if grep { -f "$d/$_" } qw(configure.ac configure.in autogen.sh);
+    return 'cmake'     if -f "$d/CMakeLists.txt";
+    return 'unknown';
+}
+
+sub os_name {
+    open(my $fh, '<', '/etc/os-release') or return 'unknown';
+    while (<$fh>) { return $1 if /^PRETTY_NAME="?([^"\n]*)/ }
+    return 'unknown';
+}
+
+sub save {
+    open(my $fh, '>', "$res/result.json") or die "cannot write $res/result.json: $!\n";
+    print $fh $json->encode(\%result);
+}
+
+# ---------------------------------------------------------------------------
+# running commands
+
+# Run a shell command in $dir, output to logs/$log.  Returns (rc, seconds).
+# rc 124 = timed out.  $stdin is an optional string fed to the command.
+sub run {
+    my ($cmd, $dir, $log, %o) = @_;
+    my $t = $o{timeout} || $timeout;
+    my $logf = "$res/logs/$log.log";
+    open(my $lf, '>>', $logf) or die "cannot write $logf: $!\n";
+    print $lf "### [", strftime('%H:%M:%S', localtime), "] (cd $dir && $cmd)\n";
+    close $lf;
+    my $in = '/dev/null';
+    if (defined $o{stdin}) {
+        $in = "$res/logs/.stdin.$$";
+        open(my $sf, '>', $in) or die; print $sf $o{stdin}; close $sf;
+    }
+    my $env = $o{env} ? join(' ', map { "$_=" . sq($o{env}{$_}) } sort keys %{$o{env}}) . ' ' : '';
+    my $t0 = time;
+    my $rc = system('sh', '-c',
+        "cd " . sq($dir) . " && ${env}timeout -k 15 $t sh -c " . sq($cmd)
+        . " <" . sq($in) . " >>" . sq($logf) . " 2>&1");
+    my $secs = sprintf('%.1f', time - $t0);
+    $rc = $rc == -1 ? 127 : ($rc & 127) ? 128 + ($rc & 127) : $rc >> 8;
+    open($lf, '>>', $logf); print $lf "### rc=$rc time=${secs}s\n"; close $lf;
+    return ($rc, $secs);
+}
+
+sub sq { my $s = shift; $s =~ s/'/'\\''/g; return "'$s'"; }
+
+sub slurp { my $f = shift; open(my $fh, '<', $f) or return ''; local $/; return <$fh>; }
+
+# Tail of the last command section in a log, for diagnosis.
+sub last_section {
+    my ($log) = @_;
+    my $txt = slurp("$res/logs/$log.log");
+    my @parts = split /^### \[/m, $txt;
+    return $parts[-1] // '';
+}
+
+# ---------------------------------------------------------------------------
+# tree snapshots and change detection
+
+sub copy_tree {
+    my ($from, $to) = @_;
+    remove_tree($to) if -e $to;
+    system('cp', '-a', $from, $to) == 0 or die "cp -a $from $to failed\n";
+}
+
+# A time stamp that everything written so far is older than.
+sub mark { sleep 1.1; return time - 0.05; }
+
+# Files under $dir modified at/after $t (relative to $tree).
+sub changed_since {
+    my ($t, $dir) = @_;
+    $dir //= $tree;
+    my @out;
+    File::Find::find({ no_chdir => 1, wanted => sub {
+        if (-d $_) {
+            $File::Find::prune = 1 if m{/\.git$};
+            return;
+        }
+        my @st = Time::HiRes::lstat($_) or return;
+        return unless $st[9] >= $t;
+        (my $rel = $File::Find::name) =~ s{^\Q$tree\E/}{};
+        return if $rel =~ m{(^|/)\.smak|smak[^/]*\.(log|port)$|(^|/)\.bt-};
+        push @out, $rel;
+    }}, $dir) if -d $dir;
+    return sort @out;
+}
+
+sub is_product {
+    my ($f) = @_;
+    return 1 if $f =~ /\.(a|so(\.\d+)*)$/;
+    return 0 if $f =~ /\.o$/;
+    open(my $fh, '<', "$tree/$f") or return 0;
+    read($fh, my $magic, 4);
+    return ($magic // '') eq "\x7fELF" && -x "$tree/$f";
+}
+
+# ---------------------------------------------------------------------------
+# failure diagnosis and package resolution
+
+# Words in configure error messages that never name a package.
+my %STOP;
+BEGIN { %STOP = map { $_ => 1 } qw(
+    cannot find required library libraries not found the and for with without
+    you need please install development headers header package packages files
+    file was could unable support missing version newer older than must use
+    are none this that your system available enable disable option options
+    compile compiler link found check checking also either neither any from
+    have has into using when which will work working usable program programs
+    install installed requires request requested lib dev devel error) }
+
+# Find the things a failed configure/build log says are missing.
+# Returns a list of { key => 'pc:foo', line => '...' }.
+sub diagnose_missing {
+    my ($txt) = @_;
+    my (@d, %seen);
+    my $add = sub {
+        my ($k, $l) = @_;
+        return if $seen{$k}++;
+        $l =~ s/\s+$//; $l = substr($l, 0, 240);
+        push @d, { key => $k, line => $l };
+    };
+    for my $l (split /\n/, $txt) {
+        if ($l =~ /Package '([\w.+-]+)',? required by '[^']*', not found/
+         || $l =~ /No package '([\w.+-]+)' found/
+         || $l =~ /Package ([\w.+-]+) was not found in the pkg-config search path/
+         || $l =~ /^\s*-- (?:Checking for module|No package) '([\w.+-]+)'.*not found/
+         || $l =~ /^\s+-\s+([\w.+-]+)\s*$/ && $txt =~ /required packages were not found/) {
+            $add->("pc:$1", $l);
+        }
+        if ($l =~ /fatal error: ([\w\/.+-]+\.h(?:pp|h)?): No such file or directory/
+         || $l =~ /fatal error: '([\w\/.+-]+\.h(?:pp)?)' file not found/
+         || $l =~ /configure: error:.*?\b([\w\/+-]+\.h)\b.*(?:not found|missing|required|cannot find)/i) {
+            $add->("h:$1", $l);
+        }
+        if ($l =~ /cannot find -l([\w+.-]+)/) { $add->("lib:$1", $l); }
+        if ($l =~ /(?:^|\s)([\w.+-]+): (?:command )?not found\s*$/
+         || $l =~ /WARNING: '([\w.+-]+)' is (?:missing|needed) on your system/
+         || $l =~ /Could not find (?:program|executable) '?([\w.+-]+)/i
+         || $l =~ /^make(?:\[\d+\])?: ([\w.+-]+): No such file or directory/) {
+            my $p = $1;
+            next if $p =~ /^(sh|then|else|fi|do|done|if|the|a|an|to|in|for|C|valid)$/;
+            $add->("bin:$p", $l);
+        }
+        # Free-text configure errors ("libevent not found", "cannot find
+        # required curses/ncurses library"): try each meaningful word as a
+        # pkg-config module, library, header or program.
+        if ($l =~ /configure: error:\s*(.*)/) {
+            my $msg = $1;
+            $add->('bin:cc', $l) if $msg =~ /no acceptable C compiler/i;
+            for my $w ($msg =~ /([A-Za-z][\w.+-]*)/g) {
+                next if length($w) < 3 || $STOP{lc $w};
+                $add->("any:$w", $l);
+            }
+        }
+        if ($l =~ /Could NOT find ([\w:]+)/
+         || $l =~ /Could not find a package configuration file provided by "([\w:]+)"/
+         || $l =~ /By not providing "Find([\w]+)\.cmake"/) {
+            $add->("cmake:$1", $l);
+        }
+        if ($l =~ /possibly undefined macro:\s*(\w+)/
+         || $l =~ /error: (?:m4 )?macro '?(\w+)'? (?:not found|is not defined)/
+         || $l =~ /\b(PKG_CHECK_MODULES|PKG_PROG_PKG_CONFIG|AM_GNU_GETTEXT|LT_INIT|AC_PROG_LIBTOOL)\b.*(?:undefined|not found|command not found)/
+         || $l =~ /syntax error near unexpected token.*\b(PKG_CHECK_MODULES|AM_GNU_GETTEXT|LT_INIT)\b/) {
+            my $m = $1;
+            $add->($m =~ /^AX_/ ? 'm4:AX_' : "m4:$m", $l);
+        }
+    }
+    # Failed checks just before a configure error name what was missing:
+    #   checking for libevent_core >= 2... no     -> pc:libevent_core
+    #   checking for event2/event.h... no         -> h:event2/event.h
+    my @lines = split /\n/, $txt;
+    for my $i (grep { $lines[$_] =~ /configure: error:/ } 0 .. $#lines) {
+        for my $l (@lines[($i > 12 ? $i - 12 : 0) .. $i - 1]) {
+            next unless $l =~ /^checking for (.+?)\.\.\. no\s*$/;
+            my $what = $1;
+            if ($what =~ /^([\w.+-]+)\s*[<>=]=?\s*[\d.]+$/) { $add->("pc:$1", $l); }
+            elsif ($what =~ /^([\w\/.+-]+\.h)$/)              { $add->("h:$1", $l); }
+        }
+    }
+    return @d;
+}
+
+
+# Classify a smak (or other) build failure for the report.
+sub diagnose_failure {
+    my ($txt) = @_;
+    my @notes;
+    my @pat = (
+        [qr/iteration limit/,                              'smak: variable expansion iteration limit'],
+        [qr/No rule to make target\s+'([^']+)'/,           'no rule to make target'],
+        [qr/smak: \*\*\*.*/,                               'smak error'],
+        [qr/no workers available.*/,                       'smak: no workers available'],
+        [qr/Job-master (?:connection lost|failed to start).*/, 'smak: job-server startup'],
+        [qr/Cannot connect to job-master.*/,               'smak: cannot connect to job-server'],
+        [qr/Waiting for layer \d+ to drain.*/,             'smak: layer drain wait (possible hang)'],
+        [qr/(?:at|line) \S*Smak\w*\.pm line \d+.*/,        'perl error inside smak'],
+        [qr/Permission denied \(publickey.*/,              'ssh: authentication failed'],
+        [qr/ssh: .*/,                                      'ssh error'],
+        [qr/^.*\berror:.*$/m,                              'compiler/tool error'],
+        [qr/^make.*\*\*\*.*$/m,                            'make error'],
+    );
+    for my $p (@pat) {
+        if ($txt =~ /($p->[0])/) {
+            my $l = $1; $l =~ s/\s+$//;
+            push @notes, "$p->[1]: " . substr($l, 0, 200);
+        }
+    }
+    push @notes, 'timed out' if $txt =~ /### rc=124 /;
+    return @notes[0 .. ($#notes < 3 ? $#notes : 3)];
+}
+
+my %pkgmap;
+sub pkgmap {
+    return \%pkgmap if %pkgmap;
+    open(my $fh, '<', "$SELF_DIR/pkgmap.txt") or return \%pkgmap;
+    while (<$fh>) {
+        next if /^\s*(#|$)/;
+        my ($key, @kv) = split;
+        for (@kv) { my ($f, $p) = split /=/, $_, 2; $pkgmap{$key}{$f} = $p; }
+    }
+    return \%pkgmap;
+}
+
+# Map a missing-thing key to package names for this distro family.
+sub resolve {
+    my ($key) = @_;
+    my $m = pkgmap();
+    my ($kind, $name) = split /:/, $key, 2;
+    if ($kind eq 'any') {
+        # A bare name from a configure message: try the likely meanings.
+        (my $bare = $name) =~ s/^lib//;
+        for my $k ("pc:$name", "pc:lib$bare", "lib:$bare", "h:$bare.h", "bin:$name") {
+            my @p = resolve($k);
+            return @p if @p;
+        }
+        return ();
+    }
+    my $hit = $m->{$key} // ($kind eq 'cmake' ? $m->{"cmake:" . lc $name} : undef);
+    ($hit) = map { $m->{$_} } grep { /^cmake:/i && lc($_) eq lc($key) } keys %$m
+        if !$hit && $kind eq 'cmake';
+    if ($hit && defined $hit->{$family}) {
+        return () if $hit->{$family} eq '-';
+        return split /,/, $hit->{$family};
+    }
+    return generic_resolve($kind, $name);
+}
+
+sub generic_resolve {
+    my ($kind, $name) = @_;
+    if ($family eq 'rpm' || $family eq 'suse') {
+        my $lib = $family eq 'rpm' ? '/usr/lib64' : '/usr/lib64';
+        return "pkgconfig($name)"  if $kind eq 'pc';
+        return "cmake($name)"      if $kind eq 'cmake';
+        return "/usr/bin/$name"    if $kind eq 'bin';
+        return "/usr/include/$name" if $kind eq 'h';
+        return "$lib/lib$name.so"  if $kind eq 'lib';
+        return ();
+    }
+    if ($family eq 'apk') {
+        return "pc:$name"  if $kind eq 'pc';
+        return "cmd:$name" if $kind eq 'bin';
+        return ();
+    }
+    if ($family eq 'deb') {
+        my $re = $kind eq 'pc'    ? "/\Q$name\E\\.pc\$"
+               : $kind eq 'h'     ? "^/usr/include/(?:[^/]+-linux-gnu/)?\Q$name\E\$"
+               : $kind eq 'bin'   ? "^/(?:usr/)?s?bin/\Q$name\E\$"
+               : $kind eq 'lib'   ? "/lib\Q$name\E\\.(?:so|a)\$"
+               : $kind eq 'cmake' ? "/(?i:\Q$name\E)(?:Config|-config)\\.cmake\$"
+               : undef;
+        return () unless $re;
+        unless ($apt_file_ready{done}++) {
+            run('apt-file update', '/', 'autopkg', timeout => 600);
+        }
+        my @pk = `apt-file search -x '$re' 2>/dev/null`;
+        my %p = map { /^([^:]+):/ ? ($1 => 1) : () } @pk;
+        my @c = sort { ($b =~ /-dev$/) <=> ($a =~ /-dev$/) || length($a) <=> length($b) } keys %p;
+        return @c ? ($c[0]) : ();
+    }
+    if ($family eq 'arch') {
+        my $path = $kind eq 'pc'  ? "usr/lib/pkgconfig/$name.pc"
+                 : $kind eq 'h'   ? "usr/include/$name"
+                 : $kind eq 'bin' ? "usr/bin/$name"
+                 : $kind eq 'lib' ? "usr/lib/lib$name.so" : undef;
+        return () unless $path;
+        run('pacman -Fy', '/', 'autopkg', timeout => 600) unless $apt_file_ready{done}++;
+        my ($p) = `pacman -Fq '$path' 2>/dev/null`;
+        return () unless $p;
+        chomp $p; $p =~ s{^.*/}{};
+        return ($p);
+    }
+    return ();
+}
+
+# Install packages for the diagnosed keys.  Returns list of new packages.
+sub autopkg {
+    my (@diag) = @_;
+    my @new;
+    for my $d (@diag) {
+        my @p = grep { !$pkg_done{$_} } resolve($d->{key});
+        $d->{packages} = [resolve($d->{key})];
+        push @new, @p;
+    }
+    my %u; @new = grep { !$u{$_}++ } @new;
+    return () unless @new;
+    $pkg_done{$_} = 1 for @new;
+    my @ok;
+    my ($rc) = run("sh $SELF_DIR/bt-pkg install " . join(' ', map { sq($_) } @new), '/', 'autopkg');
+    if ($rc == 0) {
+        @ok = @new;
+    } else {
+        for my $p (@new) {  # one bad name must not block the rest
+            my ($r) = run("sh $SELF_DIR/bt-pkg install " . sq($p), '/', 'autopkg');
+            push @ok, $p if $r == 0;
+        }
+    }
+    push @{ $result{packages_installed} }, @ok;
+    return @ok;
+}
+
+sub install_declared_deps {
+    my @keys;
+    push @keys, map { { key => $_, line => 'declared in projects.list' } }
+                split /,/, ($spec{deps} // '');
+    my @raw = split /,/, ($spec{"pkgs.$family"} // '');
+    my @p = resolve_all(@keys);
+    push @p, @raw;
+    return unless @p;
+    $pkg_done{$_} = 1 for @p;
+    my ($rc) = run("sh $SELF_DIR/bt-pkg install " . join(' ', map { sq($_) } @p), '/', 'autopkg');
+    push @{ $result{packages_installed} }, @p if $rc == 0;
+}
+
+sub resolve_all { my @p; push @p, resolve($_->{key}) for @_; return @p; }
+
+# ---------------------------------------------------------------------------
+# prepare: bootstrap, configure, reference make build
+
+sub prepare {
+    my %p = (status => 'FAIL', rounds => 0, diagnosis => []);
+    my $max = $opt{autopkg} ? 10 : 1;
+    for my $round (1 .. $max) {
+        $p{rounds} = $round;
+        copy_tree($opt{src}, $tree);
+        my ($ok, $stage, $log) = configure_tree();
+        if ($ok) {
+            copy_tree($tree, $conf);
+            my $t = mark();
+            my ($rc, $secs) = run("make -j$J $makeargs $target", $bdir, 'reference');
+            if ($rc == 0) {
+                my @art = changed_since($t);
+                $p{status} = 'PASS';
+                $p{reference} = { rc => 0, time => $secs, artifacts => scalar @art };
+                $p{artifacts} = \@art;
+                $p{products} = [grep { is_product($_) } @art];
+                $p{commands} = [compile_commands(last_section('reference'))];
+                $p{product_sums} = { map { $_ => file_md5($_) } @{ $p{products} } };
+                # What make itself redoes on an up-to-date tree is noise that
+                # must not be blamed on smak.
+                my $t2 = mark();
+                run("make $makeargs $target", $bdir, 'reference');
+                $p{make_noise} = [changed_since($t2)];
+                # Asked here, not in each mode's fresh tree: reading the
+                # makefile runs its $(shell ...) (redis writes release.h),
+                # which must not happen before a mode's mark.
+                $p{default_goal} = default_goal();
+                # Products make itself does not reproduce (zlib's infcover is
+                # built with -coverage, which embeds a random stamp) cannot
+                # be compared: build once more from the configured tree.
+                copy_tree($conf, $tree);
+                run("make -j$J $makeargs $target", $bdir, 'reference-again');
+                $p{unstable_products} = [grep { !-f "$tree/$_" || file_md5($_) ne $p{product_sums}{$_} }
+                                         @{ $p{products} }];
+                return \%p;
+            }
+            ($stage, $log) = ('build', 'reference');
+            $p{reference} = { rc => $rc, time => $secs };
+        }
+        my $txt = last_section($log);
+        my @d = diagnose_missing($txt);
+        push @{ $p{diagnosis} }, map { { %$_, stage => $stage, round => $round } } @d;
+        $p{status} = $stage eq 'build' ? 'BUILD-FAIL' : 'CONFIG-FAIL';
+        $p{failure} = [diagnose_failure($txt)];
+        last unless $opt{autopkg} && @d;
+        my @new = autopkg(@d);
+        last unless @new;
+        print "bt-run: $opt{project}: installed @new, retrying\n";
+    }
+    $p{artifacts} = []; $p{products} = []; $p{make_noise} = [];
+    return \%p;
+}
+
+sub configure_tree {
+    if ($sys eq 'autotools' && !-f "$tree/configure") {
+        my $boot = $spec{bootstrap}
+            || (-f "$tree/autogen.sh"  ? 'NOCONFIGURE=1 sh ./autogen.sh'
+              : -f "$tree/bootstrap"   ? 'sh ./bootstrap'
+              : -f "$tree/autoconf.sh" ? 'sh ./autoconf.sh'
+              : 'autoreconf -fi');
+        my ($rc) = run($boot, $tree, 'configure');
+        return (0, 'bootstrap', 'configure') if $rc || !-f "$tree/configure";
+    }
+    if ($sys eq 'autotools') {
+        my ($rc) = run("./configure " . ($spec{configure} // ''), $tree, 'configure');
+        return (0, 'configure', 'configure') if $rc;
+    } elsif ($sys eq 'cmake') {
+        # The real cmake: smak's cmake shim is deliberately not on PATH.
+        my ($rc) = run("cmake -S . -B $bdir_rel " . ($spec{configure} // ''), $tree, 'configure');
+        return (0, 'configure', 'configure') if $rc;
+    } elsif ($spec{configure}) {
+        my ($rc) = run($spec{configure}, $tree, 'configure');
+        return (0, 'configure', 'configure') if $rc;
+    } elsif ($sys eq 'unknown') {
+        return (0, 'detect', 'configure');
+    }
+    return (1);
+}
+
+# ---------------------------------------------------------------------------
+# smak modes
+
+sub smak_cmd {
+    my ($mode) = @_;
+    return "$SMAK $makeargs $target"                 if $mode eq 'seq';
+    return "$SMAK -j$J $makeargs $target"            if $mode eq 'par';
+    if ($mode eq 'multi') {
+        return "$SMAK -j$J --ssh=$opt{nodes} --local-workers=$opt{'local-workers'}"
+             . " --cd=" . dirname($bdir) . " $makeargs $target";
+    }
+    die "no batch command for mode $mode\n";
+}
+
+sub run_mode {
+    my ($mode) = @_;
+    my %r = (notes => []);
+    my %env;
+    if ($mode eq 'interp') {
+        return run_interp();
+    }
+    copy_tree($conf, $tree);
+    if ($mode eq 'multi') {
+        %env = (SMAK_REMOTE_PATH => $opt{smak});
+        sync_nodes(\%r) or return { %r, status => 'FAIL' };
+    }
+    my $log = "smak-$mode";
+    # CLI sessions exit 0 whatever happens, so judge them by their output.
+    my $goal = $target || $result{prepare}{default_goal} || default_goal();
+    my $cli = sub {
+        my ($cmd, $input) = @_;
+        my ($rc, $secs) = run($cmd, $bdir, $log, stdin => $input);
+        my $txt = last_section($log);
+        $rc = 1 if $rc == 0 && ($txt =~ /Build failed|No default target|✗/
+                                || $txt !~ /Build succeeded/);
+        return ($rc, $secs, $txt);
+    };
+    my $wrap = $mode eq 'multi' ? install_exec_wrappers(\%env) : undef;
+    my $t = mark();
+    my ($rc, $secs);
+    if ($mode eq 'server') {
+        my $txt;
+        ($rc, $secs, $txt) = $cli->("$SMAK -cli -j$J $makeargs", "build $goal\ndetach\n");
+        ($r{server_pid}) = $txt =~ /job server (\d+) still running/;
+    } else {
+        ($rc, $secs) = run(smak_cmd($mode), $bdir, $log, env => \%env);
+    }
+    $r{placement} = exec_placement($wrap) if $wrap;
+    $r{rc} = $rc; $r{time} = $secs;
+    $r{ref_time} = $result{prepare}{reference}{time};
+    check_build(\%r, $t, $log);
+
+    if ($mode eq 'server') {
+        if (!$r{server_pid} || !kill(0, $r{server_pid})) {
+            push @{ $r{notes} }, 'job server not running after detach';
+            $r{fail}++;
+        }
+    }
+    if ($mode eq 'multi') {
+        my $p = $r{placement};
+        if (!$p || !%$p) {
+            push @{ $r{notes} }, 'job placement not observed (compilers not called via PATH)';
+        } elsif (!grep { $_ ne 'head' } keys %$p) {
+            $r{fail}++;
+            push @{ $r{notes} }, 'no jobs ran on the worker nodes';
+        } else {
+            push @{ $r{notes} }, 'jobs per host: '
+                . join(' ', map { "$_=$p->{$_}" } sort keys %$p);
+        }
+    }
+    my $again = $mode eq 'server'
+        ? sub { $cli->("$ATTACH -pid $r{server_pid}", "build $goal\ndetach\n") }
+        : sub { run(smak_cmd($mode), $bdir, $log, env => \%env) };
+
+    if ($mode eq 'server' && $r{server_pid} && !$target) {
+        # The attached CLI should build the default goal like `smak -cli` does.
+        my ($prc) = $cli->("$ATTACH -pid $r{server_pid}", "build\ndetach\n");
+        if ($prc) {
+            $r{warn}++;
+            push @{ $r{notes} }, 'smak-attach: bare `build` does not build the default goal';
+        }
+    }
+
+    if ($rc == 0 && !$r{fail}) {
+        verify_with_make(\%r);
+        noop_check(\%r, $again);
+        incremental_check(\%r, $again);
+    }
+    if ($mode eq 'server' && $r{server_pid}) {
+        run("$ATTACH --kill-all", $bdir, $log);
+        for (1 .. 20) { last unless kill(0, $r{server_pid}); sleep 0.25; }
+        if (kill(0, $r{server_pid})) {
+            push @{ $r{notes} }, 'job server survived --kill-all';
+            $r{warn}++;
+        }
+    }
+    $r{status} = $r{fail} ? 'FAIL' : $r{warn} ? 'WARN' : 'PASS';
+    return \%r;
+}
+
+sub check_build {
+    my ($r, $t, $log) = @_;
+    my @got = changed_since($t);
+    my %got = map { $_ => 1 } @got;
+    $r->{missing} = [grep { !$got{$_} } sort keys %ref_art];
+    $r->{extra}   = [grep { !$ref_art{$_} } @got];
+    if ($r->{rc} != 0) {
+        $r->{fail}++;
+        push @{ $r->{notes} }, $r->{rc} == 124 ? 'timed out' : "exit status $r->{rc}";
+        push @{ $r->{notes} }, diagnose_failure(last_section($log));
+    }
+    if (@{ $r->{missing} }) {
+        $r->{fail}++;
+        push @{ $r->{notes} }, scalar(@{ $r->{missing} }) . ' artifact(s) make built are missing';
+    }
+    if (@{ $r->{extra} }) {
+        $r->{warn}++;
+        push @{ $r->{notes} }, scalar(@{ $r->{extra} }) . " file(s) written that make does not write";
+    }
+    return if $r->{rc} != 0;
+    # Same commands and same binaries as make?  Different compile flags with
+    # different products means smak built something else (e.g. lost -D flags).
+    # Compared without whitespace: parallel output can split a word.
+    my %ref_cmd = map { (my $k = $_) =~ s/\s+//g; $k => $_ } @{ $result{prepare}{commands} || [] };
+    my %cmd = map { (my $k = $_) =~ s/\s+//g; $k => $_ } compile_commands(first_section($log));
+    %cmd = %ref_cmd unless %cmd;   # CLI sessions do not echo commands
+    my @only_make = map { $ref_cmd{$_} } grep { !$cmd{$_} } sort keys %ref_cmd;
+    my @only_smak = map { $cmd{$_} } grep { !$ref_cmd{$_} } sort keys %cmd;
+    # make -jN output can put a command mid-line (redis: jemalloc's configure
+    # printed "checking for stdlib.h... cc ... -c -o lbaselib.o lbaselib.c")
+    if (@only_smak) {
+        (my $ref_txt = first_section('reference')) =~ s/\s+//g;
+        @only_smak = grep { (my $k = $_) =~ s/\s+//g; index($ref_txt, $k) < 0 } @only_smak;
+    }
+    my $sums = $result{prepare}{product_sums} || {};
+    my %unstable = map { $_ => 1 } @{ $result{prepare}{unstable_products} || [] };
+    my @differ = grep { !$unstable{$_} && -f "$tree/$_" && file_md5($_) ne $sums->{$_} } sort keys %$sums;
+    $r->{products_differ} = \@differ;
+    if (@only_make || @only_smak) {
+        $r->{command_diff} = { make_only => [@only_make[0 .. ($#only_make < 2 ? $#only_make : 2)]],
+                               smak_only => [@only_smak[0 .. ($#only_smak < 2 ? $#only_smak : 2)]],
+                               counts => [scalar @only_make, scalar @only_smak] };
+    }
+    if ((@only_make || @only_smak) && @differ) {
+        $r->{fail}++;
+        push @{ $r->{notes} }, scalar(@only_make) . ' compile command(s) differ from make and '
+            . scalar(@differ) . ' product(s) differ: ' . join(' ', @differ[0 .. ($#differ < 2 ? $#differ : 2)]);
+    } elsif (@differ) {
+        $r->{warn}++;
+        push @{ $r->{notes} }, scalar(@differ) . ' product(s) not byte-identical to make\'s (same commands)';
+    } elsif (@only_make || @only_smak) {
+        # e.g. automake's `$depbase` printed expanded; informational only.
+        push @{ $r->{info} }, scalar(@only_make) . ' compile command(s) printed differently from make (products identical)';
+    }
+}
+
+# Compiler invocations in a log section, whitespace-normalized.
+sub compile_commands {
+    my ($txt) = @_;
+    my %c;
+    for my $l (split /\n/, $txt) {
+        $l =~ s/^\s+//; $l =~ s/\s+/ /g; $l =~ s/ $//;
+        next unless $l =~ m{^(?:\S*/)?(?:cc|gcc|g\+\+|c\+\+|clang|clang\+\+|[\w.-]+-(?:gcc|g\+\+))(?:-[\d.]+)? }
+                 && $l =~ / -[co] /;
+        $c{$l} = 1;
+    }
+    return sort keys %c;
+}
+
+sub first_section {
+    my ($log) = @_;
+    my @parts = split /^### \[/m, slurp("$res/logs/$log.log");
+    return $parts[1] // '';
+}
+
+sub file_md5 {
+    my ($f) = @_;
+    open(my $fh, '<', "$tree/$f") or return '';
+    binmode $fh;
+    return Digest::MD5->new->addfile($fh)->hexdigest;
+}
+
+sub verify_with_make {
+    my ($r) = @_;
+    my $t = mark();
+    my ($rc) = run("make $makeargs $target", $bdir, 'verify-make');
+    my @redo = grep { !$noise{$_} } changed_since($t);
+    $r->{make_redid} = \@redo;
+    if ($rc != 0) {
+        $r->{fail}++;
+        push @{ $r->{notes} }, "make after smak failed (exit $rc)";
+    } elsif (@redo) {
+        $r->{fail}++;
+        push @{ $r->{notes} }, 'make found work smak left undone: '
+            . join(' ', @redo[0 .. ($#redo < 4 ? $#redo : 4)]);
+    }
+}
+
+sub noop_check {
+    my ($r, $again) = @_;
+    my $t = mark();
+    my ($rc) = $again->();
+    my @redo = grep { !$noise{$_} } changed_since($t);
+    $r->{noop_rebuilt} = \@redo;
+    if ($rc != 0) {
+        $r->{fail}++;
+        push @{ $r->{notes} }, "no-op rebuild failed (exit $rc)";
+    } elsif (@redo) {
+        $r->{warn}++;
+        push @{ $r->{notes} }, scalar(@redo) . ' file(s) rebuilt on a no-op run: '
+            . join(' ', @redo[0 .. ($#redo < 4 ? $#redo : 4)]);
+    }
+}
+
+# Pick an object file whose source can be identified, touch the source,
+# rebuild, and check the object and at least one product were redone.
+# Would make, on the tree as it is now, remake $obj (dry run, recursive
+# makes included)?
+sub make_would_remake {
+    my ($obj, $src) = @_;
+    my $out = `cd '$bdir' && make -n $makeargs $target 2>&1`;
+    (my $o = $obj) =~ s{.*/}{};
+    (my $s = $src) =~ s{.*/}{};
+    return $out =~ /\Q$o\E/ || $out =~ /\Q$s\E/;
+}
+
+sub incremental_check {
+    my ($r, $again) = @_;
+    my ($src, $obj) = pick_touch();
+    unless ($src) {
+        push @{ $r->{notes} }, 'incremental check skipped (no source/object pair found)';
+        return;
+    }
+    my $t = mark();
+    utime(undef, undef, "$tree/$src");
+    my ($rc) = $again->();
+    my %ch = map { $_ => 1 } changed_since($t);
+    my $relinked = grep { $ch{$_} } @products;
+    $r->{incremental} = { touched => $src, object => $obj, rc => $rc,
+                          object_rebuilt => $ch{$obj} ? 1 : 0, products_relinked => $relinked };
+    if ($rc != 0) {
+        $r->{fail}++;
+        push @{ $r->{notes} }, "incremental rebuild failed (exit $rc)";
+    } elsif (!$ch{$obj} && !make_would_remake($obj, $src)) {
+        # redis builds deps/ once behind a stamp: make does not remake it either
+        push @{ $r->{info} }, "touching $src rebuilt nothing, as with make";
+    } elsif (!$ch{$obj}) {
+        $r->{fail}++;
+        push @{ $r->{notes} }, "touching $src did not rebuild $obj";
+    } elsif (@products && !$relinked) {
+        $r->{warn}++;
+        push @{ $r->{notes} }, "touching $src rebuilt $obj but relinked nothing";
+    }
+}
+
+sub pick_touch {
+    if ($spec{touch}) {
+        my ($s, $o) = split /:/, $spec{touch};
+        return ($s, $o);
+    }
+    my %srcs;
+    File::Find::find({ no_chdir => 1, wanted => sub {
+        $File::Find::prune = 1 if -d $_ && m{/(\.git|_build|CMakeFiles)$};
+        return unless /\.(c|cc|cpp|cxx|C)$/;
+        (my $rel = $File::Find::name) =~ s{^\Q$tree\E/}{};
+        push @{ $srcs{basename($rel)} }, $rel;
+    }}, $tree);
+    for my $o (sort grep { /\.o$/ } keys %ref_art) {
+        # cmake: <bdir>/CMakeFiles/<t>.dir/<src path>.o
+        if ($o =~ m{CMakeFiles/[^/]+\.dir/(.+\.(?:c|cc|cpp|cxx|C))\.o$}) {
+            return ($1, $o) if -f "$tree/$1";
+        }
+        (my $stem = basename($o)) =~ s/\.o$//;
+        $stem =~ s/^.*?-(?=[^-]+$)// unless grep { $srcs{"$stem.$_"} } qw(c cc cpp cxx);
+        for my $ext (qw(c cc cpp cxx)) {
+            my $c = $srcs{"$stem.$ext"} or next;
+            return ($c->[0], $o) if @$c == 1;
+        }
+    }
+    return;
+}
+
+sub run_interp {
+    my %r = (notes => []);
+    copy_tree($opt{src}, $tree);
+    my $ib = "$tree/_smak_interp";
+    make_path($ib);
+    my $log = 'smak-interp';
+    my ($rc) = run("$SMAK -cmake-interp-only -S .. -B . " . ($spec{configure} // ''), $ib, $log);
+    if ($rc) {
+        push @{ $r{notes} }, 'CMakeLists.txt interpretation failed', diagnose_failure(last_section($log));
+        return { %r, rc => $rc, status => 'FAIL' };
+    }
+    my $t = mark();
+    my $secs;
+    ($rc, $secs) = run("$SMAK -j$J $target", $ib, $log);
+    @r{qw(rc time ref_time)} = ($rc, $secs, $result{prepare}{reference}{time});
+    my %want = map { basename($_) => 1 } @products;
+    my %got  = map { basename($_) => 1 } grep { is_product($_) } changed_since($t, $ib);
+    $r{missing} = [grep { !$got{$_} } sort keys %want];
+    if ($rc) {
+        push @{ $r{notes} }, "exit status $rc", diagnose_failure(last_section($log));
+        $r{fail}++;
+    }
+    if (@{ $r{missing} }) {
+        push @{ $r{notes} }, scalar(@{ $r{missing} }) . ' product(s) cmake+make built are missing';
+        $r{fail}++;
+    }
+    noop_check(\%r, sub { run("$SMAK -j$J $target", $ib, $log) }) unless $rc;
+    $r{status} = $r{fail} ? 'FAIL' : $r{warn} ? 'WARN' : 'PASS';
+    return \%r;
+}
+
+# The makefile's default goal, as GNU make sees it.
+sub default_goal {
+    my $g = `cd '$bdir' && make -pq $makeargs .bt-no-such-goal 2>/dev/null | sed -n 's/^\\.DEFAULT_GOAL := //p' | tail -1`;
+    chomp $g;
+    return $g || 'all';
+}
+
+# Put compiler/archiver wrappers first on PATH (head and, via the nodes'
+# ~/.ssh/environment, the workers) so each call logs the host it ran on.
+# The wrapper dir lives on the shared /work volume.
+sub install_exec_wrappers {
+    my ($env) = @_;
+    my $dir = dirname($work) . '/.bt-wrap';
+    remove_tree($dir);
+    make_path($dir);
+    for my $tool (qw(cc gcc c++ g++ clang clang++ ar ld)) {
+        open(my $fh, '>', "$dir/$tool") or die "cannot write $dir/$tool: $!\n";
+        print $fh <<"EOF";
+#!/bin/sh
+echo "\$(hostname) $tool" >> $dir/exec.log
+PATH=\$(echo "\$PATH" | sed 's|$dir:||g')
+exec $tool "\$@"
+EOF
+        close $fh;
+        chmod 0755, "$dir/$tool";
+    }
+    $env->{PATH} = "$dir:$ENV{PATH}";
+    return $dir;
+}
+
+sub exec_placement {
+    my ($dir) = @_;
+    my %n;
+    for (split /\n/, slurp("$dir/exec.log")) {
+        my ($h) = split;
+        $n{$h}++ if $h;
+    }
+    remove_tree($dir);
+    return \%n;
+}
+
+# Nodes must have the same packages the head installed for this project.
+sub sync_nodes {
+    my ($r) = @_;
+    my %hosts = map { (split /:/)[0] => 1 } split /,/, $opt{nodes};
+    my @p = @{ $result{packages_installed} };
+    for my $h (sort keys %hosts) {
+        my ($rc) = run("ssh $h true", '/', 'nodes', timeout => 30);
+        if ($rc) {
+            push @{ $r->{notes} }, "cannot ssh to node $h";
+            return 0;
+        }
+        next unless @p;
+        ($rc) = run("ssh $h sh $SELF_DIR/bt-pkg install " . join(' ', map { sq($_) } @p),
+                    '/', 'nodes');
+        push @{ $r->{notes} }, "package install on $h failed" if $rc;
+    }
+    return 1;
+}
+
+sub kill_leftovers {
+    my ($r) = @_;
+    my @left = grep { /\S/ } split /\n/, `pgrep -x 'smak-server|smak-worker' 2>/dev/null`;
+    return unless @left;
+    $r->{leaked_processes} = scalar @left;
+    push @{ $r->{notes} }, scalar(@left) . ' smak process(es) still running after the mode finished';
+    $r->{status} = 'WARN' if $r->{status} eq 'PASS';
+    kill 'KILL', @left;
+}
+
+# ---------------------------------------------------------------------------
+# report
+
+sub report {
+    my ($dir) = @_;
+    my @files;
+    File::Find::find(sub { push @files, $File::Find::name if $_ eq 'result.json' }, $dir);
+    my @rows;
+    my @mode_order = qw(seq par server multi interp);
+    my %modes_seen;
+    for my $f (sort @files) {
+        my $d = eval { JSON::PP->new->decode(slurp($f)) } or next;
+        $modes_seen{$_}++ for keys %{ $d->{modes} || {} };
+        push @rows, $d;
+    }
+    my @modes = grep { $modes_seen{$_} } @mode_order;
+    my $out = "# smak build-test results\n\n";
+    $out .= "| distro | project | system | make | " . join(' | ', @modes) . " |\n";
+    $out .= "|---" x (4 + @modes) . "|\n";
+    my @details;
+    for my $d (@rows) {
+        my $p = $d->{prepare} || {};
+        my $mk = $p->{status} eq 'PASS' ? "PASS $p->{reference}{time}s" : $p->{status};
+        my @cells;
+        for my $m (@modes) {
+            my $r = $d->{modes}{$m};
+            push @cells, !$r ? '' : $r->{time} ? "$r->{status} $r->{time}s" : $r->{status};
+            if ($r && $r->{status} eq 'PASS' && $r->{placement} && %{ $r->{placement} }) {
+                push @details, "- $d->{distro} / $d->{project} / $m: jobs per host "
+                    . join(' ', map { "$_=$r->{placement}{$_}" } sort keys %{ $r->{placement} });
+            }
+            next unless $r && $r->{status} ne 'PASS';
+            push @details, "- **$d->{distro} / $d->{project} / $m:** "
+                . join('; ', grep { defined } @{ $r->{notes} || [] });
+        }
+        $out .= "| $d->{distro} | $d->{project} | $d->{system} | $mk | " . join(' | ', @cells) . " |\n";
+        if ($p->{status} ne 'PASS') {
+            my @why = (@{ $p->{failure} || [] },
+                       map { "$_->{key} (unresolved)" } grep { !@{ $_->{packages} || [] } } @{ $p->{diagnosis} || [] });
+            push @details, "- **$d->{distro} / $d->{project} / prepare:** " . join('; ', @why);
+        }
+        if (@{ $d->{packages_installed} || [] }) {
+            push @details, "- $d->{distro} / $d->{project}: auto-installed "
+                . join(' ', @{ $d->{packages_installed} });
+        }
+    }
+    $out .= "\n## Details\n\n" . join("\n", @details) . "\n" if @details;
+    print $out;
+    return 0;
+}

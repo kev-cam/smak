@@ -1,0 +1,381 @@
+#!/bin/bash
+# smak-buildtest - build real-world make/cmake projects from GitHub with plain
+# make and with smak (sequential, -jN, persistent job server, multi-machine)
+# inside containers, so the same test runs on any Linux distro.
+#
+# See buildtest/README.md for the full description.
+
+set -o pipefail
+
+self=$(readlink -f "$0")
+SMAK_DIR=$(dirname "$self")
+BT_DIR=$SMAK_DIR/buildtest
+
+WORKDIR=${SMAK_BT_WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/smak-buildtest}
+ENGINE=${SMAK_BT_ENGINE:-}
+DISTROS=ubuntu
+MODES=seq,par,server
+NPROC=$(nproc 2>/dev/null || echo 4)
+JOBS=$(( NPROC > 8 ? 8 : NPROC ))
+NODES=2
+NODE_JOBS=2
+LOCAL_WORKERS=1
+NET=
+CA_FILES=()
+AUTOPKG=--autopkg
+TIMEOUT=1800
+REFRESH=0
+KEEP=0
+REBUILD_IMAGE=0
+
+usage() {
+    cat <<EOF
+Usage: smak-buildtest [options] <command> [args]
+
+Commands:
+  run [PROJECT|URL|all ...]   build projects with make and smak, then report
+  list                        list known projects
+  add URL|OWNER/REPO [k=v..]  add a project to your project list
+  image [DISTRO ...]          build (or rebuild) the container images
+  report [RUNDIR]             print the summary for a run (default: latest)
+  clean                       remove containers/networks left by aborted runs
+
+Options:
+  --distro LIST     distros to test, comma separated (default: ubuntu).
+                    Aliases: ubuntu ubuntu22 debian fedora tumbleweed arch alpine,
+                    or any image reference such as docker.io/library/debian:13
+  --modes LIST      seq,par,server,multi,interp (default: $MODES)
+                      seq     smak, one process
+                      par     smak -jN
+                      server  smak -cli -jN, detach, rebuild via smak-attach
+                      multi   smak -jN --ssh=node1:K,... across worker containers
+                      interp  smak interprets CMakeLists.txt itself (cmake projects)
+  -j N              parallel jobs (default: $JOBS)
+  --nodes N         worker containers for multi mode (default: $NODES)
+  --node-jobs K     smak workers per node (default: $NODE_JOBS)
+  --local-workers N smak workers on the head in multi mode (default: $LOCAL_WORKERS)
+  --engine E        podman or docker (default: podman if installed)
+  --net MODE        container network for runs without multi: bridge or host
+  --ca FILE         extra CA certificate to trust inside images (repeatable)
+  --no-autopkg      do not install packages for diagnosed configure failures
+  --timeout SEC     per-build timeout (default: $TIMEOUT)
+  --refresh         re-fetch project sources
+  --rebuild-image   rebuild images even if they exist
+  --keep            keep worker containers and work trees after the run
+  --workdir DIR     cache/work directory (default: $WORKDIR)
+
+Examples:
+  smak-buildtest run dnsmasq
+  smak-buildtest --distro ubuntu,ubuntu22 --modes seq,par,server,multi run dnsmasq lua
+  smak-buildtest run https://github.com/htop-dev/htop
+EOF
+}
+
+die() { echo "smak-buildtest: $*" >&2; exit 1; }
+log() { echo "==> $*"; }
+
+# ---- options ---------------------------------------------------------------
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --distro)        DISTROS=$2; shift 2 ;;
+        --modes)         MODES=$2; shift 2 ;;
+        -j)              JOBS=$2; shift 2 ;;
+        -j*)             JOBS=${1#-j}; shift ;;
+        --nodes)         NODES=$2; shift 2 ;;
+        --node-jobs)     NODE_JOBS=$2; shift 2 ;;
+        --local-workers) LOCAL_WORKERS=$2; shift 2 ;;
+        --engine)        ENGINE=$2; shift 2 ;;
+        --net)           NET=$2; shift 2 ;;
+        --ca)            CA_FILES+=("$2"); shift 2 ;;
+        --no-autopkg)    AUTOPKG=--no-autopkg; shift ;;
+        --timeout)       TIMEOUT=$2; shift 2 ;;
+        --refresh)       REFRESH=1; shift ;;
+        --rebuild-image) REBUILD_IMAGE=1; shift ;;
+        --keep)          KEEP=1; shift ;;
+        --workdir)       WORKDIR=$2; shift 2 ;;
+        -h|--help)       usage; exit 0 ;;
+        *)               args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+[ $# -gt 0 ] || { usage; exit 1; }
+cmd=$1; shift
+
+if [ -z "$ENGINE" ]; then
+    if command -v podman >/dev/null 2>&1; then ENGINE=podman
+    elif command -v docker >/dev/null 2>&1; then ENGINE=docker
+    fi
+fi
+E() { "$ENGINE" "$@"; }
+
+USER_LIST=$WORKDIR/projects.list
+LISTS=("$BT_DIR/projects.list")
+[ -f "$USER_LIST" ] && LISTS+=("$USER_LIST")
+
+# ---- helpers ---------------------------------------------------------------
+distro_image() {
+    case "$1" in
+        ubuntu|ubuntu24) echo docker.io/library/ubuntu:24.04 ;;
+        ubuntu22)        echo docker.io/library/ubuntu:22.04 ;;
+        debian)          echo docker.io/library/debian:12 ;;
+        fedora)          echo docker.io/library/fedora:42 ;;
+        tumbleweed|suse) echo docker.io/opensuse/tumbleweed:latest ;;
+        arch)            echo docker.io/library/archlinux:latest ;;
+        alpine)          echo docker.io/library/alpine:3.22 ;;
+        */*|*:*)         echo "$1" ;;
+        *)               return 1 ;;
+    esac
+}
+distro_alias() { echo "$1" | sed 's|^.*/||; s|[^A-Za-z0-9_.-]|-|g'; }
+image_tag() { echo "localhost/smak-bt-$(distro_alias "$1"):latest"; }
+
+# Print "KEY=VALUE" lines for project NAME from the project lists.
+project_spec() {
+    perl -MText::ParseWords=shellwords -e '
+        my $name = shift;
+        for my $f (@ARGV) {
+            open(my $fh, "<", $f) or next;
+            while (<$fh>) {
+                next if /^\s*(#|$)/;
+                my @w = shellwords($_);
+                next unless @w >= 2 && $w[0] eq $name;
+                print "url=$w[1]\n";
+                print "$_\n" for @w[2..$#w];
+                exit 0;
+            }
+        }
+        exit 1;' "$1" "${LISTS[@]}" "${EXTRA_LISTS[@]}"
+}
+spec_get() { project_spec "$1" | sed -n "s/^$2=//p" | head -1; }
+
+all_projects() {
+    cat "${LISTS[@]}" 2>/dev/null | grep -v -E '^\s*(#|$)' | awk '{print $1}'
+}
+
+# owner/repo or URL -> "name url"
+normalize_url() {
+    local u=$1
+    case "$u" in
+        http*://*|git@*) ;;
+        */*)             u=https://github.com/$u ;;
+        *)               return 1 ;;
+    esac
+    local n=${u%/}; n=${n%.git}; n=${n##*/}
+    echo "$n $u"
+}
+
+fetch_source() {
+    local name=$1 url ref sub dir=$WORKDIR/src/$1
+    url=$(spec_get "$name" url) || true
+    [ -n "$url" ] || die "no URL for project $name"
+    ref=$(spec_get "$name" ref)
+    sub=$(spec_get "$name" submodules)
+    if [ -d "$dir/.git" ] && [ $REFRESH -eq 0 ]; then
+        return 0
+    fi
+    rm -rf "$dir"
+    mkdir -p "$WORKDIR/src"
+    local opts=(--depth 1)
+    [ -n "$ref" ] && opts+=(--branch "$ref")
+    [ -n "$sub" ] && opts+=(--recurse-submodules --shallow-submodules)
+    log "fetching $name from $url"
+    git clone -q "${opts[@]}" "$url" "$dir" || die "clone of $url failed"
+}
+
+# Key pair the head container uses to reach the worker containers.  Made with
+# the image's ssh-keygen when the host has none.
+ensure_ssh_key() {
+    local tag=$1
+    mkdir -p "$WORKDIR/ssh"
+    if [ ! -f "$WORKDIR/ssh/id_ed25519" ]; then
+        if command -v ssh-keygen >/dev/null 2>&1; then
+            ssh-keygen -q -t ed25519 -N '' -C smak-buildtest -f "$WORKDIR/ssh/id_ed25519"
+        else
+            E run --rm --security-opt label=disable -v "$WORKDIR/ssh:/k" "$tag" \
+                ssh-keygen -q -t ed25519 -N '' -C smak-buildtest -f /k/id_ed25519
+        fi || die "cannot create ssh key in $WORKDIR/ssh"
+    fi
+    chmod 644 "$WORKDIR/ssh/id_ed25519"   # read by root in rootless containers
+}
+
+build_image() {
+    local d=$1 base tag ctx
+    base=$(distro_image "$d") || die "unknown distro '$d'"
+    tag=$(image_tag "$d")
+    if [ $REBUILD_IMAGE -eq 0 ] && E image exists "$tag" 2>/dev/null; then return 0; fi
+    if [ $REBUILD_IMAGE -eq 0 ] && [ "$ENGINE" = docker ] && E image inspect "$tag" >/dev/null 2>&1; then return 0; fi
+    mkdir -p "$WORKDIR"
+    ctx=$(mktemp -d)
+    cp "$BT_DIR/Containerfile" "$BT_DIR/bt-pkg" "$ctx/"
+    mkdir "$ctx/ca"
+    local i=0 f
+    for f in "${CA_FILES[@]}"; do cp "$f" "$ctx/ca/extra$((i++)).crt"; done
+    log "building image $tag from $base"
+    local net=()
+    [ "$NET" = host ] && net=(--network host)
+    E build "${net[@]}" --build-arg BASE="$base" -t "$tag" -f "$ctx/Containerfile" "$ctx" \
+        > "$WORKDIR/image-$(distro_alias "$d").log" 2>&1
+    local rc=$?
+    rm -rf "$ctx"
+    [ $rc -eq 0 ] || { tail -20 "$WORKDIR/image-$(distro_alias "$d").log"; die "image build for $d failed (log: $WORKDIR/image-$(distro_alias "$d").log)"; }
+}
+
+common_run_opts() {
+    echo --init --security-opt label=disable \
+         -v "$SMAK_DIR:/opt/smak:ro" \
+         -v "$WORKDIR/src:/src:ro" \
+         -v "$WORKDIR/ssh:/bt-ssh:ro"
+}
+
+has_mode() { case ",$MODES," in *,$1,*) return 0 ;; esac; return 1; }
+
+# ---- commands --------------------------------------------------------------
+cmd_list() {
+    local f
+    for f in "${LISTS[@]}"; do
+        [ -f "$f" ] || continue
+        echo "# $f"
+        grep -v -E '^\s*(#|$)' "$f" | awk '{printf "  %-16s %s\n", $1, $2}'
+    done
+}
+
+cmd_add() {
+    [ $# -ge 1 ] || die "usage: smak-buildtest add URL|OWNER/REPO [key=value ...]"
+    local nu; nu=$(normalize_url "$1") || die "not a URL or owner/repo: $1"
+    shift
+    local name=${nu%% *} url=${nu#* }
+    mkdir -p "$WORKDIR"
+    if project_spec "$name" >/dev/null 2>&1; then die "project $name already listed"; fi
+    local extra=""
+    local kv; for kv in "$@"; do extra+=" $(printf '%q' "$kv")"; done
+    echo "$name $url$extra" >> "$USER_LIST"
+    echo "added $name ($url) to $USER_LIST"
+}
+
+cmd_image() {
+    [ -n "$ENGINE" ] || die "neither podman nor docker found"
+    local d
+    [ $# -gt 0 ] || set -- ${DISTROS//,/ }
+    REBUILD_IMAGE=1
+    for d in "$@"; do build_image "$d"; done
+}
+
+cmd_clean() {
+    [ -n "$ENGINE" ] || die "neither podman nor docker found"
+    local ids
+    ids=$(E ps -a --format '{{.Names}}' | grep '^smak-bt-' || true)
+    [ -n "$ids" ] && E rm -f $ids >/dev/null
+    ids=$(E network ls --format '{{.Name}}' | grep '^smak-bt-' || true)
+    [ -n "$ids" ] && E network rm $ids >/dev/null
+    echo "removed leftover smak-bt containers and networks"
+}
+
+cmd_report() {
+    local dir=${1:-}
+    [ -n "$dir" ] || dir=$(ls -1d "$WORKDIR"/runs/* 2>/dev/null | tail -1)
+    [ -d "$dir" ] || die "no run directory found"
+    perl "$BT_DIR/bt-run" --report "$dir/results"
+}
+
+cmd_run() {
+    [ -n "$ENGINE" ] || die "neither podman nor docker found; install podman"
+    local runid rundir projects=() p nu
+    runid=$(date +%Y%m%d-%H%M%S)
+    rundir=$WORKDIR/runs/$runid
+    mkdir -p "$rundir/results"
+    EXTRA_LISTS=()
+
+    [ $# -gt 0 ] || set -- dnsmasq
+    for p in "$@"; do
+        if [ "$p" = all ]; then
+            projects+=($(all_projects))
+        elif project_spec "$p" >/dev/null 2>&1; then
+            projects+=("$p")
+        elif nu=$(normalize_url "$p"); then
+            echo "$nu" >> "$rundir/adhoc.list"
+            EXTRA_LISTS=("$rundir/adhoc.list")
+            projects+=("${nu%% *}")
+        else
+            die "unknown project '$p' (see: smak-buildtest list)"
+        fi
+    done
+
+    for p in "${projects[@]}"; do fetch_source "$p"; done
+
+    local lists_in=()
+    local f
+    for f in "${LISTS[@]}" "${EXTRA_LISTS[@]}"; do
+        mkdir -p "$rundir/lists"
+        cp "$f" "$rundir/lists/$(basename "$(dirname "$f")")-$(basename "$f")"
+        lists_in+=(--list "/run-lists/$(basename "$(dirname "$f")")-$(basename "$f")")
+    done
+
+    local d
+    for d in ${DISTROS//,/ }; do
+        build_image "$d"
+        ensure_ssh_key "$(image_tag "$d")"
+        run_distro "$d" "$rundir" "${projects[@]}"
+    done
+
+    perl "$BT_DIR/bt-run" --report "$rundir/results" | tee "$rundir/summary.md"
+    echo
+    echo "results: $rundir"
+}
+
+run_distro() {
+    local d=$1 rundir=$2; shift 2
+    local alias tag net nodes_spec="" names=() i
+    alias=$(distro_alias "$d")
+    tag=$(image_tag "$d")
+    local work=$rundir/work/$alias
+    mkdir -p "$work"
+    local prefix="smak-bt-${rundir##*/}-$alias"
+
+    if has_mode multi; then
+        net=$prefix
+        E network create "$net" >/dev/null || die "cannot create network $net"
+        for i in $(seq 1 "$NODES"); do
+            E run -d --name "$prefix-node$i" --hostname "node$i" --network "$net" \
+                --network-alias "node$i" $(common_run_opts) -v "$work:/work" \
+                "$tag" sh /opt/smak/buildtest/bt-entry node >/dev/null ||
+                die "cannot start worker node$i"
+            nodes_spec+="${nodes_spec:+,}node$i:$NODE_JOBS"
+            names+=("$prefix-node$i")
+        done
+    else
+        net=${NET:-bridge}
+    fi
+
+    local p
+    for p in "$@"; do
+        log "[$alias] $p"
+        mkdir -p "$rundir/results/$alias/$p"
+        E run --rm --name "$prefix-head" --hostname head --network "$net" \
+            $(common_run_opts) -v "$work:/work" -v "$rundir/results/$alias:/results" \
+            -v "$rundir/lists:/run-lists:ro" \
+            "$tag" sh /opt/smak/buildtest/bt-entry head \
+            perl /opt/smak/buildtest/bt-run --project "$p" "${lists_in[@]}" \
+                --src "/src/$p" --work "/work/$p" --results "/results/$p" \
+                --modes "$MODES" -j "$JOBS" $AUTOPKG --timeout "$TIMEOUT" \
+                --smak /opt/smak --distro "$alias" \
+                ${nodes_spec:+--nodes "$nodes_spec" --local-workers "$LOCAL_WORKERS"} \
+            2>&1 | tee -a "$rundir/results/$alias/$p/console.log"
+        [ $KEEP -eq 1 ] || rm -rf "$work/$p"
+    done
+
+    if [ ${#names[@]} -gt 0 ] && [ $KEEP -eq 0 ]; then
+        E rm -f "${names[@]}" >/dev/null
+        E network rm "$net" >/dev/null
+    fi
+}
+
+case "$cmd" in
+    run)    cmd_run "$@" ;;
+    list)   cmd_list ;;
+    add)    cmd_add "$@" ;;
+    image)  cmd_image "$@" ;;
+    report) cmd_report "$@" ;;
+    clean)  cmd_clean ;;
+    *)      usage; exit 1 ;;
+esac

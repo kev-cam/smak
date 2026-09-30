@@ -1,0 +1,52 @@
+# Projects for smak-buildtest.  One project per line:
+#
+#   NAME  GIT-URL  [key=value ...]
+#
+# Values are shell words (quote values with spaces).  The make= and
+# configure= values are pasted into the command line as-is, so they may
+# carry their own quoting.
+#
+# Keys:
+#   ref=BRANCH|TAG     check out this ref (default: the default branch)
+#   submodules=1       clone submodules too
+#   system=S           make | autotools | cmake (default: detected)
+#   bootstrap=CMD      command that generates ./configure (default: autogen.sh,
+#                      bootstrap, autoconf.sh or autoreconf -fi)
+#   configure=ARGS     arguments for ./configure or cmake (or, for plain make
+#                      projects, a command to run first)
+#   make=ARGS          extra make/smak arguments, e.g. variable overrides
+#   target=T           goal to build (default: the makefile's default goal)
+#   subdir=DIR         run make in this subdirectory
+#   builddir=DIR       cmake build directory inside the tree (default: _build)
+#   deps=K,K           missing-thing keys to install up front (see pkgmap.txt)
+#   pkgs.FAMILY=P,P    raw packages to install up front on deb|rpm|suse|arch|apk
+#   touch=SRC:OBJ      source/object pair for the incremental-rebuild check
+#   timeout=SEC        per-build timeout
+#
+# Users can add projects with `smak-buildtest add URL`, which writes to
+# ~/.cache/smak-buildtest/projects.list.
+
+# --- plain make -------------------------------------------------------------
+dnsmasq       https://github.com/imp/dnsmasq
+dnsmasq-full  https://github.com/imp/dnsmasq make="COPTS='-DHAVE_DNSSEC -DHAVE_DBUS -DHAVE_LIBIDN2 -DHAVE_CONNTRACK -DHAVE_NFTSET'"
+lua           https://github.com/lua/lua
+lz4           https://github.com/lz4/lz4
+zstd          https://github.com/facebook/zstd
+redis         https://github.com/redis/redis timeout=3600
+git           https://github.com/git/git make="NO_CURL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_OPENSSL=1" timeout=3600
+
+# --- autotools --------------------------------------------------------------
+zlib          https://github.com/madler/zlib
+htop          https://github.com/htop-dev/htop
+tmux          https://github.com/tmux/tmux
+jq            https://github.com/jqlang/jq configure="--disable-docs --without-oniguruma"
+iverilog      https://github.com/steveicarus/iverilog
+sqlite        https://github.com/sqlite/sqlite configure="--disable-tcl"
+nasm          https://github.com/netwide-assembler/nasm
+
+# --- cmake ------------------------------------------------------------------
+zlib-cmake    https://github.com/madler/zlib system=cmake
+cjson         https://github.com/DaveGamble/cJSON system=cmake
+libuv         https://github.com/libuv/libuv system=cmake
+jansson       https://github.com/akheron/jansson system=cmake
+libpng        https://github.com/pnggroup/libpng system=cmake

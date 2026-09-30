@@ -147,7 +147,7 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
     die "Failed to execute cmake: $!\n";
 }
 
-my $makefile = 'Makefile';
+my $makefile;  # default chosen after -C, like GNU make
 my $debug = 0;
 my $help = 0;
 my $script_file = '';
@@ -283,13 +283,20 @@ if ($reconnect || $kill_old_js) {
         if (open(my $port_fh, '<', $connect_file)) {
             my $observer_port = <$port_fh>;
             my $master_port = <$port_fh>;
+            my ($owner) = map { /^owner (\d+)/ ? $1 : () } <$port_fh>;
             close($port_fh);
 
             if ($observer_port && $master_port) {
                 chomp($observer_port, $master_port);
 
-                # If kill_old_js is set, try to shutdown old server
-                if ($kill_old_js) {
+                # If kill_old_js is set, try to shutdown old server -- unless
+                # the smak that started it is still running: .smak.connect is
+                # per directory, and parallel runs there (the regression
+                # suite's test/, with `set kill_old_js = 1`) shut down each
+                # other's live servers ("connection lost during worker startup").
+                if ($kill_old_js && $owner && $owner != $$ && kill(0, $owner)) {
+                    warn "Not shutting down job server of running smak $owner\n" if $ENV{SMAK_DEBUG};
+                } elsif ($kill_old_js) {
                     my $shutdown_socket = IO::Socket::INET->new(
                         PeerHost => '127.0.0.1',
                         PeerPort => $master_port,
@@ -326,6 +333,7 @@ if ($reconnect || $kill_old_js) {
                         # The actual connection will happen later via start_job_server
                         $jobs = 1 unless $jobs;
                         $Smak::job_server_master_port = $master_port;
+                        $Smak::reconnect_port = $master_port;
                         print "Reconnecting to existing job server (port $master_port)\n" if $verbose;
                     } else {
                         warn "Cannot connect to job server at port $master_port (may have already exited)\n";
@@ -348,6 +356,25 @@ if (defined $ENV{SMAK_RECURSION_LEVEL}) {
 }
 
 # Parse environment variable options first (skip if recursive to avoid deadlock)
+# GNU make options that recursive makefiles pass around and that need no
+# action from smak (output decoration, builtin-rule toggles, load limits).
+# Accepting them keeps `$(MAKE) --no-print-directory -C lib` and friends working.
+sub gnu_make_compat_options {
+    my $ignore = sub { };
+    return (
+        'w|print-directory'           => $ignore,
+        'no-print-directory'          => $ignore,
+        'r|no-builtin-rules'          => $ignore,
+        'no-builtin-variables'        => $ignore,   # -R: same as -r (options are case-insensitive)
+        'warn-undefined-variables'    => $ignore,
+        'no-silent'                   => $ignore,
+        'l|load-average|max-load:s'   => $ignore,
+        'O|output-sync:s'             => $ignore,
+        'jobserver-auth|jobserver-fds=s' => $ignore,
+        'no-keep-going|stop'          => sub { $keep_going = 0; },   # no -S: it would shadow -s
+    );
+}
+
 if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
     # Split the environment variable into arguments
     my @env_args = split(/\s+/, $ENV{USR_SMAK_OPT});
@@ -378,6 +405,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'check:s' => sub { $check = $_[1] eq '' ? '1' : $_[1]; },
         'test=s' => \$test,
         'no-builtins' => sub { $Smak::no_builtins = 1; },
+        gnu_make_compat_options(),
     );
     # Restore and append remaining command line args
     @ARGV = @saved_argv;
@@ -410,6 +438,7 @@ GetOptions(
     'test=s' => \$test,
     'no-builtins' => sub { $Smak::no_builtins = 1; },
     'test-worker' => \$test_worker,
+    gnu_make_compat_options(),
 ) or die "Error in command line arguments\n";
 
 # Handle -j without number (unlimited jobs, use CPU count)
@@ -434,6 +463,16 @@ if (!defined $retries) {
     $retries = ($jobs > 0) ? 1 : 0;
 }
 
+# Command-line variables reach sub-makes through MAKEFLAGS, as in GNU make:
+# the part after " -- " holds VAR=value words with spaces escaped by '\'.
+# Inherited ones come first so this invocation's own arguments override them.
+if (defined $ENV{MAKEFLAGS} && $ENV{MAKEFLAGS} =~ /(?:^|\s)--\s+(.*)$/s) {
+    for my $word ($1 =~ /((?:\\.|\S)+)/g) {
+        (my $w = $word) =~ s/\\(.)/$1/g;
+        Smak::set_cmd_var($1, $2) if $w =~ /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
+    }
+}
+
 # Parse variable assignments and targets from remaining arguments
 my @targets;
 for my $arg (@ARGV) {
@@ -443,6 +482,18 @@ for my $arg (@ARGV) {
     } else {
         # Target name
         push @targets, $arg;
+    }
+}
+
+{
+    my $cv = Smak::get_cmd_vars();
+    if (%$cv) {
+        my $flags = $ENV{MAKEFLAGS} // '';
+        $flags =~ s/(?:^|\s)--\s.*$//s;
+        $ENV{MAKEFLAGS} = "$flags -- " . join(' ', map {
+            (my $v = $cv->{$_}) =~ s/([\\\s])/\\$1/g;
+            "$_=$v";
+        } sort keys %$cv);
     }
 }
 
@@ -497,6 +548,9 @@ if ($test_worker) {
 if ($directory) {
     chdir($directory) or die "smak: Cannot change to directory '$directory': $!\n";
 }
+
+# GNU make looks for GNUmakefile, makefile and Makefile, in that order.
+$makefile //= (grep { -f $_ } qw(GNUmakefile makefile Makefile))[0] // 'Makefile';
 
 # Handle -ssh=fuse option to auto-detect FUSE remote server
 if ($ssh_host eq 'fuse') {
@@ -1051,6 +1105,7 @@ if (SmakCMake::is_cmake_build_dir('.')) {
     $Smak::default_target //= 'all';
 } else {
     parse_makefile($makefile);
+    Smak::remake_missing_includes($makefile);
 }
 
 # Auto-load <makefile>.smak if it exists
@@ -1063,144 +1118,9 @@ if (-f $auto_script) {
 # When SMAK_JOB_SERVER is set, we're a child of another smak with a job server.
 # Connect back to the parent job-server and relay our targets as jobs.
 if ($ENV{SMAK_JOB_SERVER}) {
-    require IO::Socket::INET;
-
-    my ($host, $port) = split(/:/, $ENV{SMAK_JOB_SERVER});
-    warn "Child smak connecting to parent job-server at $host:$port\n" if $ENV{SMAK_DEBUG};
-
-    my $sock = IO::Socket::INET->new(
-        PeerHost => $host,
-        PeerPort => $port,
-        Proto    => 'tcp',
-        Timeout  => 10,
-    );
-    if (!$sock) {
-        # Connection failed - fall back to sequential build
-        warn "smak: Cannot connect to parent job-server at $host:$port: $! (falling back to sequential)\n" if $ENV{SMAK_DEBUG};
-        delete $ENV{SMAK_JOB_SERVER};
-        goto SEQUENTIAL_BUILD;
-    }
-    $sock->autoflush(1);
-
-    # Identify as child smak
-    print $sock "CHILD_CONNECT\n";
-    $sock->flush();
-    my $ready = <$sock>;
-    chomp $ready if defined $ready;
-    unless (defined $ready && $ready eq 'CHILD_READY') {
-        warn "smak: Expected CHILD_READY from job-server, got: " . ($ready // 'EOF') . " (falling back to sequential)\n" if $ENV{SMAK_DEBUG};
-        close($sock);
-        delete $ENV{SMAK_JOB_SERVER};
-        goto SEQUENTIAL_BUILD;
-    }
-    warn "Child smak connected, got CHILD_READY\n" if $ENV{SMAK_DEBUG};
-
-    # Dry-run capture of targets at this level only
-    # ($relay_capture_mode prevents fork-expand of recursive makes -
-    #  those will be executed by workers, spawning further child relays)
-    use Cwd 'getcwd';
-    my $cwd = getcwd();
-    {
-        local $Smak::dry_run_mode = 1;
-        local $Smak::capture_targets = {};
-        local $Smak::relay_capture_mode = 1;
-
-        # Suppress stdout during dry-run capture
-        open(my $save_stdout, '>&', \*STDOUT);
-        open(STDOUT, '>', '/dev/null');
-
-        my @targets_to_build = @targets ? @targets : (Smak::get_default_target() || 'all');
-        for my $target (@targets_to_build) {
-            eval { Smak::build_target($target, {}, 0); };
-            warn "Child smak: build_target('$target') failed: $@\n" if $@ && $ENV{SMAK_DEBUG};
-        }
-
-        open(STDOUT, '>&', $save_stdout);
-
-        # Submit each captured target with a command to the parent job-server
-        # Track multi-output sibling groups so we only submit once per group
-        my %submitted_sibling_group;
-        my $job_count = 0;
-        for my $target (keys %{$Smak::capture_targets}) {
-            my $info = $Smak::capture_targets->{$target};
-            my $rule = $info->{expanded_rule} || $info->{rule} || '';
-            next unless $rule =~ /\S/;  # Skip no-command targets
-            my $exec_dir = $info->{exec_dir} || $cwd;
-
-            # Check for multi-output siblings - only submit once per group
-            my @siblings = @{$info->{siblings} || []};
-            if (@siblings > 1) {
-                my $group_key = join('&', sort @siblings);
-                if ($submitted_sibling_group{$group_key}++) {
-                    warn "Child smak skipping sibling: $target (already submitted via group $group_key)\n" if $ENV{SMAK_DEBUG};
-                    next;
-                }
-            }
-
-            my @deps = @{$info->{deps} || []};
-
-            # Re-express target/deps/siblings relative to exec_dir. Capture keys
-            # are relative to THIS child's cwd, but the job-server forms a job's
-            # path as exec_dir/target. At >=2 levels of nested recursive-make the
-            # key carries a sub-make dir prefix that exec_dir already contains
-            # (e.g. target=src/util.o, exec_dir=.../lib/src) -> the server would
-            # build .../lib/src/src/util.o, whose dep never appears -> the job is
-            # deferred forever -> hang. abs2rel against exec_dir collapses that
-            # and is a no-op for the already-correct single-level case.
-            {
-                my $abs_exec = File::Spec->file_name_is_absolute($exec_dir)
-                             ? $exec_dir : File::Spec->rel2abs($exec_dir, $cwd);
-                my $rerel = sub {
-                    my ($p) = @_;
-                    return $p if File::Spec->file_name_is_absolute($p);
-                    return File::Spec->abs2rel(File::Spec->rel2abs($p, $cwd), $abs_exec);
-                };
-                $target   = $rerel->($target);
-                @deps     = map { $rerel->($_) } @deps;
-                @siblings = map { $rerel->($_) } @siblings;
-            }
-            warn "Child smak submitting: $target (exec_dir=$exec_dir, deps=" . scalar(@deps) . ", siblings=" . scalar(@siblings) . ")\n" if $ENV{SMAK_DEBUG};
-            # Use line-count protocol for multi-line commands
-            my @cmd_lines = grep { /\S/ } split(/\n/, $rule);
-            print $sock "SUBMIT_JOB\n";
-            print $sock "$target\n";
-            print $sock "$exec_dir\n";
-            print $sock "DEPS " . scalar(@deps) . "\n";
-            for my $dep (@deps) {
-                print $sock "$dep\n";
-            }
-            # Send siblings (other targets produced by this same command)
-            my @other_siblings = grep { $_ ne $target } @siblings;
-            print $sock "SIBLINGS " . scalar(@other_siblings) . "\n";
-            for my $sib (@other_siblings) {
-                print $sock "$sib\n";
-            }
-            print $sock "COMMAND_LINES " . scalar(@cmd_lines) . "\n";
-            for my $cmd_line (@cmd_lines) {
-                print $sock "$cmd_line\n";
-            }
-            $sock->flush();
-            $job_count++;
-        }
-
-        # Signal all jobs submitted
-        print $sock "CHILD_DONE $job_count\n";
-        $sock->flush();
-        warn "Child smak submitted $job_count jobs, waiting for CHILD_COMPLETE\n" if $ENV{SMAK_DEBUG};
-    }
-
-    # Wait for completion from parent job-server
-    my $exit_code = 1;  # Default to failure if no response
-    while (my $response = <$sock>) {
-        chomp $response;
-        if ($response =~ /^CHILD_COMPLETE (\d+)$/) {
-            $exit_code = $1;
-            warn "Child smak got CHILD_COMPLETE $exit_code\n" if $ENV{SMAK_DEBUG};
-            last;
-        }
-    }
-    close($sock);
-    exit($exit_code);
+    my $rc = Smak::relay_to_job_server(@targets);
+    exit($rc) if defined $rc;
+    delete $ENV{SMAK_JOB_SERVER};
 }
 
 SEQUENTIAL_BUILD:
@@ -1369,6 +1289,10 @@ if (!$debug) {
         }
     };
 
+    # make deletes the intermediate files it made (sequential build; the
+    # job-master does it for -j)
+    Smak::remove_made_intermediates();
+
     # Wait for all submitted jobs to complete before shutting down
     # Only wait if there are jobs pending - if all commands were handled as built-ins,
     # no jobs were submitted and we can skip straight to shutdown
@@ -1402,7 +1326,7 @@ if (!$debug) {
             }
             # Also handle other messages to prevent blocking
             elsif ($response =~ /^OUTPUT (.*)$/) {
-                print "$1\n" unless $Smak::silent_mode;
+                print "$1\n";   # recipe output: -s only silences command echo
                 STDOUT->flush();
             }
             elsif ($response =~ /^ERROR (.*)$/) {

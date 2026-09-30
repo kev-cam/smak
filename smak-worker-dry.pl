@@ -59,7 +59,7 @@ sub execute_builtin {
     # Strip leading @ (silent) or - (ignore errors) prefixes
     my $ignore_errors = 0;
     my $silent = 0;
-    while ($cmd =~ s/^[@-]//) {
+    while ($cmd =~ s/^[@+-]//) {
         $silent = 1 if $& eq '@';
         $ignore_errors = 1 if $& eq '-';
     }
@@ -316,7 +316,7 @@ while (my $line = <$socket>) {
 
         for my $part (@command_parts) {
             $part =~ s/^\s+|\s+$//g;  # Trim whitespace
-            $part =~ s/^[@-]+//;      # Strip @ (silent) and - (ignore errors) prefixes
+            $part =~ s/^[@+-]+//;      # Strip @ (silent) and - (ignore errors) prefixes
             # Match: smak -C <dir> <target> or make -C <dir> <target>
             # Also match relative paths like ../smak or ./smak
             # Allow optional flags (like -j4) between smak and -C

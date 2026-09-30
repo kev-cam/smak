@@ -1,0 +1,12 @@
+# Base image for the smak build-test harness (see buildtest/README.md).
+# Built by `smak-buildtest image <distro-image>`; BASE is any supported distro.
+ARG BASE=docker.io/library/ubuntu:24.04
+FROM ${BASE}
+COPY bt-pkg /usr/local/bin/bt-pkg
+COPY ca/ /opt/bt-ca/
+RUN chmod +x /usr/local/bin/bt-pkg \
+ && (ls /opt/bt-ca/*.crt >/dev/null 2>&1 && bt-pkg ca /opt/bt-ca/*.crt || true) \
+ && bt-pkg base \
+ && bt-pkg sshd
+ENV USER=root
+WORKDIR /work

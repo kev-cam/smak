@@ -1289,6 +1289,10 @@ if (!$debug) {
         }
     };
 
+    # make deletes the intermediate files it made (sequential build; the
+    # job-master does it for -j)
+    Smak::remove_made_intermediates();
+
     # Wait for all submitted jobs to complete before shutting down
     # Only wait if there are jobs pending - if all commands were handled as built-ins,
     # no jobs were submitted and we can skip straight to shutdown

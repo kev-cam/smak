@@ -738,19 +738,21 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 - **Repro:** `cd /usr/local/src/xyce-build` (fully built) `&& time smak -j8` →
   does not complete.
 
-### Intermediate files of implicit-rule chains are kept (OPEN)
+### Intermediate files of implicit-rule chains were kept — FIXED 2026-09-30
 
 - **Symptom:** redis `tests/modules`: `%.so: %.xo` and `%.xo: %.c` build
-  `basics.so` through `basics.xo`. GNU make treats `basics.xo` as an
-  intermediate file (reached only through an implicit-rule chain, never
-  named in the makefile, not .PRECIOUS/.SECONDARY) and deletes it at the end
-  (`rm basics.xo ...`). smak keeps it (smak-buildtest: 48 files written that
-  make does not write).
-- **Fix needs:** record intermediates created during the build (seq
-  build_target and the job-master), delete them at the end with make's `rm`
-  line, and treat a missing intermediate as up to date when its target is
-  newer than the chain's source; today `rebuild_missing_intermediates`
-  would remake them on the next run.
+  `basics.so` through `basics.xo`, never named in the makefile. GNU make
+  deletes such intermediates at the end (`rm ... basics.xo`); smak kept
+  them (smak-buildtest: 48 files written that make does not write).
+- **Fix:** `is_intermediate_candidate` (not mentioned as a target or
+  prerequisite, made by an implicit rule, not .SECONDARY/.PRECIOUS/
+  .NOTINTERMEDIATE/.PHONY); `needs_rebuild` accepts a missing intermediate
+  whose sources are older than the target; made ones are deleted by the
+  sequential build (and forked sub-makes) at their end, and under -j by the
+  job-master before it reports IDLE (relayed sub-makes flag their jobs
+  `INTERMEDIATE`, and the relay's up-to-date pass makes a missing one only
+  when something needing it is remade). Tests: test_prereq_semantics
+  "intermediate files (direct|sub)", ".PRECIOUS keeps an intermediate".
 
 ## Container deps (cross-distro)
 Tests need these Perl/system packages installed:

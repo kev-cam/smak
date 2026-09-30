@@ -121,6 +121,9 @@ our %SmakUnknownFunc;
 # Separate hashes for different rule types
 our %fixed_rule;
 our %fixed_deps;
+our %mentioned_files;      # names mentioned in the makefile (is_mentioned)
+our $mentioned_built = 0;
+our @intermediates_made;   # [path, name] intermediate files made (seq mode)
 our %fixed_order_only;  # Order-only prerequisites (after |) - don't affect rebuild timestamp checking
 our %pattern_rule;
 our %pattern_deps;
@@ -1059,6 +1062,7 @@ sub execute_builtin {
             }
 
             my $exit_code = 0;
+            @intermediates_made = ();   # the parent's are the parent's to delete
             eval {
                 if (@sub_targets) {
                     for my $sub_target (@sub_targets) {
@@ -1074,6 +1078,7 @@ sub execute_builtin {
                 $exit_code = 1;
             }
 
+            remove_made_intermediates() unless $capture_targets;
             if ($capture_targets && $capture_file) {
                 use Storable;
                 Storable::nstore($capture_targets, $capture_file);
@@ -1674,6 +1679,7 @@ sub is_conventional_phony {
 # Used by smak.pl and by the forked in-process sub-make of a -j build.
 sub relay_to_job_server {
     my @targets = @_;
+    my %goal = map { $_ => 1 } @targets;   # goals are never intermediate
     require IO::Socket::INET;
     require File::Spec;
 
@@ -1765,6 +1771,9 @@ sub relay_to_job_server {
             @deps = grep { -e $_ || !is_empty_explicit_target($_) } @deps;
             my $silent_target = is_silent_target($target);  # .SILENT: here
             my $phony_target = is_declared_phony($target);
+            # made here only through an implicit rule chain: the job-master
+            # deletes it at the end, as this sub-make would
+            my $intermediate = !$goal{$target} && !-e $target && is_intermediate_candidate($target);
 
             # Re-express target/deps/siblings relative to exec_dir. Capture keys
             # are relative to THIS child's cwd, but the job-server forms a job's
@@ -1807,6 +1816,7 @@ sub relay_to_job_server {
             # `$(MAKE) $@ BUILD_DIR=..`; judged by its file it was skipped
             # and a touched source was never recompiled)
             print $sock "PHONY\n" if $phony_target;
+            print $sock "INTERMEDIATE\n" if $intermediate;
             print $sock "COMMAND_LINES " . scalar(@cmd_lines) . "\n";
             for my $cmd_line (@cmd_lines) {
                 print $sock "$cmd_line\n";
@@ -3043,6 +3053,7 @@ sub remake_missing_includes {
 
 sub parse_makefile {
     my ($makefile_path) = @_;
+    $mentioned_built = 0;   # is_mentioned() rebuilds its set
 
     $makefile = $makefile_path;
     undef $default_target;
@@ -5878,7 +5889,7 @@ sub needs_rebuild {
         # No explicit recipe: the recipe comes from a suffix or pattern rule,
         # and that rule's source ($<) is a prerequisite too, e.g.
         # `foo.o: foo.h` plus `.c.o:` or `%.o: %.c` must notice foo.c changes.
-        my @implicit = implicit_rule_prereqs($target);
+        my @implicit = implicit_rule_prereqs($target, 1);
         if (@implicit) {
             $has_rule = 1;
             for my $p (@implicit) {
@@ -5939,8 +5950,12 @@ sub needs_rebuild {
             return 1;
         }
 
-        # If dependency doesn't exist, target needs rebuild
-        return 1 unless -e $dep;
+        # If dependency doesn't exist, target needs rebuild (unless it is an
+        # intermediate file whose sources are older than the target)
+        unless (-e $dep) {
+            next if missing_intermediate_ok($dep, $target_mtime, $visited);
+            return 1;
+        }
 
         # Recursively check if dependency itself needs rebuilding
         # This handles transitive dirty dependencies (e.g., A depends on B, B depends on dirty C)
@@ -5960,20 +5975,136 @@ sub needs_rebuild {
 }
 
 
+# GNU make intermediate files: a file made only through an implicit rule
+# chain and never mentioned in the makefile (redis tests/modules: basics.so
+# from basics.xo from basics.c). A missing one does not make its target out
+# of date while the chain's sources are older, and the ones this run made
+# are deleted at the end (`rm basics.xo ...`). .SECONDARY (all, or listed),
+# .PRECIOUS and .NOTINTERMEDIATE keep them.
+
+sub is_mentioned {
+    my ($name) = @_;
+    unless ($mentioned_built) {
+        %mentioned_files = ();
+        for my $h (\%fixed_deps, \%pseudo_deps, \%fixed_order_only) {
+            for my $k (keys %$h) {
+                my ($t) = $k =~ /\t(.*)$/ or next;
+                for my $w ($t, map { defined $_ ? $_ : () } @{ref $h->{$k} ? $h->{$k} : []}) {
+                    my $x = $w =~ /\$/ ? expand_dep_text($w) : $w;
+                    for my $n (split ' ', $x) {
+                        $n =~ s{^(?:\./)+(?=.)}{};
+                        $mentioned_files{$n} = 1;
+                    }
+                }
+            }
+        }
+        $mentioned_built = 1;
+    }
+    (my $n = $name) =~ s{^(?:\./)+(?=.)}{};
+    return $mentioned_files{$n} ? 1 : 0;
+}
+
+# Does special target $special (.SECONDARY, .PRECIOUS ...) cover $name?
+sub special_target_covers {
+    my ($special, $name, $empty_means_all) = @_;
+    my $found = 0;
+    for my $key (grep { /\t\Q$special\E$/ } keys %pseudo_deps) {
+        $found = 1;
+        my @w = map { split ' ', expand_dep_text($_) } @{$pseudo_deps{$key} || []};
+        return 1 if !@w && $empty_means_all;
+        for my $w (@w) {
+            if ($w =~ /%/) {
+                (my $re = quotemeta $w) =~ s/\\%/.*/;
+                return 1 if $name =~ /^$re$/;
+            } elsif ($w eq $name) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+sub is_intermediate_candidate {
+    my ($name) = @_;
+    return 0 if !defined $name || $name eq '' || is_mentioned($name);
+    return 0 if special_target_covers('.SECONDARY', $name, 1)
+             || special_target_covers('.PRECIOUS', $name, 0)
+             || special_target_covers('.NOTINTERMEDIATE', $name, 1)
+             || is_declared_phony($name);
+    return (find_matching_patterns($name) || can_build_from_suffix_rule($name, $makefile)) ? 1 : 0;
+}
+
+# A missing prerequisite that is an intermediate file does not make a target
+# with mtime $target_mtime out of date when its implicit rule's sources exist
+# and are no newer (and need nothing themselves).
+sub missing_intermediate_ok {
+    my ($dep, $target_mtime, $visited) = @_;
+    return 0 unless is_intermediate_candidate($dep);
+    my @src = implicit_rule_prereqs($dep);
+    return 0 unless @src;
+    for my $s (@src) {
+        my @st = Time::HiRes::stat($s);
+        return 0 if !@st || $st[9] > $target_mtime;
+        return 0 if needs_rebuild($s, $visited);
+    }
+    return 1;
+}
+
+# -j: intermediate files queued for this build (target => [path, name, dir]),
+# deleted by the job-master when the build is done.
+our %intermediate_jobs;
+
+sub remove_intermediate_jobs {
+    my ($sock) = @_;
+    my %by_dir;
+    for my $t (sort keys %intermediate_jobs) {
+        my ($path, $name, $dir) = @{$intermediate_jobs{$t}};
+        next unless $Smak::completed_targets{$t} && -e $path;
+        unshift @{$by_dir{$dir}}, [$path, $name];   # make lists them newest first
+    }
+    %intermediate_jobs = ();
+    for my $dir (sort keys %by_dir) {
+        my @f = @{$by_dir{$dir}};
+        unless ($silent_mode) {
+            my $line = "rm " . join(' ', map { $_->[1] } @f);
+            if ($sock && defined fileno($sock)) { print $sock "OUTPUT $line\n"; }
+            else { print "$line\n"; }
+        }
+        unlink map { $_->[0] } @f;
+    }
+}
+
+# Delete the intermediate files this process made, as make does at its end.
+sub remove_made_intermediates {
+    my @made = reverse grep { -e $_->[0] } @intermediates_made;   # newest first, as make
+    @intermediates_made = ();
+    return if !@made || $dry_run_mode;
+    print "rm " . join(' ', map { $_->[1] } @made) . "\n" unless $silent_mode;
+    STDOUT->flush();
+    unlink map { $_->[0] } @made;
+}
+
 # Prerequisites contributed by the implicit rule that would build $target:
 # the first suffix rule whose source exists, else the first pattern-rule
 # variant whose prerequisites all exist.  Mirrors build_target's lookup.
+# With $chain, a prerequisite may also be a missing intermediate file whose
+# own implicit sources exist (it was deleted after the last build).
 sub implicit_rule_prereqs {
-    my ($target) = @_;
+    my ($target, $chain) = @_;
     use Cwd 'getcwd';
     my $cwd = getcwd();
+    my $usable = sub {
+        my ($f) = @_;
+        return 1 if -e ($f =~ m{^/} ? $f : "$cwd/$f");
+        return $chain && is_intermediate_candidate($f) && implicit_rule_prereqs($f) ? 1 : 0;
+    };
     if ($target =~ /^(.+)(\.[^.\/]+)$/) {
         my ($base, $target_suffix) = ($1, $2);
         for my $source_suffix (@suffixes) {
             next if $source_suffix eq $target_suffix;
             next unless exists $suffix_rule{"$makefile\t$source_suffix\t$target_suffix"};
             my $source = resolve_vpath("$base$source_suffix", $cwd);
-            return ($source) if -e $source;
+            return ($source) if $usable->($source);
         }
     }
     for my $match (find_matching_patterns($target)) {
@@ -5988,7 +6119,7 @@ sub implicit_rule_prereqs {
             my @d = map { my $x = $_; $x =~ s/%/$stem/g; resolve_vpath($x, $cwd) }
                     @{ $deps_list[$i] || [] };
             next unless @d;
-            return @d unless grep { !-e ($_ =~ m{^/} ? $_ : "$cwd/$_") } @d;
+            return @d unless grep { !$usable->($_) } @d;
         }
     }
     return ();
@@ -7023,6 +7154,11 @@ sub build_target {
     # Execute rule if it exists (submit_job is blocking, so no need to wait)
     if ($rule && $rule =~ /\S/) {
         warn "DEBUG[" . __LINE__ . "]:   Executing rule for target '$target'\n" if $ENV{SMAK_DEBUG};
+        # An intermediate file made here is deleted at the end (the
+        # job-master does this for -j builds)
+        push @intermediates_made, [$target, $target]
+            if $depth > 0 && !$job_server_socket && !$dry_run_mode && !-e $target
+               && is_intermediate_candidate($target);
         # Convert $MV{VAR} to $(VAR) for expansion
         my $converted = format_output($rule);
         warn "DEBUG[" . __LINE__ . "]:   After format_output\n" if $ENV{SMAK_DEBUG};
@@ -13518,6 +13654,17 @@ sub run_job_master {
         # (propagates to prerequisites and rule expansion)
         my $tsv_saved = apply_target_specific_vars($target);
 
+        # A missing intermediate file is not remade for a target that is
+        # otherwise up to date (make deleted it after the last build)
+        my %skip_intermediate;
+        {
+            my @missing = grep { !-e (m{^/} ? $_ : "$dir/$_") && is_intermediate_candidate($_) }
+                          map { split ' ' } grep { defined } @deps;
+            if (@missing && -e ($target =~ m{^/} ? $target : "$dir/$target") && !needs_rebuild($target)) {
+                $skip_intermediate{$_} = 1 for @missing;
+            }
+        }
+
         # Recursively queue each dependency first
         for my $dep (@deps) {
             # (only while making prerequisites: the rule still applies to
@@ -13530,6 +13677,7 @@ sub run_job_master {
             # Split on whitespace for multiple files in one dep
             for my $single_dep (split /\s+/, $dep) {
                 next unless $single_dep =~ /\S/;
+                next if $skip_intermediate{$single_dep};
 
                 # Check if file exists (relative to working directory)
                 my $dep_path = $single_dep =~ m{^/} ? $single_dep : "$dir/$single_dep";
@@ -13925,6 +14073,11 @@ sub run_job_master {
                 order_only_deps => [map { target_with_prefix($_, $prefix) } @order_only_deps],  # Store order-only deps
                 recheck_after_deps => ($rebuild_via_deps{$target} && !$is_phony) ? 1 : 0,
             };
+            # An intermediate file made by this build is deleted when it ends
+            if ($depth > 0 && !$dry_run_mode && !-e ($target =~ m{^/} ? $target : "$dir/$target")
+                && is_intermediate_candidate($target)) {
+                $intermediate_jobs{$full_target} = [($target =~ m{^/} ? $target : "$dir/$target"), $target, $dir];
+            }
             add_job_to_layer($job, $layer);
             $in_progress{$full_target} = "queued";
 
@@ -14248,6 +14401,7 @@ sub run_job_master {
                 $final_exit ||= 1;
             }
             my $idle_time = Time::HiRes::time();
+            remove_intermediate_jobs($master_socket);   # make deletes them at its end
             print $master_socket "IDLE $final_exit $idle_time\n";
             $master_socket->flush();
             $idle_sent = 1;
@@ -15987,6 +16141,7 @@ sub run_job_master {
                 $final_exit ||= 1;
             }
             my $idle_time = Time::HiRes::time();
+            remove_intermediate_jobs($master_socket);   # make deletes them at its end
             print $master_socket "IDLE $final_exit $idle_time\n" if $master_socket;
             $master_socket->flush() if $master_socket;
             $idle_sent = 1;
@@ -16115,6 +16270,7 @@ sub run_job_master {
                         $final_exit ||= 1;
                     }
                     my $idle_time = Time::HiRes::time();
+                    remove_intermediate_jobs($master_socket);   # make deletes them at its end
                     print $master_socket "IDLE $final_exit $idle_time\n";
                     $master_socket->flush();
                     $idle_sent = 1;
@@ -17075,6 +17231,7 @@ sub run_job_master {
                         # Send IDLE since no work is pending
                         if (!$idle_sent && $master_socket) {
                             my $idle_time = Time::HiRes::time();
+                            remove_intermediate_jobs($master_socket);   # make deletes them at its end
                             print $master_socket "IDLE 0 $idle_time\n";
                             $master_socket->flush();
                             $idle_sent = 1;
@@ -17087,6 +17244,7 @@ sub run_job_master {
                         # Send IDLE since no work is pending
                         if (!$idle_sent && $master_socket) {
                             my $idle_time = Time::HiRes::time();
+                            remove_intermediate_jobs($master_socket);   # make deletes them at its end
                             print $master_socket "IDLE $exit_code $idle_time\n";
                             $master_socket->flush();
                             $idle_sent = 1;
@@ -17845,9 +18003,10 @@ sub run_job_master {
                     # Read command lines (may follow SIBLINGS or DEPS if no SIBLINGS)
                     my $cmd_header = defined $sib_header && $sib_header =~ /^SIBLINGS/ ? <$socket> : $sib_header;
                     chomp $cmd_header if defined $cmd_header;
-                    my $child_phony = 0;
-                    if (defined $cmd_header && $cmd_header eq 'PHONY') {
-                        $child_phony = 1;
+                    my ($child_phony, $child_intermediate) = (0, 0);
+                    while (defined $cmd_header && $cmd_header =~ /^(PHONY|INTERMEDIATE)$/) {
+                        $child_phony = 1 if $1 eq 'PHONY';
+                        $child_intermediate = 1 if $1 eq 'INTERMEDIATE';
                         $cmd_header = <$socket>;
                         chomp $cmd_header if defined $cmd_header;
                     }
@@ -17948,6 +18107,10 @@ sub run_job_master {
                             phony => $child_phony,
                         };
                         $relayed_phony{$target} = 1 if $child_phony;
+                        if ($child_intermediate) {
+                            (my $shown = $target) =~ s{^\Q$exec_dir\E/}{};
+                            $intermediate_jobs{$target} = [($target =~ m{^/} ? $target : "$exec_dir/$target"), $shown, $exec_dir];
+                        }
                     }
                 } elsif ($line =~ /^CHILD_DONE\s*(\d+)?$/) {
                     # Child smak finished submitting all jobs
@@ -18042,6 +18205,7 @@ sub run_job_master {
                     # Two-pass: first find targets that need rebuild based on file timestamps,
                     # then propagate - any target whose dep will be rebuilt also needs rebuild.
                     my %needs_build;
+                    my %child_by_target = map { $_->{target} => $_ } @child_jobs;
                     for my $job (@child_jobs) {
                         # Targets whose command is a recursive make always need rebuild —
                         # they are entry points (like CMake's .dir/all stamp files) that
@@ -18057,17 +18221,44 @@ sub run_job_master {
                         # Child relay targets/deps may be absolute (qualified with exec_dir)
                         my $target_path = $job->{target} =~ m{^/} ? $job->{target} : "$job->{exec_dir}/$job->{target}";
                         unless (-e $target_path) {
+                            # A missing intermediate file is made only if something
+                            # that needs it is remade (decided below)
+                            next if $intermediate_jobs{$job->{target}};
                             $needs_build{$job->{target}} = 1;  # Doesn't exist → needs build
                             next;
                         }
                         my $target_mtime = (Time::HiRes::stat($target_path))[9];
-                        for my $dep (@{$job->{deps}}) {
+                        DEP: for my $dep (@{$job->{deps}}) {
                             my $dep_path = $dep =~ m{^/} ? $dep : "$job->{exec_dir}/$dep";
-                            next unless -e $dep_path;
-                            my $dep_mtime = (Time::HiRes::stat($dep_path))[9];
-                            if ($dep_mtime > $target_mtime) {
-                                $needs_build{$job->{target}} = 1;
-                                last;
+                            my @check = ($dep_path);
+                            if (!-e $dep_path && $intermediate_jobs{$dep} && $child_by_target{$dep}) {
+                                # missing intermediate: its own prerequisites count
+                                my $ij = $child_by_target{$dep};
+                                @check = map { m{^/} ? $_ : "$ij->{exec_dir}/$_" } @{$ij->{deps} || []};
+                            }
+                            for my $c (@check) {
+                                next unless -e $c;
+                                my $dep_mtime = (Time::HiRes::stat($c))[9];
+                                if ($dep_mtime > $target_mtime) {
+                                    $needs_build{$job->{target}} = 1;
+                                    last DEP;
+                                }
+                            }
+                        }
+                    }
+
+                    # Missing intermediates that a remade target needs are made first
+                    my $more = 1;
+                    while ($more) {
+                        $more = 0;
+                        for my $job (@child_jobs) {
+                            next unless $needs_build{$job->{target}};
+                            for my $dep (@{$job->{deps}}) {
+                                next unless $intermediate_jobs{$dep} && $child_by_target{$dep} && !$needs_build{$dep};
+                                my $dp = $dep =~ m{^/} ? $dep : "$job->{exec_dir}/$dep";
+                                next if -e $dp;
+                                $needs_build{$dep} = 1;
+                                $more = 1;
                             }
                         }
                     }

@@ -272,6 +272,39 @@ for j in "" "-j2"; do
     else echo "FAIL: no-op run ${j:-seq}: make [$want] smak [$got]"; fail=1; fi
 done
 
+# Intermediate files (redis tests/modules: %.so: %.xo, %.xo: %.c, the .xo
+# never named): make deletes the ones it made (`rm b.xo a.xo`), a missing
+# one does not make its target out of date, a changed source rebuilds the
+# chain; the same through a sub-make. .PRECIOUS keeps them.
+for layout in direct sub; do
+    rm -rf im; mkdir -p im/sub
+    printf 'all: a.so b.so\n%%.xo: %%.c\n\t@echo "cc $@"; cp $< $@\n%%.so: %%.xo\n\t@echo "ld $@"; cp $< $@\n' > im/sub/Makefile
+    echo a > im/sub/a.c; echo b > im/sub/b.c
+    if [ $layout = sub ]; then printf 'all:\n\t@$(MAKE) --no-print-directory -C sub\n' > im/Makefile; d=im; else d=im/sub; fi
+    steps() {  # tool: output of build, no-op, touch a.c + build, and files left
+        local out
+        out=$( cd $d && $1 2>&1 ); out="$out|$( cd $d && $1 2>&1 )"
+        touch -d '1 minute ago' im/sub/*.so; touch im/sub/a.c
+        out="$out|$( cd $d && $1 2>&1 | sort )|$(ls im/sub | tr '\n' ' ')"
+        rm -f im/sub/*.so im/sub/*.xo; echo "$out"
+    }
+    want=$(steps "make -s")
+    for j in "" "-j2"; do
+        got=$(steps "timeout 60 $SMAK -s $j")
+        # (parallel runs may order the lines differently)
+        if [ "$(tr '|' '\n' <<<"$got" | sort)" == "$(tr '|' '\n' <<<"$want" | sort)" ]; then
+            echo "PASS: intermediate files ($layout) ${j:-seq}"
+        else
+            echo "FAIL: intermediate files ($layout) ${j:-seq}"; echo "  make: $want"; echo "  smak: $got"; fail=1
+        fi
+    done
+done
+rm -rf im
+mkdir -p prec
+printf '.PRECIOUS: %%.xo\nall: a.so\n%%.xo: %%.c\n\tcp $< $@\n%%.so: %%.xo\n\tcp $< $@\n' > prec/Makefile; echo a > prec/a.c
+(cd prec && $SMAK -s >/dev/null 2>&1)
+if [ -e prec/a.xo ]; then echo "PASS: .PRECIOUS keeps an intermediate"; else echo "FAIL: .PRECIOUS keeps an intermediate"; fail=1; fi
+
 # tmux: cmd-parse.o from the makefile's .c.o, whose source cmd-parse.c is
 # made from cmd-parse.y by .y.c (the built-in %.o: %.c was used instead)
 mkdir sfx

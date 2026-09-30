@@ -6031,7 +6031,18 @@ sub is_intermediate_candidate {
              || special_target_covers('.PRECIOUS', $name, 0)
              || special_target_covers('.NOTINTERMEDIATE', $name, 1)
              || is_declared_phony($name);
-    return (find_matching_patterns($name) || can_build_from_suffix_rule($name, $makefile)) ? 1 : 0;
+    my @m = find_matching_patterns($name);
+    # A target of a multi-target pattern rule is kept when one of the files
+    # made with it is mentioned (iverilog: `sdf_parse%c sdf_parse%h:
+    # sdf_parse%y`, sdf_parse.h a prerequisite, sdf_parse.c not)
+    for my $m (@m) {
+        my ($pkey, $stem) = @$m;
+        for my $sib (@{$multi_output_siblings{$pkey} || []}) {
+            (my $f = $sib) =~ s/%/$stem/g;
+            return 0 if $f ne $name && is_mentioned($f);
+        }
+    }
+    return (@m || can_build_from_suffix_rule($name, $makefile)) ? 1 : 0;
 }
 
 # A missing prerequisite that is an intermediate file does not make a target
@@ -14375,7 +14386,9 @@ sub run_job_master {
 
         # Debug: if we have idle workers but work isn't done, show what's blocking
         # (Skip when builtin forks are running - that's expected wait time, not a stuck state)
-        if ($busy_workers == 0 && !$all_done && $builtin_forks == 0 && $context =~ /IDLE/) {
+        # (diagnostic only: this state is also passed through normally, e.g.
+        # right after a multi-output job completes)
+        if ($ENV{SMAK_DEBUG} && $busy_workers == 0 && !$all_done && $builtin_forks == 0 && $context =~ /IDLE/) {
             print STDERR "IDLE-BLOCK: queued=$queued running=$running pending=$pending\n";
             if ($pending > 0) {
                 for my $comp_target (keys %pending_composite) {

@@ -41,7 +41,11 @@ install() {
         deb)
             export DEBIAN_FRONTEND=noninteractive
             [ -f $apt_updated ] || { apt-get update -qq && touch $apt_updated; }
-            apt-get install -y -qq --no-install-recommends "$@" ;;
+            # an index from image build time can name packages the archive has
+            # since replaced (404): refresh it and try once more
+            apt-get install -y -qq --no-install-recommends "$@" ||
+                { apt-get update -qq && touch $apt_updated &&
+                  apt-get install -y -qq --no-install-recommends "$@"; } ;;
         rpm)  dnf -y -q install "$@" ;;
         suse) zypper -n -q install --no-recommends "$@" ;;
         arch) pacman -Sy --noconfirm --needed "$@" ;;

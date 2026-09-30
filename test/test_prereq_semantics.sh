@@ -300,6 +300,16 @@ for layout in direct sub; do
     done
 done
 rm -rf im
+# iverilog: `sdf_parse%c sdf_parse%h: sdf_parse%y` with only sdf_parse.h
+# named (a prerequisite): make keeps sdf_parse.c too (smak deleted it)
+mkdir -p mtp; echo y > mtp/p.y; touch mtp/lex.c
+printf 'all: lex.o p.o\nlex.o: lex.c p.h\n\t@echo "cc $@"; touch $@\np%%c p%%h: p%%y\n\t@echo yacc; cp $< p.c; cp $< p.h\n%%.o: %%.c\n\t@echo "cc $@"; touch $@\n' > mtp/Makefile
+want="$(cd mtp && make -s 2>&1 | sort)|$(ls mtp | tr '\n' ' ')"; rm -f mtp/*.o mtp/p.c mtp/p.h
+for j in "" "-j2"; do
+    got="$(cd mtp && timeout 60 $SMAK -s $j 2>&1 | sort)|$(ls mtp | tr '\n' ' ')"; rm -f mtp/*.o mtp/p.c mtp/p.h
+    if [ "$got" == "$want" ]; then echo "PASS: multi-target pattern rule sibling of a named file is kept ${j:-seq}"
+    else echo "FAIL: multi-target pattern sibling ${j:-seq}: make [$want] smak [$got]"; fail=1; fi
+done
 mkdir -p prec
 printf '.PRECIOUS: %%.xo\nall: a.so\n%%.xo: %%.c\n\tcp $< $@\n%%.so: %%.xo\n\tcp $< $@\n' > prec/Makefile; echo a > prec/a.c
 (cd prec && $SMAK -s >/dev/null 2>&1)

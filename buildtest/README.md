@@ -39,6 +39,16 @@ checked for:
 smak builds get a timeout of six times the make build time plus a minute,
 at least three minutes, so a hang costs minutes rather than the whole run.
 
+## Current status
+
+As of 2026-09-30, all 14 projects in `projects.list` pass every mode (seq,
+par, server, multi, and interp for the cmake projects) on `ubuntu` (24.04)
+and `ubuntu22`: products byte-identical to make's (apart from files make
+itself does not reproduce), no-op runs rebuild nothing, and touching a
+source rebuilds its object and relinks. Full runs take longer than an
+interactive tool timeout allows; run them detached (`setsid nohup
+smak-buildtest ... &`) and read `summary.md` afterwards.
+
 ## Configure failures and automatic packages
 
 When bootstrap, configure or the reference make build fails, `bt-run`

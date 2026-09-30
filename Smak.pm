@@ -2909,6 +2909,36 @@ sub glob_prereqs {
     return @out;
 }
 
+# Assignment prefixes outside recipes: `export VAR = v` and `override VAR
+# = v` fall through to the assignment (git: `override
+# COMPUTE_HEADER_DEPENDENCIES = yes` inside ifeq); a bare `export VAR` or
+# `unexport ...` is a no-op here ('skip'). Returns 'override', 'skip' or ''.
+sub strip_assignment_prefixes {
+    my ($lref) = @_;
+    my $override = 0;
+    while ($$lref =~ /^[ \t]*(export|override|unexport)[ \t]+(.*)$/) {
+        my ($kw, $rest) = ($1, $2);
+        return 'skip' if $kw eq 'unexport';
+        if ($rest =~ /^(?:(?:export|override)[ \t]+)*[A-Za-z_][A-Za-z0-9_]*\s*(?:::=|[:?+!]?=)/) {
+            $override = 1 if $kw eq 'override';
+            $$lref = $rest;
+            next;
+        }
+        return 'skip' if $kw eq 'export';   # bare `export FOO` (inherited anyway)
+        last;   # `override define ...` is handled with define
+    }
+    return $override ? 'override' : '';
+}
+
+# `override VAR ...`: the makefile's value wins over a command-line one (for
+# += it is appended to the command-line value)
+sub apply_override {
+    my ($var, $op) = @_;
+    return unless exists $cmd_vars{$var};
+    $MV{$var} = transform_make_vars($cmd_vars{$var}) if $op eq '+=';
+    delete $cmd_vars{$var};
+}
+
 sub split_make_words {
     my ($str) = @_;
     my @w;
@@ -2969,6 +2999,22 @@ sub handle_vpath_line {
 # Returns the equivalent explicit lines -- `target: prereqs` for each target,
 # then `TARGETS:` to take the recipe that follows -- or () if the rule is
 # not one. Stems are recorded for $*.
+# The prerequisites of the rule with the recipe come first (make: $< is its
+# first prerequisite): move them, appended last, to the front.
+our %static_prereqs;
+sub front_recipe_prereqs {
+    my ($key, @mine) = @_;
+    my $all = $fixed_deps{$key};
+    return unless @mine && $all && @$all > @mine;
+    my @rest = @$all;
+    for my $m (reverse @mine) {   # drop the last occurrence of each
+        for (my $i = $#rest; $i >= 0; $i--) {
+            if ($rest[$i] eq $m) { splice(@rest, $i, 1); last; }
+        }
+    }
+    @$all = (@mine, @rest);
+}
+
 sub static_pattern_lines {
     my ($targets_str, $deps_str, $inline_recipe) = @_;
     my $c = toplevel_index($deps_str, ':');
@@ -2988,6 +3034,9 @@ sub static_pattern_lines {
         my @words = map { my $w = $_; $w =~ s/%/$stem/ unless $w eq '|'; $w } split ' ', $prereqs;
         # already expanded: keep a literal $ literal when the line is re-read
         push @lines, join(' ', $t . ':', @words) =~ s/\$/\$\$/gr;
+        my @normal = @words;
+        splice(@normal, $_) for grep { $normal[$_] eq '|' } reverse 0 .. $#normal;
+        $static_prereqs{"$makefile\t$t"} = \@normal;   # its recipe's (front_recipe_prereqs)
     }
     push @lines, join(' ', @targets) . ':' . (defined $inline_recipe ? " ; $inline_recipe" : '');
     return @lines;
@@ -3099,6 +3148,7 @@ sub parse_makefile {
     %target_specific_vars = ();
     %vpath = ();
     %static_stem = ();
+    %static_prereqs = ();
     @parse_shell_log = ();
     @remake_includes = ();
 
@@ -3246,6 +3296,12 @@ sub parse_makefile {
                 # Only overwrite if no rule exists or existing rule is empty (GNU make: first rule with commands wins)
                 if (!exists $fixed_rule{$key} || !defined $fixed_rule{$key} || $fixed_rule{$key} !~ /\S/) {
                     $fixed_rule{$key} = $current_rule;
+                    # make lists the prerequisites of the rule with the recipe
+                    # first, so $< is its first one (git: `help.o:
+                    # command-list.h` before `$(OBJECTS): %.o: %.c ...`; smak
+                    # compiled command-list.h). This rule's were appended last.
+                    front_recipe_prereqs($key, @current_deps ? @current_deps
+                                              : @{$static_prereqs{$key} || []}) if $current_rule =~ /\S/;
                 }
             } elsif ($type eq 'pattern') {
                 # Pattern rules can have multiple variants (e.g., %.o from %.c, %.cc, %.cpp)
@@ -3277,6 +3333,7 @@ sub parse_makefile {
     my @cond_stack = ({active => 1, any_true => 0, seen_else => 0});  # Start with active top level
 
     my $read_line = make_line_reader($fh);   # $(eval) text is read first
+    my $skip_recipe_lines = 0;   # after a rule whose target list is empty
     while (defined(my $line = $read_line->())) {
         chomp $line;
 
@@ -3456,19 +3513,15 @@ sub parse_makefile {
         }
 
         # Skip lines if we're in an inactive conditional branch
+        # (make ignores them entirely: a rule line there does not end the
+        # current rule, whose recipe may continue after endif - git's
+        # `ifdef X / static rule / else / static rule / endif / recipe`)
         unless ($cond_stack[-1]{active}) {
-            # Still need to track current targets to properly handle rule continuations
-            if ($line =~ /^\t/ && !@current_targets) {
-                # Recipe line but no target - skip
-            } elsif ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
-                # New target definition while skipping - SAVE current rule first, then clear
-                # This prevents losing rules defined before the inactive conditional
-                $save_current_rule->() if @current_targets;
-                @current_targets = ();
-                @current_suffix_targets = ();
-                $current_rule = '';
-            }
             next;
+        }
+        if ($skip_recipe_lines) {
+            next if $line =~ /^\t/;
+            $skip_recipe_lines = 0;
         }
 
         # A line that is only function calls - $(eval $(call tmpl,...)),
@@ -3596,17 +3649,11 @@ sub parse_makefile {
         # A bare `export VAR` (no = sign) marks it for export; we still set
         # it as a variable but don't need to actually export to children
         # since the underlying shell invocations inherit our environment.
-        if ($line =~ /^[ ]*export[ \t]+(.*)$/) {
-            my $rest = $1;
-            if ($rest =~ /^[A-Za-z_][A-Za-z0-9_]*\s*([:?+]?=)/) {
-                $line = $rest;  # fall through to assignment
-            } else {
-                # Bare `export FOO` — no-op (variables are already inherited)
-                next;
-            }
-        }
-        if ($line =~ /^[ ]*unexport[ \t]+(.*)$/) {
-            next;  # no-op for our purposes
+        my $is_override = 0;
+        unless ($is_recipe_line) {
+            my $pfx = strip_assignment_prefixes(\$line);
+            next if $pfx eq 'skip';
+            $is_override = $pfx eq 'override';
         }
 
         # Variable assignment (may have leading spaces inside conditionals,
@@ -3615,6 +3662,7 @@ sub parse_makefile {
             $save_current_rule->();
             my ($var, $op, $value) = ($1, $2, $3);
             ($op, $value) = normalize_assignment_op($op, $value);
+            apply_override($var, $op) if $is_override;
             # Transform $(VAR) and $X to $MV{VAR} and $MV{X}
             $value = transform_make_vars($value);
 
@@ -3695,6 +3743,18 @@ sub parse_makefile {
                 }
             }
 
+            # A rule whose target list expanded to nothing (`$(EMPTY): ...`,
+            # git's $(UNIT_TEST_PROGS)): make ignores it and its recipe;
+            # running the recipe's $(call mkdir_p_parent_template) as makefile
+            # text printed "mkdir: missing operand"
+            if ($colon_pos == 0) {
+                $save_current_rule->();
+                @current_targets = ();
+                @current_suffix_targets = ();
+                $current_rule = '';
+                $skip_recipe_lines = 1;
+                next;
+            }
             # Only proceed if we found a valid colon separator
             if ($colon_pos > 0) {
             $save_current_rule->();
@@ -3763,6 +3823,18 @@ sub parse_makefile {
                     $deps_str =~ s/\$MV\{\Q$var\E\}/$val/;
                 }
                 $deps_str = expand_vars($deps_str) if $deps_str =~ /\$[({]/;
+            }
+            if ($targets_str !~ /\S/) {
+                # `$(EMPTY): ...` (git: $(UNIT_TEST_PROGS) with no unit tests):
+                # make ignores the rule and its recipe; running the recipe's
+                # $(call mkdir_p_parent_template) as makefile text printed
+                # "mkdir: missing operand"
+                $save_current_rule->();
+                @current_targets = ();
+                @current_suffix_targets = ();
+                $current_rule = '';
+                $skip_recipe_lines = 1;
+                next;
             }
             if (my @static = static_pattern_lines($targets_str, $deps_str, $inline_recipe)) {
                 push @eval_lines, @static;
@@ -3875,14 +3947,14 @@ sub parse_makefile {
                     if (exists $fixed_deps{$key}) {
                         push @{$fixed_deps{$key}}, @deps;
                     } else {
-                        $fixed_deps{$key} = \@deps;
+                        $fixed_deps{$key} = [@deps];   # a copy: targets of one rule line must not share it
                     }
                     # Store order-only prerequisites
                     if (@order_only_deps) {
                         if (exists $fixed_order_only{$key}) {
                             push @{$fixed_order_only{$key}}, @order_only_deps;
                         } else {
-                            $fixed_order_only{$key} = \@order_only_deps;
+                            $fixed_order_only{$key} = [@order_only_deps];
                         }
                         print STDERR "DEBUG parse: Stored fixed order-only for '$key': " . join(", ", @{$fixed_order_only{$key}}) . "\n" if $ENV{SMAK_DEBUG};
                     }
@@ -3893,22 +3965,22 @@ sub parse_makefile {
                     $pattern_deps{$key} = [] unless exists $pattern_deps{$key};
                     $pattern_order_only{$key} = [] unless exists $pattern_order_only{$key};
                     # Append this variant's dependencies
-                    push @{$pattern_deps{$key}}, \@deps;
-                    push @{$pattern_order_only{$key}}, \@order_only_deps;
+                    push @{$pattern_deps{$key}}, [@deps];
+                    push @{$pattern_order_only{$key}}, [@order_only_deps];
                     warn "DEBUG: Added pattern deps variant for $key (now have " . scalar(@{$pattern_deps{$key}}) . " variants)\n" if $ENV{SMAK_DEBUG};
                 } elsif ($type eq 'pseudo') {
                     # Append dependencies if target already exists (like gmake)
                     if (exists $pseudo_deps{$key}) {
                         push @{$pseudo_deps{$key}}, @deps;
                     } else {
-                        $pseudo_deps{$key} = \@deps;
+                        $pseudo_deps{$key} = [@deps];
                     }
                     # Store order-only prerequisites
                     if (@order_only_deps) {
                         if (exists $pseudo_order_only{$key}) {
                             push @{$pseudo_order_only{$key}}, @order_only_deps;
                         } else {
-                            $pseudo_order_only{$key} = \@order_only_deps;
+                            $pseudo_order_only{$key} = [@order_only_deps];
                         }
                     }
                 }
@@ -4067,6 +4139,12 @@ sub parse_included_makefile {
                 # Only overwrite if no rule exists or existing rule is empty (GNU make: first rule with commands wins)
                 if (!exists $fixed_rule{$key} || !defined $fixed_rule{$key} || $fixed_rule{$key} !~ /\S/) {
                     $fixed_rule{$key} = $current_rule;
+                    # make lists the prerequisites of the rule with the recipe
+                    # first, so $< is its first one (git: `help.o:
+                    # command-list.h` before `$(OBJECTS): %.o: %.c ...`; smak
+                    # compiled command-list.h). This rule's were appended last.
+                    front_recipe_prereqs($key, @current_deps ? @current_deps
+                                              : @{$static_prereqs{$key} || []}) if $current_rule =~ /\S/;
                 }
             } elsif ($type eq 'pattern') {
                 # Pattern rules can have multiple variants (e.g., %.o from %.c, %.cc, %.cpp)
@@ -4095,6 +4173,7 @@ sub parse_included_makefile {
     my @cond_stack = ({active => 1, seen_else => 0});
 
     my $read_line = make_line_reader($fh);   # $(eval) text is read first
+    my $skip_recipe_lines = 0;   # after a rule whose target list is empty
     while (defined(my $line = $read_line->())) {
         chomp $line;
 
@@ -4234,17 +4313,14 @@ sub parse_included_makefile {
             next;
         }
 
-        # Skip lines if in inactive conditional branch
+        # Skip lines if in inactive conditional branch (entirely, as make:
+        # see parse_makefile)
         unless ($cond_stack[-1]{active}) {
-            if ($line =~ /^\t/ && !@current_targets) {
-                # Recipe line but no target - skip
-            } elsif ($line =~ /^(\S[^:]*?):\s*(.*)$/) {
-                # New rule while skipping - clear current targets
-                @current_targets = ();
-                @current_suffix_targets = ();
-                $current_rule = '';
-            }
             next;
+        }
+        if ($skip_recipe_lines) {
+            next if $line =~ /^\t/;
+            $skip_recipe_lines = 0;
         }
 
         # A line that is only function calls - $(eval $(call tmpl,...)),
@@ -4320,12 +4396,20 @@ sub parse_included_makefile {
             $line = "$ws$prefix_val$rest";
         }
 
+        my $is_override = 0;
+        unless ($is_recipe_line) {
+            my $pfx = strip_assignment_prefixes(\$line);
+            next if $pfx eq 'skip';
+            $is_override = $pfx eq 'override';
+        }
+
         # Variable assignment (may have leading spaces inside conditionals,
         # but NOT tab-prefixed which would be a recipe line)
         if (!$is_recipe_line && $line =~ /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(::=|[:?+!]?=)\s*(.*)$/) {
             $save_current_rule->();
             my ($var, $op, $value) = ($1, $2, $3);
             ($op, $value) = normalize_assignment_op($op, $value);
+            apply_override($var, $op) if $is_override;
             $value = transform_make_vars($value);
 
             # Handle different assignment operators
@@ -4394,6 +4478,18 @@ sub parse_included_makefile {
                 }
             }
 
+            # A rule whose target list expanded to nothing (`$(EMPTY): ...`,
+            # git's $(UNIT_TEST_PROGS)): make ignores it and its recipe;
+            # running the recipe's $(call mkdir_p_parent_template) as makefile
+            # text printed "mkdir: missing operand"
+            if ($colon_pos == 0) {
+                $save_current_rule->();
+                @current_targets = ();
+                @current_suffix_targets = ();
+                $current_rule = '';
+                $skip_recipe_lines = 1;
+                next;
+            }
             # Only proceed if we found a valid colon separator
             if ($colon_pos > 0) {
             $save_current_rule->();
@@ -4456,6 +4552,18 @@ sub parse_included_makefile {
                     $deps_str =~ s/\$MV\{\Q$var\E\}/$val/;
                 }
                 $deps_str = expand_vars($deps_str) if $deps_str =~ /\$[({]/;
+            }
+            if ($targets_str !~ /\S/) {
+                # `$(EMPTY): ...` (git: $(UNIT_TEST_PROGS) with no unit tests):
+                # make ignores the rule and its recipe; running the recipe's
+                # $(call mkdir_p_parent_template) as makefile text printed
+                # "mkdir: missing operand"
+                $save_current_rule->();
+                @current_targets = ();
+                @current_suffix_targets = ();
+                $current_rule = '';
+                $skip_recipe_lines = 1;
+                next;
             }
             if (my @static = static_pattern_lines($targets_str, $deps_str, $inline_recipe)) {
                 push @eval_lines, @static;
@@ -4528,14 +4636,14 @@ sub parse_included_makefile {
                     if (exists $fixed_deps{$key}) {
                         push @{$fixed_deps{$key}}, @deps;
                     } else {
-                        $fixed_deps{$key} = \@deps;
+                        $fixed_deps{$key} = [@deps];   # a copy: targets of one rule line must not share it
                     }
                     # Store order-only prerequisites
                     if (@order_only_deps) {
                         if (exists $fixed_order_only{$key}) {
                             push @{$fixed_order_only{$key}}, @order_only_deps;
                         } else {
-                            $fixed_order_only{$key} = \@order_only_deps;
+                            $fixed_order_only{$key} = [@order_only_deps];
                         }
                     }
                 } elsif ($type eq 'pattern') {
@@ -4545,21 +4653,21 @@ sub parse_included_makefile {
                     $pattern_deps{$key} = [] unless exists $pattern_deps{$key};
                     $pattern_order_only{$key} = [] unless exists $pattern_order_only{$key};
                     # Append this variant's dependencies
-                    push @{$pattern_deps{$key}}, \@deps;
-                    push @{$pattern_order_only{$key}}, \@order_only_deps;
+                    push @{$pattern_deps{$key}}, [@deps];
+                    push @{$pattern_order_only{$key}}, [@order_only_deps];
                     warn "DEBUG: Added pattern deps variant for $key in included file (now have " . scalar(@{$pattern_deps{$key}}) . " variants)\n" if $ENV{SMAK_DEBUG};
                 } elsif ($type eq 'pseudo') {
                     if (exists $pseudo_deps{$key}) {
                         push @{$pseudo_deps{$key}}, @deps;
                     } else {
-                        $pseudo_deps{$key} = \@deps;
+                        $pseudo_deps{$key} = [@deps];
                     }
                     # Store order-only prerequisites
                     if (@order_only_deps) {
                         if (exists $pseudo_order_only{$key}) {
                             push @{$pseudo_order_only{$key}}, @order_only_deps;
                         } else {
-                            $pseudo_order_only{$key} = \@order_only_deps;
+                            $pseudo_order_only{$key} = [@order_only_deps];
                         }
                     }
                 }
@@ -7214,6 +7322,10 @@ sub build_target {
 
         # Expand variables (auto vars are resolved inside expand_vars)
         my $expanded = expand_vars($converted);
+        # A multi-line expansion (git's `define version_gen` body) splits into
+        # recipe lines only at unescaped newlines: backslash-newline continues
+        # the shell command, as in make
+        $expanded =~ s/\\\n/\x00BSNL\x00/g;
         warn "DEBUG[" . __LINE__ . "]:   After expand_vars\n" if $ENV{SMAK_DEBUG};
 
         # Detect automake-style suffix rule patterns
@@ -12550,6 +12662,10 @@ sub run_job_master {
         my @result;
         for my $dir (keys %dirs) {
             my $key = "$makefile\t$dir";
+            # (not an existing directory, nor a .PHONY target of that name:
+            # git's `gitweb` phony builds gitweb/*, whose recipes
+            # `mv $@+ $@` then depended on it - a cycle)
+            next if -d $dir || is_declared_phony($dir);
             if (exists $fixed_deps{$key} || exists $pattern_deps{$key} || exists $pseudo_deps{$key}) {
                 push @result, $dir;
             }
@@ -12686,6 +12802,7 @@ sub run_job_master {
 
         # Expand variables (auto vars are resolved inside expand_vars)
         my $expanded = expand_vars($converted);
+        $expanded =~ s/\\\n/\x00BSNL\x00/g;   # continued, not split (see build_target)
 
         # Debug: Show expanded command for compilation targets
         if ($ENV{SMAK_DEBUG} && $target =~ /\.o$/) {
@@ -13456,7 +13573,11 @@ sub run_job_master {
                                 my $source_can_be_built = exists $fixed_rule{$first_dep_key} || exists $pattern_rule{$first_dep_key};
                                 # Also check pattern rule matching (e.g., parse.cc matches parse%cc pattern)
                                 if (!$source_can_be_built && $first_dep ne '') {
-                                    $source_can_be_built = 1 if find_matching_patterns($first_dep);
+                                    # a rule that can actually make it (git: `git-%: %.o ...` for
+                                    # the source git-difftool--helper.sh wanted
+                                    # difftool--helper.sh.o, which %.o: %.c cannot make)
+                                    $source_can_be_built = 1
+                                        if grep { pattern_rule_viable($_->[0], $_->[1]) } find_matching_patterns($first_dep);
                                 }
                                 # A rule with no normal prerequisites (`x/%.o: | x/%/.`) always applies.
                                 if ($source_exists || $source_can_be_built || !@variant_deps) {

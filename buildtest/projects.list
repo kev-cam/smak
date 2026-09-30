@@ -33,6 +33,7 @@ lua           https://github.com/lua/lua
 lz4           https://github.com/lz4/lz4
 zstd          https://github.com/facebook/zstd
 redis         https://github.com/redis/redis timeout=3600
+git           https://github.com/git/git make="NO_CURL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_OPENSSL=1" timeout=3600
 
 # --- autotools --------------------------------------------------------------
 zlib          https://github.com/madler/zlib
@@ -40,8 +41,12 @@ htop          https://github.com/htop-dev/htop
 tmux          https://github.com/tmux/tmux
 jq            https://github.com/jqlang/jq configure="--disable-docs --without-oniguruma"
 iverilog      https://github.com/steveicarus/iverilog
+sqlite        https://github.com/sqlite/sqlite configure="--disable-tcl"
+nasm          https://github.com/netwide-assembler/nasm
 
 # --- cmake ------------------------------------------------------------------
 zlib-cmake    https://github.com/madler/zlib system=cmake
 cjson         https://github.com/DaveGamble/cJSON system=cmake
 libuv         https://github.com/libuv/libuv system=cmake
+jansson       https://github.com/akheron/jansson system=cmake
+libpng        https://github.com/pnggroup/libpng system=cmake

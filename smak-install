@@ -33,8 +33,21 @@ case $prefix in
 esac
 
 mkdir -p "$prefix/bin" "$prefix/share"
-rm -rf "$prefix/share/smak"
-cp -a "$src_dir" "$prefix/share/smak"
+# Stage the copy next to the target and swap it in, so a failure (e.g. the parent
+# directory is root-owned and the old tree cannot be unlinked) never leaves
+# $prefix/share/smak half-deleted. If the old directory itself cannot be removed,
+# fall back to replacing its contents in place.
+stage="$prefix/share/.smak.new.$$"
+rm -rf "$stage"
+cp -a "$src_dir" "$stage"
+if [ -e "$prefix/share/smak" ] && ! mv -T "$prefix/share/smak" "$prefix/share/.smak.old.$$" 2>/dev/null; then
+    find "$prefix/share/smak" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    cp -a "$stage"/. "$prefix/share/smak"/
+    rm -rf "$stage"
+else
+    mv -T "$stage" "$prefix/share/smak"
+    rm -rf "$prefix/share/.smak.old.$$"
+fi
 ln -sf "$prefix/share/smak/smak" "$prefix/bin/smak"
 ln -sf "$prefix/share/smak/cmake" "$prefix/bin/cmake"
 

@@ -2118,6 +2118,14 @@ $builtins{'configure_file'} = sub {
     use File::Path qw(make_path);
     use File::Basename qw(dirname);
     make_path(dirname($out));
+    # cmake leaves an output whose content did not change alone (mtime kept),
+    # so a re-run configure does not rebuild everything that includes it
+    if (-f $out && open(my $cur, '<', $out)) {
+        local $/;
+        my $old = <$cur>;
+        close $cur;
+        return if defined $old && $old eq $text;
+    }
     open(my $ofh, '>', $out) or return;
     print $ofh $text;
     close $ofh;
@@ -3850,6 +3858,10 @@ _cp_dir() { # src dest_dir [mode: dir|contents, default dir]
         if cp -a "$1" "$2/" 2>/dev/null; then _ok=$((_ok+1)); else _skipped=$((_skipped+1)); fi
     fi
 }
+_ln_file() { # points_to dest_dir link_name   (libfoo.so -> libfoo.so.1)
+    _mkdir "$2" || return 0
+    if ln -sfn "$1" "$2/$3" 2>/dev/null; then _ok=$((_ok+1)); else _skipped=$((_skipped+1)); fi
+}
 _cp_file_rename() { # src dest_dir new_name mode
     if [ ! -e "$1" ]; then _skipped=$((_skipped+1)); return 0; fi
     _mkdir "$2" || return 0
@@ -3867,16 +3879,20 @@ BANNER
             next unless $t;
             next if $t->{imported};
             my $tbin = $t->{binary_dir} // $state->{build_dir};
+            # the file the link step produced: OUTPUT_NAME, VERSION and
+            # SOVERSION apply (Xyce's XyceLib target is libxyce.so)
+            my $of = _target_output_files($t, $r->{target});
             if ($t->{type} eq 'library' && ($t->{libtype} // 'static') eq 'static') {
-                my $src = "$tbin/lib$r->{target}.a";
+                my $src = "$tbin/$of->{file}";
                 my $dest = "\$PREFIX/$r->{dest_archive}";
                 print $fh qq(_cp_file "$src" "$dest" 0644\n);
             } elsif ($t->{type} eq 'library' && $t->{libtype} eq 'shared') {
-                my $src = "$tbin/lib$r->{target}.so";
+                my $src = "$tbin/$of->{file}";
                 my $dest = "\$PREFIX/$r->{dest_library}";
                 print $fh qq(_cp_file "$src" "$dest" 0755\n);
+                print $fh qq(_ln_file "$_->[1]" "$dest" "$_->[0]"\n) for @{$of->{links}};
             } elsif ($t->{type} eq 'executable') {
-                my $src = "$tbin/$r->{target}";
+                my $src = "$tbin/$of->{file}";
                 my $dest = "\$PREFIX/$r->{dest_runtime}";
                 print $fh qq(_cp_file "$src" "$dest" 0755\n);
             }
@@ -3937,8 +3953,7 @@ BANNER
                     push @resolved, $rep;
                 }
                 if ($t->{type} eq 'library' && ($t->{libtype} // 'static') ne 'interface') {
-                    my $lib_dest = ($t->{libtype} // 'static') eq 'static'
-                        ? "lib/lib$tname.a" : "lib/lib$tname.so";
+                    my $lib_dest = "lib/" . _target_output_files($t, $tname)->{link_as};
                     unshift @resolved, "\${CMAKE_CURRENT_LIST_DIR}/../../../$lib_dest";
                 }
                 # Heuristic for TriBITS: a target with EXPORT_NAME=all_libs

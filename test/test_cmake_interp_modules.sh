@@ -81,6 +81,15 @@ else ()
 endif ()
 EOF2
 printf '#cmakedefine WITH_MODELS\n' > src/cfg.h.cmake
+# install.sh and the export file must name the file the link step produced
+# (OUTPUT_NAME/VERSION/SOVERSION): xyce-build's install.sh copied the
+# nonexistent libXyceLib.so while the build had made libxyce.so
+cat >> src/CMakeLists.txt <<'EOF2'
+add_library(XyceLib SHARED core.c)
+set_target_properties(XyceLib PROPERTIES OUTPUT_NAME xyce VERSION 1.2.3 SOVERSION 1)
+install(TARGETS XyceLib EXPORT XyceLibTarget LIBRARY DESTINATION lib ARCHIVE DESTINATION lib RUNTIME DESTINATION bin)
+install(EXPORT XyceLibTarget FILE XyceTargets.cmake NAMESPACE Xyce:: DESTINATION lib/cmake/Xyce)
+EOF2
 rm -rf b2; mkdir b2
 (cd b2 && $SMAK -cmake-interp-only -S ../src -B . >/dev/null 2>&1)
 if grep -q '^#define WITH_MODELS' b2/cfg.h; then echo "PASS: option from an EXISTS test on a PROJECT_SOURCE_DIR path"
@@ -93,4 +102,17 @@ else echo "FAIL: changed CMake input re-runs the configure"; fail=1; fi
 out=$(cd b2 && timeout 120 $SMAK 2>&1)
 if ! grep -q 're-running the configure' <<<"$out"; then echo "PASS: unchanged inputs do not re-run the configure"
 else echo "FAIL: configure re-run with nothing changed"; fail=1; fi
+# a re-run whose configure_file output is unchanged must not touch it (cmake
+# keeps the mtime, so nothing that includes it recompiles)
+m1=$(stat -c %Y b2/cfg.h); sleep 1; touch src/cmake/feature.cmake
+out=$(cd b2 && timeout 120 $SMAK 2>&1); m2=$(stat -c %Y b2/cfg.h)
+if grep -q 're-running the configure' <<<"$out" && [ "$m1" = "$m2" ]; then echo "PASS: unchanged configure_file output keeps its mtime"
+else echo "FAIL: unchanged configure_file output rewritten (mtime $m1 -> $m2)"; fail=1; fi
+if [ -f b2/libxyce.so.1.2.3 ] && [ -L b2/libxyce.so ] && grep -q '_cp_file "[^"]*/libxyce.so.1.2.3"' b2/install.sh \
+   && grep -q '_ln_file "libxyce.so.1" "[^"]*/lib" "libxyce.so"' b2/install.sh && ! grep -q 'libXyceLib' b2/install.sh b2/_export_XyceLibTarget_XyceTargets.cmake \
+   && grep -q 'lib/libxyce.so' b2/_export_XyceLibTarget_XyceTargets.cmake; then echo "PASS: install.sh and export use the OUTPUT_NAME/VERSION file names"
+else echo "FAIL: install.sh/export file names"; ls b2 | grep -i xyce; grep -n 'xyce\|Xyce' b2/install.sh b2/_export_XyceLibTarget_XyceTargets.cmake | head; fail=1; fi
+rm -rf inst; (cd b2 && DESTDIR=$d/inst bash ./install.sh >/dev/null 2>&1)
+if [ -f inst/usr/local/lib/libxyce.so.1.2.3 ] && [ -L inst/usr/local/lib/libxyce.so ] && [ -L inst/usr/local/lib/libxyce.so.1 ]; then echo "PASS: install.sh installs the shared library and its links"
+else echo "FAIL: install.sh install"; ls -la inst/usr/local/lib 2>&1 | head; fail=1; fi
 exit $fail

@@ -520,6 +520,32 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   (plus CMAKE_INSTALL_RPATH / `$ORIGIN` entries when set), unless
   CMAKE_SKIP_BUILD_RPATH is ON.
 
+### CMake interpreter: install.sh/export name a shared library by target, not OUTPUT_NAME; re-run configure rewrites unchanged configure_file outputs — FIXED 2026-10-10
+- [x] **Symptom (xyce-build, 2026-10-10, after the fresh configure above):** the
+  link step honours `set_target_properties(XyceLib PROPERTIES OUTPUT_NAME xyce)`
+  and produces `src/libxyce.so`, but the generated `install.sh` copied
+  `src/libXyceLib.so` (target name) — `_cp_file` silently counts a missing
+  source as skipped, so `sh install.sh` as root installed `bin/Xyce` and the
+  headers but no library; the installed binary only ran via its build-tree
+  RPATH. The exported `_export_XyceLibTarget_XyceTargets.cmake` likewise
+  pointed consumers at `lib/libXyceLib.so`.
+- [x] **Symptom 2:** a re-run of the configure (now automatic when an input
+  changes) rewrote every `configure_file` output even when the content was
+  identical, so `Xyce_config.h` got a new mtime and the whole library would
+  recompile. cmake leaves an unchanged output alone.
+- **Fixed:** the install.sh generator and the export writer use
+  `_target_output_files` (OUTPUT_NAME, VERSION, SOVERSION) — install.sh copies
+  the real file and recreates the `libfoo.so.1 -> libfoo.so.1.2.3`,
+  `libfoo.so -> libfoo.so.1` links (`_ln_file`); `configure_file` compares the
+  new text with the existing output and returns without writing when equal.
+  Tests: test_cmake_interp_modules (OUTPUT_NAME/VERSION in install.sh and the
+  export file, DESTDIR install of the links, mtime kept across a re-run).
+- **Still seen (not fixed):** right after the re-run configure, the first
+  `smak -n` (dry run) in xyce-build regenerated the custom-rule outputs
+  (bison/flex `ExpressionParser.cxx`, `N_DEV_ReactionParser.cxx`,
+  `location.hh`, and `timestamp.h`) although their inputs were unchanged, so
+  7 objects recompile once; a dry run should execute nothing.
+
 ### CMake interp: install/packaging commands report errors that are not errors
 - [ ] **Symptom (2026-09-05, Xyce 7.11 CMakeLists via `smak -cmake`):** the
   interpreter prints `CMake Error: Bad COMPATIBILITY value used for

@@ -8,6 +8,43 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 <!-- Entries below marked "smak-buildtest" were found by building GitHub
      projects in containers (buildtest/README.md), 2026-09-27, Ubuntu 24.04. -->
 
+### CMake interpreter: configure never re-runs; Xyce feature option evaluated differently from cmake
+- [ ] **Symptom (xyce-build, 2026-10-10):** `/usr/local/src/xyce-build` was configured
+  by the smak interpreter on 2026-07-08 (its `CMakeCache.txt`, `Makefile`,
+  `src/Xyce_config.h` all carry that date). Every later `smak` there (pulls on
+  2026-10-03 moved xyce to 7cd78110, 472 objects recompiled, library relinked
+  2026-10-04) reused the July configure output. Real cmake re-runs the configure
+  step whenever a listed CMake input (`CMakeLists.txt`, `cmake/*.cmake`,
+  `*.h.cmake`, `*.in`) is newer than the generated files; the interpreter has no
+  such check, so `configure_file()` outputs go stale silently. Two visible
+  effects on the regression harness: `Xyce -v` banners
+  `DEVELOPMENT-202607082310-()` (the `Xyce_VERSION_EXTRA` date stamp is from
+  July), and see the next point.
+- [ ] **Symptom 2:** the interpreter's `Xyce_config.h` has
+  `/* #undef Xyce_NEURON_MODELS */`; a real cmake configure of the same tree
+  (P620A, cmake 3.28, 2026-10-10) has `#define Xyce_NEURON_MODELS`. 21
+  Xyce_Regression tests (NEURON/*, Certification_Tests/BUG_647_SON/neuron_lv*)
+  fail on the smak-built Xyce only because the neuron devices are compiled
+  out. The option is set in `cmake/feature_modes.cmake`:
+  `if ((Xyce_NEURON_MODELS OR NOT DEFINED Xyce_NEURON_MODELS) AND EXISTS
+  "${Xyce_NEURON_MODELS_DIR}") set(Xyce_NEURON_MODELS TRUE CACHE BOOL ...)`,
+  then `#cmakedefine Xyce_NEURON_MODELS` in `src/Xyce_config.h.cmake`.
+  Hypothesis: one of `NOT DEFINED <unset var>` inside a compound `if`,
+  `EXISTS` on a `${PROJECT_SOURCE_DIR}`-relative CACHE STRING, or
+  `#cmakedefine` of a CACHE BOOL set in an included `.cmake` file evaluates
+  false in the interpreter (or it did in the July version of SmakCMakeInterp.pm
+  and the configure was never re-run since; symptom 1 hides which).
+- **Repro:** `mkdir /tmp/xb && cd /tmp/xb && smak-cmake /usr/local/src/xyce`
+  (interp mode, no real cmake) then `grep NEURON src/Xyce_config.h`; compare
+  with `SMAK_CMAKE_REAL=1`. For symptom 1: touch `xyce/CMakeLists.txt`, run
+  `smak`, check that `src/Xyce_config.h` is regenerated.
+- **Workaround used:** none on clevo (the regression reference there carries
+  the 21 NEURON fails as a known config gap); P620A used real cmake.
+- **Wanted:** (1) reconfigure when any CMake input read by the last configure is
+  newer than the interpreter's cache (record the input list + mtimes in the
+  cache signature, like `cache_signature` does for Smak*.pm); (2) fix the
+  option evaluation so interp and cmake agree on `Xyce_config.h`.
+
 ### Recursive `$(shell ...)` variable in a prerequisite: rebuild every time / dep `'`
 - [x] **FIXED (2026-09-27):** `needs_rebuild` now expands prerequisites with
   `expand_vars(format_output(...))` like `build_target`. The job-master's

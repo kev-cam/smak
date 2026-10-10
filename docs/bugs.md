@@ -857,3 +857,10 @@ rm -rf build && mkdir build && cd build && cmake ..
   ("CERT FAIL" printed) but smak exited 0 overall — build failures in
   phony-target recipes are not propagated.  Workaround: put shell logic
   in a script, call it as a plain recipe line.
+
+### nvc-build: modified src/vhdl2vlog.c not rebuilt (stale .o, exit 0)
+- 2026-08-29.  `smak` in /usr/local/src/nvc-build exited 0 and relinked
+  bin/nvc but did NOT recompile src/vhdl2vlog.o from the modified
+  ../nvc/src/vhdl2vlog.c (object 6 days older than source) — the known
+  incomplete-build class on this autotools tree.  `make` rebuilt it
+  correctly.  Repro: touch nvc/src/vhdl2vlog.c; smak; check .o mtime.

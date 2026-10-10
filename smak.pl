@@ -1097,6 +1097,9 @@ if (defined $scanner_paths) {
 # For CMake build directories, read the CMake metadata directly instead
 # of interpreting the generated Makefiles (which use cmake -E commands
 # that cause quoting/substitution issues).
+# A build directory configured by smak's CMake interpreter is configured
+# again when a CMake input it read has changed
+SmakCMakeInterp::reconfigure_if_stale('.');
 if (SmakCMake::is_cmake_build_dir('.')) {
     print "SmakCMake: detected CMake build directory\n" unless $silent;
     $Smak::makefile = $makefile;

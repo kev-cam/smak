@@ -273,8 +273,20 @@ sub next_token {
 #   { name => 'set', args => [arg, arg, ...], line => N }
 # where each arg is a hashref from the lexer.
 
+# Every file a configure reads (CMake scripts, configure_file templates,
+# file(READ|STRINGS) inputs): written to CMakeFiles/smak-interp.inputs so a
+# later smak re-runs the configure when one changes, as cmake does.
+our %interp_inputs;
+sub _note_input {
+    my ($path) = @_;
+    return unless defined $path && -f $path;
+    require Cwd;
+    $interp_inputs{Cwd::abs_path($path) // File::Spec->rel2abs($path)} = 1;
+}
+
 sub parse_file {
     my ($path) = @_;
+    _note_input($path);
     open(my $fh, '<', $path) or die "Cannot open $path: $!\n";
     local $/;
     my $text = <$fh>;
@@ -1877,6 +1889,7 @@ $builtins{'file'} = sub {
         # file(READ <file> <var> [OFFSET o] [LIMIT n] [HEX]) (zlib reads
         # zconf.h in two parts with LIMIT 245 / OFFSET 244)
         my ($path, $out, @opt) = @$args;
+        _note_input($path);
         my ($offset, $limit, $hex) = (0, undef, 0);
         while (@opt) {
             my $k = shift @opt;
@@ -1899,6 +1912,7 @@ $builtins{'file'} = sub {
         # (libuv takes its version from configure.ac's AC_INIT line)
         my ($path, $out, @opt) = @$args;
         $path = File::Spec->catfile($state->{current_source_dir}, $path) unless $path =~ m{^/};
+        _note_input($path);
         my ($re, $count, $min, $max);
         while (@opt) {
             my $k = shift @opt;
@@ -2028,6 +2042,7 @@ $builtins{'configure_file'} = sub {
         unless $in =~ m{^/};
     $out = File::Spec->catfile($state->{current_binary_dir}, $out)
         unless $out =~ m{^/};
+    _note_input($in);
     open(my $ifh, '<', $in) or do {
         warn "configure_file: cannot read $in\n" if $ENV{SMAK_CMAKE_DEBUG};
         return;
@@ -3599,6 +3614,56 @@ $builtins{'add_subdirectory'} = sub {
 #  build engine works on CMakeLists.txt-derived rules.)
 
 sub generate_makefiles {
+    my @r = _generate_makefiles(@_);
+    _write_interp_inputs($_[0]);   # last: its mtime marks the configure
+    return wantarray ? @r : $r[0];
+}
+
+# CMakeFiles/smak-interp.inputs: how the configure was run and what it read
+sub _write_interp_inputs {
+    my ($state) = @_;
+    my $f = "$state->{build_dir}/CMakeFiles/smak-interp.inputs";
+    open(my $fh, '>', $f) or return;
+    print $fh "source\t$state->{source_dir}\n";
+    my $inv = $state->{invocation} // {};
+    print $fh "define\t$_=$inv->{defines}{$_}\n" for sort keys %{$inv->{defines} || {}};
+    print $fh "cachefile\t$_\n" for @{$inv->{cache_files} || []};
+    print $fh "input\t$_\n" for sort keys %interp_inputs;
+    close $fh;
+}
+
+# Re-run the configure of an interpreter-generated build directory when a
+# file it read is newer than the configure (cmake regenerates the same way;
+# without this, xyce-build kept a July configure_file() output for months).
+# Returns 1 if it reconfigured.
+sub reconfigure_if_stale {
+    my ($build_dir) = @_;
+    $build_dir = File::Spec->rel2abs($build_dir // '.');
+    my $f = "$build_dir/CMakeFiles/smak-interp.inputs";
+    return 0 unless -f $f && open(my $fh, '<', $f);
+    my $stamp = (stat $f)[9];
+    my ($source, %defines, @cache_files, $changed);
+    while (my $l = <$fh>) {
+        chomp $l;
+        my ($k, $v) = split /\t/, $l, 2;
+        next unless defined $v;
+        if    ($k eq 'source')    { $source = $v; }
+        elsif ($k eq 'define')    { my ($n, $x) = split /=/, $v, 2; $defines{$n} = $x; }
+        elsif ($k eq 'cachefile') { push @cache_files, $v; }
+        elsif ($k eq 'input' && !$changed) {
+            my $m = (stat $v)[9];
+            $changed = $v if !defined $m || $m > $stamp;
+        }
+    }
+    close $fh;
+    return 0 unless $changed && $source && -f "$source/CMakeLists.txt";
+    print STDERR "SmakCMakeInterp: $changed changed, re-running the configure\n";
+    my $state = interpret_project($source, $build_dir, \%defines, \@cache_files);
+    generate_makefiles($state);
+    return 1;
+}
+
+sub _generate_makefiles {
     my ($state, $opts) = @_;
     $opts //= {};
     my $build_dir = $state->{build_dir};
@@ -4584,8 +4649,11 @@ sub interpret_project {
     $cache_files //= [];
     $source_dir = File::Spec->rel2abs($source_dir);
     $build_dir  = File::Spec->rel2abs($build_dir);
+    %interp_inputs = ();
+    _note_input($_) for @$cache_files;
 
     my $state = {
+        invocation => { defines => {%$cli_defines}, cache_files => [@$cache_files] },
         source_dir => $source_dir,
         build_dir  => $build_dir,
         current_source_dir => $source_dir,

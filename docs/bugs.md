@@ -8,8 +8,9 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 <!-- Entries below marked "smak-buildtest" were found by building GitHub
      projects in containers (buildtest/README.md), 2026-09-27, Ubuntu 24.04. -->
 
-### CMake interpreter: configure never re-runs; Xyce feature option evaluated differently from cmake
-- [ ] **Symptom (xyce-build, 2026-10-10):** `/usr/local/src/xyce-build` was configured
+### CMake interpreter: configure never re-runs; Xyce feature option evaluated differently from cmake — FIXED 2026-10-10
+
+- [x] **Symptom (xyce-build, 2026-10-10):** `/usr/local/src/xyce-build` was configured
   by the smak interpreter on 2026-07-08 (its `CMakeCache.txt`, `Makefile`,
   `src/Xyce_config.h` all carry that date). Every later `smak` there (pulls on
   2026-10-03 moved xyce to 7cd78110, 472 objects recompiled, library relinked
@@ -20,7 +21,7 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   effects on the regression harness: `Xyce -v` banners
   `DEVELOPMENT-202607082310-()` (the `Xyce_VERSION_EXTRA` date stamp is from
   July), and see the next point.
-- [ ] **Symptom 2:** the interpreter's `Xyce_config.h` has
+- [x] **Symptom 2:** the interpreter's `Xyce_config.h` has
   `/* #undef Xyce_NEURON_MODELS */`; a real cmake configure of the same tree
   (P620A, cmake 3.28, 2026-10-10) has `#define Xyce_NEURON_MODELS`. 21
   Xyce_Regression tests (NEURON/*, Certification_Tests/BUG_647_SON/neuron_lv*)
@@ -44,6 +45,20 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   newer than the interpreter's cache (record the input list + mtimes in the
   cache signature, like `cache_signature` does for Smak*.pm); (2) fix the
   option evaluation so interp and cmake agree on `Xyce_config.h`.
+- **Fixed:** (1) the interpreter records every file a configure reads (CMake
+  scripts and modules, configure_file templates, file(READ|STRINGS) inputs,
+  -C cache files) and the -D defines in `CMakeFiles/smak-interp.inputs`;
+  `smak` in that build directory re-runs the configure when any of them is
+  newer. (2) Not an option-evaluation bug in today's interpreter: with
+  xyce 7cd78110's own `cmake/feature_modes.cmake` it defines
+  Xyce_NEURON_MODELS as cmake does. The July interpreter left
+  `${PROJECT_SOURCE_DIR}` empty (it printed `/src/DeviceModelPKG/...`), so
+  `Xyce_NEURON_MODELS_DIR` was `/src/DeviceModelPKG/NeuronModels`, EXISTS
+  failed and the option was FALSE (project() setting PROJECT_* was fixed in
+  September). Both values are CACHE entries in that build's CMakeCache.txt,
+  so an existing build directory keeps them across a re-run, as with cmake:
+  configure it afresh (remove CMakeCache.txt) once. Tests:
+  test_cmake_interp_modules.
 
 ### Recursive `$(shell ...)` variable in a prerequisite: rebuild every time / dep `'`
 - [x] **FIXED (2026-09-27):** `needs_rebuild` now expands prerequisites with

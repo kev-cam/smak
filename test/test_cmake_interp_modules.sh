@@ -58,4 +58,39 @@ if [ $rc -eq 0 ] && [ -f build/libcore.a ] && build/app_7 && [ ! -e build/never 
 else
     echo "FAIL: build (rc=$rc)"; ls build; echo "$out" | tail -5; fail=1
 fi
+# xyce-build (2026-10-10): an interpreter-configured build directory must be
+# configured again when a CMake input changes (it kept a July Xyce_config.h),
+# and Xyce's NEURON option - a CACHE STRING dir under ${PROJECT_SOURCE_DIR}
+# tested with EXISTS in an included .cmake, then #cmakedefine - must agree
+# with cmake
+mkdir -p src/cmake src/models
+cat >> src/CMakeLists.txt <<'EOF2'
+include(cmake/feature.cmake)
+configure_file(cfg.h.cmake ${PROJECT_BINARY_DIR}/cfg.h)
+EOF2
+cat > src/cmake/feature.cmake <<'EOF2'
+if (NOT DEFINED MODELS_DIR)
+  set (MODELS_DIR "${PROJECT_SOURCE_DIR}/models" CACHE STRING "models")
+endif ()
+if ((WITH_MODELS OR NOT DEFINED WITH_MODELS) AND EXISTS "${MODELS_DIR}")
+  set (WITH_MODELS TRUE CACHE BOOL "models")
+elseif (NOT DEFINED WITH_MODELS)
+  set (WITH_MODELS FALSE CACHE BOOL "models")
+else ()
+  set (WITH_MODELS FALSE CACHE BOOL "models" FORCE)
+endif ()
+EOF2
+printf '#cmakedefine WITH_MODELS\n' > src/cfg.h.cmake
+rm -rf b2; mkdir b2
+(cd b2 && $SMAK -cmake-interp-only -S ../src -B . >/dev/null 2>&1)
+if grep -q '^#define WITH_MODELS' b2/cfg.h; then echo "PASS: option from an EXISTS test on a PROJECT_SOURCE_DIR path"
+else echo "FAIL: option from an EXISTS test: $(cat b2/cfg.h)"; fail=1; fi
+(cd b2 && timeout 120 $SMAK >/dev/null 2>&1)
+sleep 1; printf '#cmakedefine WITH_MODELS\n#define CFG_V2 1\n' > src/cfg.h.cmake
+out=$(cd b2 && timeout 120 $SMAK 2>&1)
+if grep -q 'CFG_V2' b2/cfg.h && grep -q 're-running the configure' <<<"$out"; then echo "PASS: changed CMake input re-runs the configure"
+else echo "FAIL: changed CMake input re-runs the configure"; fail=1; fi
+out=$(cd b2 && timeout 120 $SMAK 2>&1)
+if ! grep -q 're-running the configure' <<<"$out"; then echo "PASS: unchanged inputs do not re-run the configure"
+else echo "FAIL: configure re-run with nothing changed"; fail=1; fi
 exit $fail

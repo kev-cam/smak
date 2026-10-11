@@ -37,16 +37,35 @@ mkdir -p "$prefix/bin" "$prefix/share"
 # directory is root-owned and the old tree cannot be unlinked) never leaves
 # $prefix/share/smak half-deleted. If the old directory itself cannot be removed,
 # fall back to replacing its contents in place.
+#
+# rsync rather than cp -a: cp -a fails on Cygwin when it cannot replicate
+# Windows ACLs/ownership. The trailing slash on the source matters: without it
+# rsync would create $stage/smak/ instead of copying the tree to $stage.
+# .git/, .claude/ and editor backups (*~) are never installed. The bundled
+# cmake's doc/ and man/ (~53MB) are skipped unless SMAK_INSTALL_CMAKE_DOCS=1.
 stage="$prefix/share/.smak.new.$$"
-rm -rf "$stage"
-cp -a "$src_dir" "$stage"
-if [ -e "$prefix/share/smak" ] && ! mv -T "$prefix/share/smak" "$prefix/share/.smak.old.$$" 2>/dev/null; then
-    find "$prefix/share/smak" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-    cp -a "$stage"/. "$prefix/share/smak"/
+old="$prefix/share/.smak.old.$$"
+# On any exit, drop the stage, and if the old tree was moved aside but the new
+# one never landed, put the old one back.
+cleanup() {
     rm -rf "$stage"
+    if [ -e "$old" ] && [ ! -e "$prefix/share/smak" ]; then
+        mv -T "$old" "$prefix/share/smak"
+    fi
+}
+trap cleanup EXIT
+rm -rf "$stage"
+excludes=(--exclude='/.git/' --exclude='/.claude/' --exclude='*~')
+if [ "${SMAK_INSTALL_CMAKE_DOCS:-0}" != 1 ]; then
+    excludes+=(--exclude='/cmake-*/doc/' --exclude='/cmake-*/man/')
+fi
+rsync -a "${excludes[@]}" "$src_dir"/ "$stage"/
+if [ -e "$prefix/share/smak" ] && ! mv -T "$prefix/share/smak" "$old" 2>/dev/null; then
+    find "$prefix/share/smak" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    rsync -a "$stage"/ "$prefix/share/smak"/
 else
     mv -T "$stage" "$prefix/share/smak"
-    rm -rf "$prefix/share/.smak.old.$$"
+    rm -rf "$old"
 fi
 ln -sf "$prefix/share/smak/smak" "$prefix/bin/smak"
 ln -sf "$prefix/share/smak/cmake" "$prefix/bin/cmake"

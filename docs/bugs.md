@@ -545,6 +545,17 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   (bison/flex `ExpressionParser.cxx`, `N_DEV_ReactionParser.cxx`,
   `location.hh`, and `timestamp.h`) although their inputs were unchanged, so
   7 objects recompile once; a dry run should execute nothing.
+- **Still seen 2 (not fixed):** the installed executable keeps its build-tree
+  RUNPATH. `readelf -d /usr/local/bin/Xyce` shows
+  `RUNPATH [/usr/local/src/xyce-build/src]`, so the installed binary loads
+  the build-tree `libxyce.so` ahead of the installed `/usr/local/lib/libxyce.so`
+  (identical today, silently diverges after the next build-tree rebuild).
+  Real cmake relinks at install with `CMAKE_INSTALL_RPATH` (empty by default,
+  i.e. no RUNPATH) unless `CMAKE_BUILD_WITH_INSTALL_RPATH` is set. install.sh
+  just copies the file. Fix options: emit `patchelf --remove-rpath` /
+  `chrpath -d` in install.sh when available, or link the executable a second
+  time without `_build_rpath_flag` into an install staging dir. Harmless for
+  the regress harness (tests build-area binaries).
 
 ### CMake interp: install/packaging commands report errors that are not errors
 - [ ] **Symptom (2026-09-05, Xyce 7.11 CMakeLists via `smak -cmake`):** the

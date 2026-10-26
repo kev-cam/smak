@@ -15207,8 +15207,8 @@ sub run_job_master {
                     }
                 }
 
-                # Fall back to pattern rules if no deps found
-                if (!@deps && !$job->{from_child}) {
+                # Fall back to pattern rules if no deps found (explicit recipes never get implicit deps)
+                if (!@deps && !$has_explicit_rule && !$job->{from_child}) {
                     my $job_dir = $job->{dir} || '.';
                     DISPATCH_PATTERN: for my $match (find_matching_patterns($target)) {
                         my ($pkey, $match_stem) = @$match;

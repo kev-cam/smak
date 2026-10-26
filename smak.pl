@@ -150,6 +150,7 @@ if (@ARGV && ($ARGV[0] eq '-cmake'
 my $makefile;  # default chosen after -C, like GNU make
 my $debug = 0;
 my $help = 0;
+my $version = 0;
 my $script_file = '';
 my $report = 0;
 my $report_dir = '';
@@ -387,6 +388,7 @@ if (defined $ENV{USR_SMAK_OPT} && !$is_recursive) {
         'C|directory=s' => \$directory,
         'Kd|Kdebug' => \$debug,
         'h|help|Kh|Khelp' => \$help,
+        'version' => \$version,
         'Ks|Kscript=s' => \$script_file,
         'Kreport' => \$report,
         'n|just-print|dry-run|recon' => \$dry_run,
@@ -418,6 +420,7 @@ GetOptions(
     'C|directory=s' => \$directory,
     'Kd|Kdebug' => \$debug,
     'h|help|Kh|Khelp' => \$help,
+    'version' => \$version,
     'Ks|Kscript=s' => \$script_file,
     'Kreport' => \$report,
     'n|just-print|dry-run|recon' => \$dry_run,
@@ -499,6 +502,11 @@ for my $arg (@ARGV) {
 
 if ($help) {
     print_help();
+    exit 0;
+}
+
+if ($version) {
+    print "smak $Smak::VERSION\n";
     exit 0;
 }
 
@@ -722,6 +730,7 @@ Options:
                               change is bad and the rest of the run is waste.
   -cli                        Enter CLI mode (interactive shell for building)
   -h, --help                  Display this help message
+  --version                   Display version information and exit
   --yes                       Auto-answer yes to prompts (for -Kreport)
   -cmake                      Run cmake with remaining arguments (passthrough)
   -Kd, -Kdebug                Enter interactive debug mode

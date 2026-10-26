@@ -61,8 +61,8 @@ The `test-cli-advanced` script automatically uses `/tmp/smak-test-cli-$$` for it
 ## Git Practices
 
 1. **Branching**
-   - Work on feature branches (format: `claude/<description>-<session-id>`)
-   - Never push directly to main/master
+   - Small, focused fixes that pass the regression suite go directly on `main`
+   - Use a feature branch only for large or risky changes, or when asked
 
 2. **Committing**
    - Write clear, descriptive commit messages
@@ -70,7 +70,7 @@ The `test-cli-advanced` script automatically uses `/tmp/smak-test-cli-$$` for it
    - Commit logical units of work
 
 3. **Pushing**
-   - Use `git push -u origin <branch-name>`
+   - Push `main` with `git push origin main`; push a feature branch with `git push -u origin <branch-name>`
    - Retry network failures up to 4 times with exponential backoff
 
 ## Code Quality

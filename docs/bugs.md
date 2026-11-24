@@ -31,14 +31,50 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   packages can be analysed before the std library exists.
 - **Not yet tried with smak:** this was GNU make. smak builds the same tree, so
   it should hit the same race whenever it schedules those two packages early.
+- **How the bad rule shows itself (strace of the FUSE_PKG recipe,
+  `nvc --std=2040 -L lib/ --work=lib/sv2vhdl -a .../fuse_pkg.vhd`, clevo-lx
+  2026-11-23):**
+  - *When the build succeeds* (the timing was lucky), the job opens other
+    rules' outputs by name:
+    ```
+    openat(".../lib/std.08/STD.STANDARD", O_RDONLY)
+    openat(".../lib/ieee.08/IEEE.STD_LOGIC_1164", O_RDONLY)
+    openat(".../lib/std.08/STD.TEXTIO", O_RDONLY)
+    ```
+    None of those files is among the target's prerequisites, direct or
+    indirect. This shows on every build, even when nothing fails.
+  - *When it fails*, there is no failed open of `lib/std.08/...`: nvc lists
+    the `lib/` directory (`openat("lib/", O_DIRECTORY)` + `getdents64`),
+    doesn't see `std.08` and stops with `cannot find STD.STANDARD package` /
+    `required library STD not found`. The only trace is a directory listing.
 - **Wanted from smak:**
-  1. Building nvc in parallel should work despite this. Either catch the
-     undeclared input (the job reads `lib/std.08/...` that another queued job
-     writes: smak's file-access tracking / FUSE layer could see it and order
-     or retry the job), or at least report "job read an output of a job not in
-     its prerequisites" so the makefile gets fixed.
-  2. A regression test: a two-rule makefile where B reads A's output without
-     declaring it, run with `-j`.
+  1. **Undeclared-input check (main request):** record each job's file
+     opens per process (FUSE layer, LD_PRELOAD or ptrace; inotify can't tell
+     which process opened a file). Warn when a job reads a file that another
+     rule in the graph produces and that rule is not among the job's
+     prerequisites, direct or indirect: "SV2VHDL.FUSE_PKG read
+     lib/std.08/STD.STANDARD (made by lib/std.08/STD.STANDARD's rule), not a
+     prerequisite". This works on successful builds, so the rule gets fixed
+     before it ever races. Possibly also order the job after that rule on
+     the next run.
+  2. **When a job fails:**
+     - (a) match its stderr against the names of targets not yet built
+       (`STD.STANDARD` -> `lib/std.08/STD.STANDARD`) and say "may need
+       <target>, which wasn't built yet";
+     - (b) optionally treat "listed a directory that a pending or running
+       job writes into" as a possible dependency. This is noisier.
+     A job that fails like this could be retried once its suspected input
+     has been built.
+  3. **Lint (heuristic):** among rules with the same recipe shape in the
+     same target directory, point out the ones that lack the kind of
+     prerequisite the rest have. Here, 35 of the 37
+     `lib/sv2vhdl/SV2VHDL.*` rules depend on a library unit and these two
+     have none.
+  4. A regression test: a two-rule makefile where B reads A's output without
+     declaring it. The check in (1) must warn without `-j`, and (2) must
+     explain the failure with `-j`.
+  (GNU make 4.4's `--shuffle` makes the failure reproducible, but it doesn't
+  say which rule is wrong.)
 - **Repro:** `mkdir /tmp/nb && cd /tmp/nb && /usr/local/src/nvc/configure
   --disable-maintainer-mode && smak -j16` (or `make -j16`). It is timing
   dependent; `rm -rf lib/std.08 lib/sv2vhdl/SV2VHDL.FUSE_PKG*

@@ -8,6 +8,47 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 <!-- Entries below marked "smak-buildtest" were found by building GitHub
      projects in containers (buildtest/README.md), 2026-09-27, Ubuntu 24.04. -->
 
+### nvc: parallel build races two sv2vhdl packages against STD.STANDARD (undeclared prerequisite)
+
+- [ ] **Symptom (clevo-lx, 2026-11-23):** a fresh out-of-tree nvc build
+  (`~/nvc-arena-build`, nvc master 181febcbf, `configure --disable-maintainer-mode
+  CFLAGS="-O2 -g -fPIC"`) with `make -j16` (GNU make 4.4.1) failed:
+  ```
+    NVC      lib/sv2vhdl/SV2VHDL.LOGIC3DW_PKG
+    NVC      lib/sv2vhdl/SV2VHDL.FUSE_PKG
+  ** Warning: directory lib/sv2vhdl already exists and is not an NVC library
+  ** Fatal: cannot find STD.STANDARD package
+  make[1]: *** [Makefile:6960: lib/sv2vhdl/SV2VHDL.FUSE_PKG] Error 1
+  make[1]: *** [Makefile:6955: lib/sv2vhdl/SV2VHDL.LOGIC3DW_PKG] Error 1
+  ```
+  Re-running `make` (serial) finished the build.
+- **Cause (in nvc's makefile, not in the make program):** in
+  `lib/sv2vhdl/Makemodule.am` the rules for `SV2VHDL.LOGIC3DW_PKG` and
+  `SV2VHDL.FUSE_PKG` have only their source and the order-only `| $(DRIVER)`.
+  They have no prerequisite on `lib/std.08/STD.STANDARD` or on any ieee or
+  sv2vhdl library unit. The other 35 sv2vhdl packages declare one; `ARENA_PKG`
+  depends on `lib/std.08/STD.STANDARD` directly. So under `-j` the two
+  packages can be analysed before the std library exists.
+- **Not yet tried with smak:** this was GNU make. smak builds the same tree, so
+  it should hit the same race whenever it schedules those two packages early.
+- **Wanted from smak:**
+  1. Building nvc in parallel should work despite this. Either catch the
+     undeclared input (the job reads `lib/std.08/...` that another queued job
+     writes: smak's file-access tracking / FUSE layer could see it and order
+     or retry the job), or at least report "job read an output of a job not in
+     its prerequisites" so the makefile gets fixed.
+  2. A regression test: a two-rule makefile where B reads A's output without
+     declaring it, run with `-j`.
+- **Repro:** `mkdir /tmp/nb && cd /tmp/nb && /usr/local/src/nvc/configure
+  --disable-maintainer-mode && smak -j16` (or `make -j16`). It is timing
+  dependent; `rm -rf lib/std.08 lib/sv2vhdl/SV2VHDL.FUSE_PKG*
+  lib/sv2vhdl/SV2VHDL.LOGIC3DW_PKG*` and rebuild to retry.
+- **Fix on the nvc side** (separate): both packages use ieee, so add to the
+  dependency block of `lib/sv2vhdl/Makemodule.am`:
+  `lib/sv2vhdl/SV2VHDL.FUSE_PKG: lib/ieee.08/IEEE.STD_LOGIC_1164` and
+  `lib/sv2vhdl/SV2VHDL.LOGIC3DW_PKG: lib/ieee.08/IEEE.STD_LOGIC_1164
+  lib/ieee.08/IEEE.NUMERIC_STD`.
+
 ### CMake interpreter: configure never re-runs; Xyce feature option evaluated differently from cmake — FIXED 2026-10-10
 
 - [x] **Symptom (xyce-build, 2026-10-10):** `/usr/local/src/xyce-build` was configured

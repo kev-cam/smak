@@ -255,6 +255,10 @@ our %cmd_vars;
 # Environment variables are make variables, as in GNU make: read into %MV
 # when a makefile is parsed (import_environment).
 our %env_vars;        # name => value, as imported by the current parse
+# `export VAR` (1) and `unexport VAR` (0) of the current makefile
+our %exported_vars;
+# What apply_exports changed in %ENV: [pid, {name => previous value}]
+our @exports_undo;
 
 # Track phony targets (from ninja builds)
 our %phony_targets;
@@ -1659,6 +1663,67 @@ sub is_env_value {
         && $MV{$var} eq transform_make_vars($env_vars{$var});
 }
 
+# `export A B` / `unexport A B`; the names may come from variables
+sub note_exports {
+    my ($on, $names) = @_;
+    $names = expand_vars($names) if $names =~ /\$/;
+    $exported_vars{$_} = $on for grep { /^[A-Za-z_][A-Za-z0-9_]*$/ } split ' ', $names;
+}
+
+# Put the makefile's exported variables into %ENV, where recipe commands and
+# sub-makes find them: the `export`ed ones, and those that came from the
+# environment and were changed (make passes on its own value of them).
+# GNU make expands them for every recipe line; here it is done once, when
+# the makefile has been read.
+sub apply_exports {
+    our $in_parse;
+    local $in_parse = 0;   # a $(shell) in an exported value is not the parse's
+    my %undo;
+    my %names = (%env_vars, %exported_vars);
+    for my $name (sort keys %names) {
+        my $export = $exported_vars{$name};
+        if (defined $export && !$export) {
+            $undo{$name} = delete $ENV{$name} if exists $ENV{$name};
+            next;
+        }
+        next unless $export || !is_env_value($name);
+        my $internal = $cmd_vars{$name} // $MV{$name};
+        next unless defined $internal;
+        my $value = unescape_dollars(expand_vars(format_output($internal)));
+        next if defined $ENV{$name} && $ENV{$name} eq $value;
+        $undo{$name} = $ENV{$name};
+        $ENV{$name} = $value;
+    }
+    if (%undo) {
+        # The names changed here and further up: under a job server the
+        # recipes run elsewhere, and relay_to_job_server sends these along.
+        my %changed = map { $_ => 1 } split(' ', $ENV{SMAK_EXPORTS} // ''), keys %undo;
+        $undo{SMAK_EXPORTS} = $ENV{SMAK_EXPORTS};
+        $ENV{SMAK_EXPORTS} = join(' ', sort keys %changed);
+    }
+    @exports_undo = %undo ? ($$, \%undo) : ();
+}
+
+# Set (or, for undef, remove) environment variables: a relayed job's
+sub set_job_env {
+    my ($env) = @_;
+    for my $name (keys %{$env || {}}) {
+        if (defined $env->{$name}) { $ENV{$name} = $env->{$name}; }
+        else { delete $ENV{$name}; }
+    }
+}
+
+# Take the last apply_exports back before a makefile is read again in the
+# same process. A forked sub-make keeps them: they are its environment.
+sub undo_exports {
+    my ($pid, $undo) = splice(@exports_undo);
+    return unless $undo && $pid == $$;
+    for my $name (keys %$undo) {
+        if (defined $undo->{$name}) { $ENV{$name} = $undo->{$name}; }
+        else { delete $ENV{$name}; }
+    }
+}
+
 # The value of a reference kept as $MV{REF}: a variable's, or what
 # expand_vars makes of $(REF) when REF is not a variable name, such as the
 # substitution reference $(SRCS:.c=.o).
@@ -1767,6 +1832,19 @@ sub relay_to_job_server {
         return undef;
     }
     warn "Child smak connected, got CHILD_READY\n" if $ENV{SMAK_DEBUG};
+
+    # The jobs run in the job-master's workers, not in this process: send
+    # the variables exported here and by the makes above (apply_exports),
+    # and the command-line variables, for their environment.
+    for my $name (split(' ', $ENV{SMAK_EXPORTS} // ''), 'SMAK_EXPORTS', 'MAKEFLAGS') {
+        next unless $name =~ /^\w+$/;
+        if (exists $ENV{$name}) {
+            (my $value = $ENV{$name}) =~ s/\n/ /g;
+            print $sock "CHILD_ENV $name=$value\n";
+        } else {
+            print $sock "CHILD_ENV $name\n";
+        }
+    }
 
     # Dry-run capture of targets at this level only
     # ($relay_capture_mode prevents fork-expand of recursive makes -
@@ -2969,20 +3047,22 @@ sub glob_prereqs {
 
 # Assignment prefixes outside recipes: `export VAR = v` and `override VAR
 # = v` fall through to the assignment (git: `override
-# COMPUTE_HEADER_DEPENDENCIES = yes` inside ifeq); a bare `export VAR` or
-# `unexport ...` is a no-op here ('skip'). Returns 'override', 'skip' or ''.
+# COMPUTE_HEADER_DEPENDENCIES = yes` inside ifeq); `export VAR ...` and
+# `unexport VAR ...` are whole directives ('skip'). The exported names are
+# recorded for apply_exports. Returns 'override', 'skip' or ''.
 sub strip_assignment_prefixes {
     my ($lref) = @_;
     my $override = 0;
     while ($$lref =~ /^[ \t]*(export|override|unexport)[ \t]+(.*)$/) {
         my ($kw, $rest) = ($1, $2);
-        return 'skip' if $kw eq 'unexport';
-        if ($rest =~ /^(?:(?:export|override)[ \t]+)*[A-Za-z_][A-Za-z0-9_]*\s*(?:::=|[:?+!]?=)/) {
+        if ($kw eq 'unexport') { note_exports(0, $rest); return 'skip'; }
+        if ($rest =~ /^(?:(?:export|override)[ \t]+)*([A-Za-z_][A-Za-z0-9_]*)\s*(?:::=|[:?+!]?=)/) {
             $override = 1 if $kw eq 'override';
+            $exported_vars{$1} = 1 if $kw eq 'export';
             $$lref = $rest;
             next;
         }
-        return 'skip' if $kw eq 'export';   # bare `export FOO` (inherited anyway)
+        if ($kw eq 'export') { note_exports(1, $rest); return 'skip'; }
         last;   # `override define ...` is handled with define
     }
     return $override ? 'override' : '';
@@ -3166,6 +3246,7 @@ sub parse_makefile {
     undef $default_target;
     $parse_side_effects = 0;
     local $in_parse = 1;
+    undo_exports();   # of an earlier parse in this process
 
     # Always initialize ignore_dirs from environment (not saved in cache)
     # This ensures SMAK_IGNORE_DIRS is respected even when using cached state
@@ -3182,6 +3263,7 @@ sub parse_makefile {
             detect_inactive_patterns();
         }
 
+        apply_exports();
         return;  # Cache loaded successfully, skip parsing
     }
 
@@ -3209,6 +3291,7 @@ sub parse_makefile {
     %static_prereqs = ();
     @parse_shell_log = ();
     @remake_includes = ();
+    %exported_vars = ();
 
     # Reset suffix rules - initialize with GNU make default suffixes
     # These are the common suffixes used in C/C++ development
@@ -3707,12 +3790,9 @@ sub parse_makefile {
             $line = $ws . format_output($prefix_val) . $rest;
         }
 
-        # `export VAR ...` / `unexport VAR ...` — drop the leading directive,
-        # allow the rest to fall through to normal assignment parsing.
-        # `export VAR = value` / `export VAR := value` etc. all work this way.
-        # A bare `export VAR` (no = sign) marks it for export; we still set
-        # it as a variable but don't need to actually export to children
-        # since the underlying shell invocations inherit our environment.
+        # `export VAR = value` / `export VAR := value` etc.: the directive is
+        # noted and dropped, the rest falls through to normal assignment
+        # parsing. `export VAR` and `unexport VAR` are complete here.
         my $is_override = 0;
         unless ($is_recipe_line) {
             my $pfx = strip_assignment_prefixes(\$line);
@@ -4133,6 +4213,7 @@ sub parse_makefile {
 
     # Save state to cache after successful parse
     save_state_cache($makefile_path);
+    apply_exports();
 }
 
 # Record a makefile read by this parse for cache validation; a missing
@@ -5106,6 +5187,7 @@ sub save_state_cache {
         print $fh "    " . _quote_string($var) . " => " . _quote_string($MV{$var}) . ",\n";
     }
     print $fh ");\n\n";
+    _save_hash($fh, "exported_vars", \%exported_vars);
 
     # Save rules and dependencies
     _save_hash($fh, "fixed_rule", \%fixed_rule);
@@ -12395,6 +12477,34 @@ sub run_job_master {
 	}
 	print $worker "ENV_END\n";
     }
+
+    # What a relaying sub-make sent of its environment (CHILD_ENV), by socket
+    our %child_env;
+
+    # The environment of that sub-make's jobs where it differs from the
+    # workers': name => value (undef: not set), or undef if it is the same.
+    sub child_job_env {
+        my ($socket) = @_;
+        my $sent = $child_env{$socket} or return undef;
+        my %env;
+        for my $name (keys %$sent) {
+            my $ours = exists $worker_env{$name} ? $worker_env{$name} : $ENV{$name};
+            my $theirs = $sent->{$name};
+            next if !defined $theirs && !defined $ours;
+            next if defined $theirs && defined $ours && $theirs eq $ours;
+            $env{$name} = $theirs;
+        }
+        return %env ? \%env : undef;
+    }
+
+    # Sent ahead of a TASK: the worker runs that task with these set
+    sub send_task_env {
+        my ($worker, $job) = @_;
+        my $env = $job->{env} or return;
+        for my $name (sort keys %$env) {
+            print $worker "TASKENV $name" . (defined $env->{$name} ? "=$env->{$name}" : '') . "\n";
+        }
+    }
     
     my $fuse_mountpoint;
     our $has_fuse = 0;
@@ -15039,6 +15149,7 @@ sub run_job_master {
         };
 
         # Send task to worker with split commands for efficient execution
+        send_task_env($worker, $job);
         print $worker "TASK $task_id\n";
         # Use exec_dir for worker chdir (falls back to dir for backwards compatibility)
         my $worker_dir = $job->{exec_dir} || $job->{dir};
@@ -16036,6 +16147,10 @@ sub run_job_master {
                                     # don't inherit the parent's -j flag.
                                     delete $ENV{USR_SMAK_OPT};
 
+                                    # A relayed job runs with what its
+                                    # sub-make exported
+                                    set_job_env($peek_job->{env});
+
                                     # Change to exec_dir
                                     unless (chdir($exec_dir)) {
                                         warn "Cannot chdir to '$exec_dir': $!\n";
@@ -16274,6 +16389,7 @@ sub run_job_master {
                     $worker_dir = $rel || '.';
                 }
             }
+            send_task_env($ready_worker, $job);
             print $ready_worker "TASK $task_id\n";
             print $ready_worker "DIR $worker_dir\n";
 
@@ -18183,6 +18299,7 @@ sub run_job_master {
                     }
                     delete $child_exit_codes{$socket};
                     delete $child_all_submitted{$socket};
+                    delete $child_env{$socket};
                     $select->remove($socket);
                     @child_sockets = grep { $_ != $socket } @child_sockets;
                     close($socket);
@@ -18190,7 +18307,11 @@ sub run_job_master {
                 }
                 chomp $line;
 
-                if ($line eq 'SUBMIT_JOB') {
+                if ($line =~ /^CHILD_ENV (\w+)(?:=(.*))?$/) {
+                    # A variable of the environment this child's jobs run in
+                    # (no value: not set there)
+                    $child_env{$socket}{$1} = $2;
+                } elsif ($line eq 'SUBMIT_JOB') {
                     # Child is submitting a job (protocol: target, exec_dir, DEPS N, deps, SIBLINGS N, siblings, COMMAND_LINES N, cmds)
                     # Temporarily switch to blocking for multi-line protocol read
                     $socket->blocking(1);
@@ -18330,6 +18451,7 @@ sub run_job_master {
                             layer => 0,
                             from_child => 1,
                             phony => $child_phony,
+                            env => child_job_env($socket),
                         };
                         $relayed_phony{$target} = 1 if $child_phony;
                         if ($child_intermediate) {

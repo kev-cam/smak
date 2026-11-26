@@ -330,6 +330,7 @@ sub run_worker {
     my $sel = IO::Select->new($socket);
     my $last_idle_sent = 0;
     my $read_buf = '';
+    my %task_env;   # TASKENV lines received for the next task
 
     # Read one line from socket using sysread + manual buffer.
     # Returns the line (without newline) or undef on EOF/error.
@@ -398,9 +399,22 @@ sub run_worker {
             next;
         }
 
+        # Environment for the next task only: variables the sub-make that
+        # submitted it exports (no value: unset)
+        if ($line =~ /^TASKENV (\w+)(?:=(.*))?$/) {
+            $task_env{$1} = $2;
+            next;
+        }
+
         # Handle task
         if ($line =~ /^TASK (\d+)$/) {
             my $task_id = $1;
+            local %ENV = %ENV if %task_env;   # restored after the task
+            for my $name (keys %task_env) {
+                if (defined $task_env{$name}) { $ENV{$name} = $task_env{$name}; }
+                else { delete $ENV{$name}; }
+            }
+            %task_env = ();
 
             # Get directory
             my $dir_line = $read_line->();

@@ -85,6 +85,80 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
   `lib/sv2vhdl/SV2VHDL.LOGIC3DW_PKG: lib/ieee.08/IEEE.STD_LOGIC_1164
   lib/ieee.08/IEEE.NUMERIC_STD`.
 
+### GNU make gaps found building TightVNC's Unix tree — FIXED 2026-11-26
+
+TightVNC 1.3.10 `vnc_unixsrc` with Debian's hand-written GNU makefiles,
+built as `smak -C libvncauth && smak -C Xvnc`. GNU make 4.4.1 was right in
+every case; smak exited 0 in most of them.
+
+- [x] **Substitution reference in a rule line.** `OBJS = $(SRCS:.c=.o)` and
+  `lib.a: $(OBJS)` gave lib.a no prerequisites and an empty `$^`: nothing
+  compiled, an empty archive, exit 0. The parse-time `$MV{...}` loops looked
+  `SRCS:.c=.o` up as a variable name; `$(OBJS): defs.h` at the start of a line
+  was split at the colon inside the reference. Fix: `mv_ref_value`, and the
+  line-start variable goes back in make syntax. Test `test_subst_ref_prereqs.sh`.
+- [x] **Environment variables were not make variables.** `$(HOME)` was empty;
+  sub-makes lost the CFLAGS the build was started with. Fix:
+  `import_environment` (after the defaults, before the makefile); the parse
+  cache holds a digest of the environment and not its values. Test
+  `test_env_vars.sh`.
+- [x] **`export` did nothing.** `export LN = ln -snf` / `export DEFS = ...` in
+  Xvnc/Makefile never reached the sub-makes. Fix: `apply_exports` (also
+  `export A B`, `unexport`, and environment variables a makefile changes);
+  under a job server the relay sends them (CHILD_ENV) and the job-master
+  passes them to its forks and to the workers per task (TASKENV). Test
+  `test_export_submake.sh`.
+- [x] **MAKECMDGOALS was never set.** `MAKECMDGOALS ?= all` with
+  `$(SUBDIRS): ; $(MAKE) -C $@ $(MAKECMDGOALS)`: `smak clean` ran `all` in the
+  subdirectories. Test `test_makecmdgoals.sh`.
+- [x] **Default goal from an included makefile.** cfb16/Makefile includes the
+  file that has `all:`; smak made the first target of cfb16/Makefile itself.
+  Test `test_include_default_goal.sh`.
+- [x] **Built-in `rm -f` left dangling symbolic links** (`-e` follows the
+  link). Test `test_rm_dangling_symlink.sh`.
+- **Result (clevo-lx, 20 threads):** `smak -j16` 9.3 s, `make` 42.0 s,
+  `make -j16` 7.1 s, sequential `smak` 44.4 s. Same 487 objects and 16
+  archives as make, same archive members and section sizes; `Xvnc -version`
+  runs; a second run compiles nothing and runs the commands make's second run
+  does; `smak -C Xvnc clean` leaves the tree make's clean leaves.
+
+### A phony prerequisite shared by several goals runs once per goal
+
+- [ ] **Symptom (found 2026-11-26, TightVNC):** with several goals on the
+  command line, a .PHONY prerequisite they share has its recipe run for each
+  goal; make runs it once per invocation. With TightVNC's layout
+  (`all clean: $(SUBDIRS)`, `$(SUBDIRS): ; $(MAKE) -C $@ $(MAKECMDGOALS)`) a
+  sequential `smak all clean` runs every `$(MAKE) -C dir all clean` twice
+  (`smak -j4` ran them once there).
+- **Repro:** `printf 'all clean: sub\nsub:\n\t@echo sub\n.PHONY: all clean sub\n' > Makefile; smak all clean`
+  prints `sub` twice, with -j2 as well (make: once).
+
+### `$^` of an explicit rule keeps vpath prerequisites unresolved under -j
+
+- [ ] **Symptom (found 2026-11-26):** for a target with an explicit or
+  static pattern rule, `$<` is the file found through vpath but `$^` has the
+  name as written, under -j only (the sequential build resolves both).
+- **Repro:** `mkdir -p sub/src; touch sub/src/v.c;`
+  `printf 'vpath %%.c sub/src\nv.o: %%.o: %%.c\n\t@echo "$< ($^)"\n' > Makefile; smak -j2`
+  prints `sub/src/v.c (v.c)`; make and sequential smak print
+  `sub/src/v.c (sub/src/v.c)`.
+
+### Variable features not implemented (seen while fixing the TightVNC gaps)
+
+None of these is needed by TightVNC; each expands to nothing or is ignored
+without a message.
+
+- [ ] `.DEFAULT_GOAL := b` is ignored (the first target stays the default).
+- [ ] Computed variable names: `X = foo`, `foo_OBJS = a.o`, `$($(X)_OBJS)` is
+  empty.
+- [ ] Substitution reference in braces: `${SRCS:.c=.o}` is passed to the
+  shell unexpanded ("Bad substitution"); `$(SRCS:.c=.o)` works.
+- [ ] Bare `export` / `.EXPORT_ALL_VARIABLES` (export everything) and
+  target-specific `target: export VAR = v` export nothing.
+- [ ] Exported values are expanded once per makefile, when it has been read,
+  not for every recipe line as in make (differs only for values that depend
+  on the target or have side effects).
+
 ### CMake interpreter: configure never re-runs; Xyce feature option evaluated differently from cmake — FIXED 2026-10-10
 
 - [x] **Symptom (xyce-build, 2026-10-10):** `/usr/local/src/xyce-build` was configured

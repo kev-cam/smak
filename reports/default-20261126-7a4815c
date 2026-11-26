@@ -1,0 +1,134 @@
+Regression run (baseline, before the TightVNC fixes)
+=============================
+Branch:  main
+Commit:  7a4815c DEV_RULES: small fixes go directly on main
+Command: cd test && ./run-regression -j 4
+Host:    clevo-lx, Debian GNU/Linux 13 (trixie), perl v5.40.1, GNU Make 4.4.1
+Note:    IO::Pty is not installed on this host: the tests driven through
+         run-with-script.pl (the -Kd ones, 17 of the failures) cannot run.
+
+======================================
+SMAK REGRESSION TEST SUITE
+======================================
+
+Testing: /usr/local/src/smak/smak
+
+Test modes: [Seq/NC] [Seq/C] [Par/NC] [Par/C] [Par/NC/NB] [Par/C/NB]
+Results shown as: PpPpPpPpPpPp (all pass + fail tests work in all 6 modes)
+              or: PxPxPxPxPxPx (all pass, no fail test)
+              or: PpFpPpPpPpPp (2nd mode failed, fail tests work), etc.
+  P=pass, F=fail, T=timeout
+  p=-fail test passed (correctly failed), f=-fail test failed (wrongly succeeded), t=-fail timeout, x=no -fail test
+
+Unit Tests:
+----------
+Running test_autorescan                          ... PpPpPpPpPpPp (24s)
+Running test_benchmark                           ... PxPxPxPxPxPx (36s)
+Running test_builtin_optimization                ... PpPpPpPpPpPp (24s)
+Running test_categories                          ... FxFxFxFxFxFx (12s)
+Running test_cmake_interp_modules                ... PxPxPxPxPxPx (36s)
+Running test_cmake_link_dirs                     ... FxFxFxFxFxFx (36s)
+Running test_cmdline_var_submake                 ... PxPxPxPxPxPx (32s)
+Running test_command_prefixes                    ... PxPxPxPxPxPx (12s)
+Running test_debug                               ... FxFxFxFxFxFx (12s)
+Running test_debug_simple                        ... FxFxFxFxFxFx (12s)
+Running test_dnsmasq                             ... SKIP (SKIP: dnsmasq directory not found at /usr/local/src/dnsmasq)
+Running test_dryrun                              ... PxPxPxPxPxPx (12s)
+Running test_echo                                ... FxFxFxFxFxFx (12s)
+Running test_eval_set                            ... FxFxFxFxFxFx (12s)
+Running test_format                              ... FxFxFxFxFxFx (12s)
+Running test_gmake_funcs                         ... FxFxFxFxFxFx (12s)
+Running test_gnu_make_compat                     ... FxFxFxFxFxFx (116s)
+Running test_implicit_source_stale               ... PxPxPxPxPxPx (52s)
+Running test_individual                          ... FxFxFxFxFxFx (12s)
+Running test_lto_make_driver                     ... PxPxPxPxPxPx (48s)
+Running test_makecmp                             ... FxFxFxFxFxFx (12s)
+Running test_make_functions                      ... FxFxFxFxFxFx (96s)
+Running test_modify                              ... FxFxFxFxFxFx (12s)
+Running test_multiple_pattern_rules              ... PxPxPxPxPxPx (20s)
+Running test_nested_make                         ... PxPxPxPxPxPx (29s)
+Running test_nested                              ... FxFxFxFxFxFx (12s)
+Running test_norc                                ... PxPxPxPxPxPx (21s)
+Running test_no_rule_goal                        ... PxPxPxPxPxPx (12s)
+Running test_nvc_objext                          ... PxPxPxPxPxPx (12s)
+Running test_objext_expansion                    ... PxPxPxPxPxPx (12s)
+Running test_phony_repeat                        ... PxPxPxPxPxPx (28s)
+Running test_prereq_semantics                    ... FxFxFxFxFxFx (301s)
+Running test_print2                              ... FxFxFxFxFxFx (12s)
+Running test_print_fixes                         ... FxFxFxFxFxFx (12s)
+Running test_print                               ... FxFxFxFxFxFx (12s)
+Running test_rcfile                              ... PxPxPxPxPxPx (20s)
+Running test_readline                            ... FxFxFxFxFxFx (12s)
+Running test_recipe_shell_semantics              ... PxPxPxPxPxPx (20s)
+Running test_recursive_parallel                  ... PxPxPxPxPxPx (12s)
+Running test_scanner                             ... PxPxPxPxPxPx (48s)
+Running test_script                              ... PxPxPxPxPxPx (12s)
+Running test_server_reuse                        ... PxPxPxPxPxPx (26s)
+Running test_shell_if                            ... PxPxPxPxPxPx (12s)
+Running test_shell_var_prereq                    ... PxPxPxPxPxPx (24s)
+Running test_ssh_localhost                       ... PxPxPxPxPxPx (12s)
+Running test_suffix_collision                    ... PxPxPxPxPxPx (12s)
+Running test_suffix_rules                        ... PxPxPxPxPxPx (12s)
+Running test_test_worker                         ... PxPxPxPxPxPx (12s)
+Running test_timeout                             ... FxFxFxFxFxFx (12s)
+Running test_var_translation                     ... FxFxFxFxFxFx (12s)
+
+Default Target Tests:
+--------------------
+Running test-default-target                      ... PxPxPxPxPxPx (12s)
+
+======================================
+TEST SUMMARY
+======================================
+Total tests:   51
+Passed:        29
+Failed:        21
+Skipped:       1
+
+Failed tests:
+  ✗ test_categories
+     Log: $LOG_DIR/smak-test-fail-test_categories.log
+  ✗ test_cmake_link_dirs
+     Log: $LOG_DIR/smak-test-fail-test_cmake_link_dirs.log
+  ✗ test_debug
+     Log: $LOG_DIR/smak-test-fail-test_debug.log
+  ✗ test_debug_simple
+     Log: $LOG_DIR/smak-test-fail-test_debug_simple.log
+  ✗ test_echo
+     Log: $LOG_DIR/smak-test-fail-test_echo.log
+  ✗ test_eval_set
+     Log: $LOG_DIR/smak-test-fail-test_eval_set.log
+  ✗ test_format
+     Log: $LOG_DIR/smak-test-fail-test_format.log
+  ✗ test_gmake_funcs
+     Log: $LOG_DIR/smak-test-fail-test_gmake_funcs.log
+  ✗ test_gnu_make_compat
+     Log: $LOG_DIR/smak-test-fail-test_gnu_make_compat.log
+  ✗ test_individual
+     Log: $LOG_DIR/smak-test-fail-test_individual.log
+  ✗ test_makecmp
+     Log: $LOG_DIR/smak-test-fail-test_makecmp.log
+  ✗ test_make_functions
+     Log: $LOG_DIR/smak-test-fail-test_make_functions.log
+  ✗ test_modify
+     Log: $LOG_DIR/smak-test-fail-test_modify.log
+  ✗ test_nested
+     Log: $LOG_DIR/smak-test-fail-test_nested.log
+  ✗ test_prereq_semantics
+     Log: $LOG_DIR/smak-test-fail-test_prereq_semantics.log
+  ✗ test_print2
+     Log: $LOG_DIR/smak-test-fail-test_print2.log
+  ✗ test_print_fixes
+     Log: $LOG_DIR/smak-test-fail-test_print_fixes.log
+  ✗ test_print
+     Log: $LOG_DIR/smak-test-fail-test_print.log
+  ✗ test_readline
+     Log: $LOG_DIR/smak-test-fail-test_readline.log
+  ✗ test_timeout
+     Log: $LOG_DIR/smak-test-fail-test_timeout.log
+  ✗ test_var_translation
+     Log: $LOG_DIR/smak-test-fail-test_var_translation.log
+
+Tip: Run with --verbose to see test output
+
+Some tests failed.

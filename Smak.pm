@@ -1613,6 +1613,17 @@ sub get_cmd_vars {
     return \%cmd_vars;
 }
 
+# The value of a reference kept as $MV{REF}: a variable's, or what
+# expand_vars makes of $(REF) when REF is not a variable name, such as the
+# substitution reference $(SRCS:.c=.o).
+sub mv_ref_value {
+    my ($ref, $use_cmd_vars) = @_;
+    my $val = $use_cmd_vars ? $cmd_vars{$ref} // $MV{$ref} : $MV{$ref};
+    return $val if defined $val;
+    return '' if $ref =~ /^[\w.-]+$/;
+    return expand_vars("\$($ref)");
+}
+
 sub tee_print {
     my ($msg) = @_;
     print STDOUT $msg;
@@ -3640,7 +3651,9 @@ sub parse_makefile {
         if ($line =~ /^([ ]*)\$\((\w+)\)(.*)$/) {
             my ($ws, $prefix_var, $rest) = ($1, $2, $3);
             my $prefix_val = $cmd_vars{$prefix_var} // $MV{$prefix_var} // '';
-            $line = "$ws$prefix_val$rest";
+            # back in make syntax: the value may be a reference with a colon
+            # of its own (`$(OBJS): defs.h` with OBJS = $(SRCS:.c=.o))
+            $line = $ws . format_output($prefix_val) . $rest;
         }
 
         # `export VAR ...` / `unexport VAR ...` — drop the leading directive,
@@ -3779,7 +3792,7 @@ sub parse_makefile {
             # Check cmd_vars first (command-line overrides from recursive make) then MV
             while ($targets_str =~ /\$MV\{([^}]+)\}/) {
                 my $var = $1;
-                my $val = $cmd_vars{$var} // $MV{$var} // '';
+                my $val = mv_ref_value($var, 1);
                 $targets_str =~ s/\$MV\{\Q$var\E\}/$val/;
             }
             # Fully expand any remaining function calls like $(shell ...)
@@ -3819,7 +3832,7 @@ sub parse_makefile {
             if ($deps_str =~ /\$/) {
                 while ($deps_str =~ /\$MV\{([^}]+)\}/) {
                     my $var = $1;
-                    my $val = $cmd_vars{$var} // $MV{$var} // '';
+                    my $val = mv_ref_value($var, 1);
                     $deps_str =~ s/\$MV\{\Q$var\E\}/$val/;
                 }
                 $deps_str = expand_vars($deps_str) if $deps_str =~ /\$[({]/;
@@ -4393,7 +4406,7 @@ sub parse_included_makefile {
         if ($line =~ /^([ ]*)\$\((\w+)\)(.*)$/) {
             my ($ws, $prefix_var, $rest) = ($1, $2, $3);
             my $prefix_val = $MV{$prefix_var} // '';
-            $line = "$ws$prefix_val$rest";
+            $line = $ws . format_output($prefix_val) . $rest;
         }
 
         my $is_override = 0;
@@ -4512,7 +4525,7 @@ sub parse_included_makefile {
             # Check cmd_vars first (command-line overrides from recursive make) then MV
             while ($targets_str =~ /\$MV\{([^}]+)\}/) {
                 my $var = $1;
-                my $val = $cmd_vars{$var} // $MV{$var} // '';
+                my $val = mv_ref_value($var, 1);
                 $targets_str =~ s/\$MV\{\Q$var\E\}/$val/;
             }
             # Fully expand any remaining function calls like $(shell ...)
@@ -4548,7 +4561,7 @@ sub parse_included_makefile {
             if ($deps_str =~ /\$/) {
                 while ($deps_str =~ /\$MV\{([^}]+)\}/) {
                     my $var = $1;
-                    my $val = $cmd_vars{$var} // $MV{$var} // '';
+                    my $val = mv_ref_value($var, 1);
                     $deps_str =~ s/\$MV\{\Q$var\E\}/$val/;
                 }
                 $deps_str = expand_vars($deps_str) if $deps_str =~ /\$[({]/;
@@ -5898,7 +5911,7 @@ sub expand_dep_text {
     my ($d) = @_;
     while ($d =~ /\$MV\{([^}]+)\}/) {
         my $var = $1;
-        my $val = $MV{$var} // '';
+        my $val = mv_ref_value($var);
         $d =~ s/\$MV\{\Q$var\E\}/$val/;
     }
     $d = expand_vars($d) if $d =~ /\$[({]/;   # $(fn ...) or ${VAR}

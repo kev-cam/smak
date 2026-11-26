@@ -59,16 +59,34 @@ excludes=(--exclude='/.git/' --exclude='/.claude/' --exclude='*~')
 if [ "${SMAK_INSTALL_CMAKE_DOCS:-0}" != 1 ]; then
     excludes+=(--exclude='/cmake-*/doc/' --exclude='/cmake-*/man/')
 fi
-rsync -a "${excludes[@]}" "$src_dir"/ "$stage"/
-if [ -e "$prefix/share/smak" ] && ! mv -T "$prefix/share/smak" "$old" 2>/dev/null; then
-    find "$prefix/share/smak" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-    rsync -a "$stage"/ "$prefix/share/smak"/
+if [ -d "$prefix/share/smak" ] && [ ! -w "$prefix/share" ]; then
+    # The directory above is not ours to write in (root's, after a first
+    # install as root) but the tree is: there is nowhere beside it to stage
+    # a copy and no way to swap one in, so it is brought up to date in
+    # place.  rsync puts each file in by renaming a finished copy over the
+    # old one, so a smak started meanwhile never reads half a file.
+    rsync -a --delete "${excludes[@]}" "$src_dir"/ "$prefix/share/smak"/
 else
-    mv -T "$stage" "$prefix/share/smak"
-    rm -rf "$old"
+    rsync -a "${excludes[@]}" "$src_dir"/ "$stage"/
+    if [ -e "$prefix/share/smak" ] && ! mv -T "$prefix/share/smak" "$old" 2>/dev/null; then
+        find "$prefix/share/smak" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+        rsync -a "$stage"/ "$prefix/share/smak"/
+    else
+        mv -T "$stage" "$prefix/share/smak"
+        rm -rf "$old"
+    fi
 fi
-ln -sf "$prefix/share/smak/smak" "$prefix/bin/smak"
-ln -sf "$prefix/share/smak/cmake" "$prefix/bin/cmake"
+# A link that already points there is left alone: after a first install as
+# root, $prefix/bin is root's and the links in it cannot be replaced, while
+# $prefix/share/smak belongs to whoever keeps smak up to date.
+link() {
+    if [ "$(readlink "$2" 2>/dev/null)" = "$1" ]; then
+        return 0
+    fi
+    ln -sf "$1" "$2"
+}
+link "$prefix/share/smak/smak" "$prefix/bin/smak"
+link "$prefix/share/smak/cmake" "$prefix/bin/cmake"
 
 echo "smak installed: $prefix/bin/smak -> $prefix/share/smak/smak"
 echo "cmake wrapper:  $prefix/bin/cmake -> $prefix/share/smak/cmake"

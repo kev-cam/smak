@@ -4832,6 +4832,13 @@ sub parse_included_makefile {
                         }
                     }
                 }
+
+                # The default goal is the first target of the first rule
+                # make reads, in an included makefile too (TightVNC's
+                # cfb16/Makefile includes the file with `all:` and then
+                # adds rules of its own)
+                $default_target = $target
+                    if !defined $default_target && $type eq 'fixed' && $target !~ /\$/;
             }
 
             next;

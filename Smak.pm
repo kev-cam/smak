@@ -252,6 +252,10 @@ our %MV;
 # Command-line variable overrides (VAR=VALUE from command line)
 our %cmd_vars;
 
+# Environment variables are make variables, as in GNU make: read into %MV
+# when a makefile is parsed (import_environment).
+our %env_vars;        # name => value, as imported by the current parse
+
 # Track phony targets (from ninja builds)
 our %phony_targets;
 
@@ -287,7 +291,7 @@ our %parsed_file_mtimes;  # Track [mtime, size] of all parsed makefiles for cach
 # Set when parsing ran $(info)/$(warning)/$(error): make prints those on
 # every run, so such a makefile is not cached (loading skips the parse).
 our $parse_side_effects = 0;
-our $CACHE_VERSION = 17;  # Increment to invalidate old caches (bumped: target-specific variables)
+our $CACHE_VERSION = 18;  # Increment to invalidate old caches (bumped: environment variables)
 
 # Control variables
 our $timeout = 5;  # Timeout for print command evaluation in seconds
@@ -1613,6 +1617,48 @@ sub get_cmd_vars {
     return \%cmd_vars;
 }
 
+# The environment variables that are make variables: all of them, except
+# those make defines itself and those smak and the shell change from one
+# invocation to the next (a cached parse is valid for one environment).
+sub importable_env {
+    my %env;
+    for my $name (keys %ENV) {
+        next unless $name =~ /^[A-Za-z_][A-Za-z0-9_]*$/ && $name ne '_';
+        next if $name =~ /^(?:MAKE|MAKEFLAGS|MFLAGS|MAKELEVEL|MAKECMDGOALS|MAKEFILE_LIST|SHELL|CURDIR|PWD|OLDPWD|SHLVL|USR_SMAK_OPT|SMAK_\w*)$/;
+        $env{$name} = $ENV{$name};
+    }
+    return \%env;
+}
+
+# Digest of an environment as importable_env returns it. The cache file
+# holds this, not the values.
+sub env_signature {
+    my ($env) = @_;
+    require Digest::MD5;
+    return Digest::MD5::md5_hex(join("\0", map { "$_=$env->{$_}" } sort keys %$env));
+}
+
+# Make the environment's variables make variables. parse_makefile calls this
+# after setting the built-in defaults, which the environment overrides, and
+# before reading the makefile, whose assignments override the environment.
+# $only_missing: after loading a cached parse, which leaves out the
+# variables the makefile did not change.
+sub import_environment {
+    my ($only_missing) = @_;
+    %env_vars = %{ importable_env() };
+    for my $name (keys %env_vars) {
+        next if $only_missing && exists $MV{$name};
+        $MV{$name} = transform_make_vars($env_vars{$name});
+    }
+}
+
+# True while $var has the value the environment gave it
+sub is_env_value {
+    my ($var) = @_;
+    return exists $env_vars{$var} && exists $MV{$var}
+        && $MV{$var} eq transform_make_vars($env_vars{$var});
+}
+
 # The value of a reference kept as $MV{REF}: a variable's, or what
 # expand_vars makes of $(REF) when REF is not a variable name, such as the
 # substitution reference $(SRCS:.c=.o).
@@ -2476,6 +2522,7 @@ sub expand_vars {
             } elsif ($func eq 'origin') {
                 my $var = $args[0]; $var =~ s/^\s+|\s+$//g;
                 $replacement = exists $cmd_vars{$var} ? 'command line'
+                             : is_env_value($var) ? 'environment'
                              : exists $MV{$var} ? 'file'
                              : exists $ENV{$var} ? 'environment' : 'undefined';
             } elsif ($func eq 'flavor') {
@@ -3230,6 +3277,10 @@ sub parse_makefile {
     # $(MAKEFILE_LIST) is the list of makefiles parsed so far. yosys uses
     # `YOSYS_SRC := $(dir $(firstword $(MAKEFILE_LIST)))` to locate itself.
     $MV{MAKEFILE_LIST} = $makefile_path;
+
+    # The environment's variables override the defaults above; the
+    # makefile's assignments override them.
+    import_environment();
 
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
@@ -5027,6 +5078,9 @@ sub save_state_cache {
     }
     print $fh ");\n\n";
 
+    # The parse holds for the environment it was made in
+    print $fh "\$Smak::_cached_env = " . _quote_string(env_signature(\%env_vars)) . ";\n\n";
+
     # Save file mtimes and sizes for validation
     print $fh "# File mtimes and sizes for cache validation\n";
     print $fh "\%Smak::parsed_file_mtimes = (\n";
@@ -5046,6 +5100,9 @@ sub save_state_cache {
     print $fh "# Makefile variables\n";
     print $fh "\%Smak::MV = (\n";
     for my $var (sort keys %MV) {
+        # The environment's own values are not written to the file (it may
+        # hold secrets); load_state_cache takes them from the environment.
+        next if is_env_value($var);
         print $fh "    " . _quote_string($var) . " => " . _quote_string($MV{$var}) . ",\n";
     }
     print $fh ");\n\n";
@@ -5124,6 +5181,8 @@ sub load_state_cache {
     warn "DEBUG: Checking cache file '$cache_file'\n" if $ENV{SMAK_DEBUG};
 
     # Load the cache file
+    our $_cached_env;
+    undef $_cached_env;
     my $result = do $cache_file;
     unless (defined $result) {
         if ($@) {
@@ -5160,6 +5219,11 @@ sub load_state_cache {
         return 0;
     }
     %_cached_cmd_vars = ();
+
+    if (($_cached_env // '') ne env_signature(importable_env())) {
+        warn "DEBUG: Cache invalid - environment changed\n" if $ENV{SMAK_DEBUG};
+        return 0;
+    }
 
     # Check that the current Makefile is the one this cache was made for
     use Cwd 'abs_path';
@@ -5202,6 +5266,9 @@ sub load_state_cache {
     }
     @parse_shell_log = @_cached_shell_log;
     @_cached_shell_log = ();
+
+    # What save_state_cache left out of %MV
+    import_environment(1);
 
     warn "DEBUG: Cache loaded successfully\n" if $ENV{SMAK_DEBUG};
     return 1;

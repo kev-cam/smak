@@ -854,7 +854,7 @@ sub execute_builtin {
                     print STDERR "rm: cannot remove '$file': Is a directory\n" unless $silent;
                     return 1 unless $force || $ignore_errors;
                 }
-            } elsif (-e $file) {
+            } elsif (-e $file || -l $file) {   # -l: a dangling symlink
                 unless (unlink($file)) {
                     print STDERR "rm: cannot remove '$file': $!\n" unless $silent;
                     return 1 unless $force || $ignore_errors;
@@ -1300,7 +1300,7 @@ sub try_execute_compound_builtin {
         for my $pattern (@rm_patterns) {
             my @files = glob($pattern);
             for my $file (@files) {
-                if (-e $file && !-d $file) {
+                if (-l $file || (-e $file && !-d $file)) {   # -l: also a dangling symlink
                     unlink($file);  # Ignore errors (like rm -f)
                 }
             }
@@ -6586,7 +6586,7 @@ sub builtin_rm {
 
     # Remove files
     for my $file (@files) {
-        if (-e $file) {
+        if (-e $file || -l $file) {   # -l: a dangling symlink
             if (-d $file) {
                 if ($recursive) {
                     use File::Path 'remove_tree';

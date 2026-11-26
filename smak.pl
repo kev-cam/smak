@@ -487,6 +487,7 @@ for my $arg (@ARGV) {
         push @targets, $arg;
     }
 }
+Smak::set_cmd_goals(@targets);   # $(MAKECMDGOALS)
 
 {
     my $cv = Smak::get_cmd_vars();

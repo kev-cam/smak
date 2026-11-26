@@ -252,6 +252,10 @@ our %MV;
 # Command-line variable overrides (VAR=VALUE from command line)
 our %cmd_vars;
 
+# Goals given on the command line: $(MAKECMDGOALS) of the makefile read next
+our @cmd_goals;
+our $goals_mentioned = 0;   # the makefile text names MAKECMDGOALS
+
 # Environment variables are make variables, as in GNU make: read into %MV
 # when a makefile is parsed (import_environment).
 our %env_vars;        # name => value, as imported by the current parse
@@ -1063,6 +1067,7 @@ sub execute_builtin {
             };
 
             $sub_makefile = default_makefile() unless $sub_makefile;
+            set_cmd_goals(@sub_targets);
             eval { parse_makefile($sub_makefile); };
             if ($@) {
                 warn "Warning: Could not parse '$sub_makefile' in '$sub_directory': $@\n";
@@ -1445,6 +1450,7 @@ sub execute_command_sequential {
 
                     if ($pid == 0) {
                         # Child: disposable process handles sub-makefile
+                        set_cmd_goals(grep { !/=/ } split ' ', $subtarget);
                         if ($call->{type} eq 'C') {
                             my $subdir = $call->{dir};
                             my $abs_subdir = $subdir =~ m{^/} ? $subdir : "$saved_dir/$subdir";
@@ -1619,6 +1625,12 @@ sub set_cmd_var {
 
 sub get_cmd_vars {
     return \%cmd_vars;
+}
+
+# The goals of this invocation, for $(MAKECMDGOALS). Set before the makefile
+# is parsed: it may test them (`MAKECMDGOALS ?= all`).
+sub set_cmd_goals {
+    @cmd_goals = @_;
 }
 
 # The environment variables that are make variables: all of them, except
@@ -2950,8 +2962,10 @@ sub make_line_reader {
     my @pending;
     return sub {
         unshift @pending, splice(@eval_lines) if @eval_lines;
-        return shift @pending if @pending;
-        return scalar <$fh>;
+        my $line = @pending ? shift @pending : scalar <$fh>;
+        # a cached parse of this makefile holds for the same goals only
+        $goals_mentioned = 1 if defined $line && index($line, 'MAKECMDGOALS') >= 0;
+        return $line;
     };
 }
 
@@ -3292,6 +3306,7 @@ sub parse_makefile {
     @parse_shell_log = ();
     @remake_includes = ();
     %exported_vars = ();
+    $goals_mentioned = 0;
 
     # Reset suffix rules - initialize with GNU make default suffixes
     # These are the common suffixes used in C/C++ development
@@ -3364,6 +3379,7 @@ sub parse_makefile {
     # The environment's variables override the defaults above; the
     # makefile's assignments override them.
     import_environment();
+    $MV{MAKECMDGOALS} = "@cmd_goals" if @cmd_goals;
 
     open(my $fh, '<', $makefile) or die "Cannot open $makefile: $!";
 
@@ -5159,8 +5175,10 @@ sub save_state_cache {
     }
     print $fh ");\n\n";
 
-    # The parse holds for the environment it was made in
-    print $fh "\$Smak::_cached_env = " . _quote_string(env_signature(\%env_vars)) . ";\n\n";
+    # The parse holds for the environment it was made in, and for the same
+    # goals if the makefile looks at them
+    print $fh "\$Smak::_cached_env = " . _quote_string(env_signature(\%env_vars)) . ";\n";
+    print $fh "\$Smak::_cached_goals = " . _quote_string($goals_mentioned ? "@cmd_goals" : undef) . ";\n\n";
 
     # Save file mtimes and sizes for validation
     print $fh "# File mtimes and sizes for cache validation\n";
@@ -5184,6 +5202,7 @@ sub save_state_cache {
         # The environment's own values are not written to the file (it may
         # hold secrets); load_state_cache takes them from the environment.
         next if is_env_value($var);
+        next if $var eq 'MAKECMDGOALS' && !$goals_mentioned;
         print $fh "    " . _quote_string($var) . " => " . _quote_string($MV{$var}) . ",\n";
     }
     print $fh ");\n\n";
@@ -5263,8 +5282,9 @@ sub load_state_cache {
     warn "DEBUG: Checking cache file '$cache_file'\n" if $ENV{SMAK_DEBUG};
 
     # Load the cache file
-    our $_cached_env;
+    our ($_cached_env, $_cached_goals);
     undef $_cached_env;
+    undef $_cached_goals;
     my $result = do $cache_file;
     unless (defined $result) {
         if ($@) {
@@ -5304,6 +5324,10 @@ sub load_state_cache {
 
     if (($_cached_env // '') ne env_signature(importable_env())) {
         warn "DEBUG: Cache invalid - environment changed\n" if $ENV{SMAK_DEBUG};
+        return 0;
+    }
+    if (defined $_cached_goals && $_cached_goals ne "@cmd_goals") {
+        warn "DEBUG: Cache invalid - goals changed\n" if $ENV{SMAK_DEBUG};
         return 0;
     }
 
@@ -5351,6 +5375,11 @@ sub load_state_cache {
 
     # What save_state_cache left out of %MV
     import_environment(1);
+    $goals_mentioned = defined $_cached_goals;
+    unless ($goals_mentioned) {
+        delete $MV{MAKECMDGOALS};
+        $MV{MAKECMDGOALS} = "@cmd_goals" if @cmd_goals;
+    }
 
     warn "DEBUG: Cache loaded successfully\n" if $ENV{SMAK_DEBUG};
     return 1;
@@ -7822,6 +7851,7 @@ sub build_target {
                                 set_cmd_var($var, $sub_vars_ref->{$var});
                             }
                         }
+                        set_cmd_goals(@sub_targets);
                         eval { parse_makefile($makefile); };
                         if ($@) {
                             warn "Warning: Could not parse sub-makefile '$makefile': $@\n";

@@ -77,8 +77,10 @@ sub parse_simple_command {
     return () if $cmd =~ /^\s*(if|then|else|elif|fi|while|do|done|for|case|esac|until|select|function)\b/;
     return () if $cmd =~ /\b(then|else|elif|fi|do|done|esac)\b/;  # Also inside the command
 
-    # Shell builtins that cannot be exec'd directly (they're built into the shell, not executables)
-    return () if $cmd =~ /^\s*(cd|export|source|\.)\b/;
+    # Shell builtins that cannot be exec'd directly (they're built into the shell, not executables).
+    # `exit 1` run as a program was "Cannot exec 'exit'" and status 127.
+    return () if $cmd =~ /^\s*(cd|export|source|\.|exit|exec|eval|set|unset|shift|read|return|trap|umask|ulimit|wait|alias|unalias|type|command|builtin|hash|times|break|continue|readonly|local|declare|typeset|let|getopts)\b/;
+    return () if $cmd =~ /^\s*[.:](\s|$)/;    # `. file` and `:`: no word boundary after them
 
     # Parse into words, handling quotes
     my @words;

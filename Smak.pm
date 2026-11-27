@@ -387,6 +387,18 @@ sub set_fail_fast {
 # Call exactly once per failed job. With fail-fast active it overrides
 # keep-going: keep going below the threshold, stop at or past it. Without it,
 # the legacy rule -- stop on the first failure unless keep-going -- applies.
+# A recipe command is run as `{ command; } 2>&1; echo EXIT_STATUS=$?` and its
+# status read from that last line.  When the line does not come, the shell
+# ended before reaching the echo: the recipe called `exit` (the braces are
+# not a subshell), or the shell could not parse the command, or it was
+# killed.  In each case the shell's own status ($? after close) is the
+# command's: 0 after `exit 0`, which is success, as it is for make.
+sub marker_missing_status {
+    my ($status) = @_;
+    return 128 + ($status & 127) if $status & 127;
+    return $status >> 8;
+}
+
 sub note_job_failure {
     $failed_job_count++;
     if ($fail_fast) {
@@ -1514,7 +1526,7 @@ sub execute_command_sequential {
                         }
 
                         # Stream output line by line
-                        my $shell_exit = 0;
+                        my $shell_exit;
                         while (my $line = <$cmd_fh>) {
                             if ($line =~ /^EXIT_STATUS=(\d+)$/) {
                                 $shell_exit = $1;
@@ -1524,6 +1536,8 @@ sub execute_command_sequential {
                             print $log_fh $line if $report_mode && $log_fh;
                         }
                         close($cmd_fh);
+                        # No marker: see marker_missing_status
+                        $shell_exit //= marker_missing_status($?);
 
                         if ($shell_exit != 0) {
                             $error = "smak: *** [$target] Error $shell_exit\n";
@@ -1587,8 +1601,8 @@ sub execute_command_sequential {
     }
 
     close($cmd_fh);
-    # No marker: the shell itself failed (syntax error, killed): not success
-    $exit_code //= ($? >> 8) || 1;
+    # No marker: see marker_missing_status
+    $exit_code //= marker_missing_status($?);
 
     warn "DEBUG[" . __LINE__ . "]: Command executed, exit_code=$exit_code\n" if $ENV{SMAK_DEBUG};
 
@@ -18500,6 +18514,35 @@ sub run_job_master {
                     # Child smak finished submitting all jobs
                     my $job_count = $1 // 0;
                     print STDERR "Child smak done, submitted $job_count jobs\n" if $ENV{SMAK_DEBUG};
+
+                    if ($stop_requested) {
+                        # The build stopped on a failure before this sub-make
+                        # had sent its jobs (fail_all_child_relays told the
+                        # relays there were then; this one came after).  None
+                        # of its jobs will run: dispatch_jobs does nothing
+                        # once stopped.  It has to be told, or it waits for
+                        # ever, and with it the smak that started it and this
+                        # job-master, which does not finish while a sub-make
+                        # is out.
+                        my $code = $max_exit_code || 1;
+                        my %gone = map { $_ => 1 } keys %{$child_job_targets{$socket} || {}};
+                        @job_queue = grep { !($_->{from_child} && $gone{$_->{target}}) } @job_queue;
+                        for my $t (keys %gone) {
+                            delete $target_to_child{$t};
+                            delete $child_target_siblings{$t};
+                        }
+                        print STDERR "Build has stopped: CHILD_COMPLETE $code to a sub-make that came after\n" if $ENV{SMAK_DEBUG};
+                        print $socket "CHILD_COMPLETE $code\n";
+                        $socket->flush();
+                        $select->remove($socket);
+                        @child_sockets = grep { $_ != $socket } @child_sockets;
+                        delete $child_job_targets{$socket};
+                        delete $child_exit_codes{$socket};
+                        delete $child_all_submitted{$socket};
+                        delete $child_env{$socket};
+                        close($socket);
+                        last CHILD_READ;
+                    }
 
                     # Mark that this child has finished submitting - check_child_completion
                     # can now safely send CHILD_COMPLETE when all jobs are done

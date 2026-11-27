@@ -122,6 +122,47 @@ every case; smak exited 0 in most of them.
   runs; a second run compiles nothing and runs the commands make's second run
   does; `smak -C Xvnc clean` leaves the tree make's clean leaves.
 
+### Failures in recipes: a hang under -j, `exit 0` taken for an error — FIXED 2026-11-26
+
+Found when TightVNC's top Makefile got a check that fails on purpose (a
+header is missing), `smak -j16` never came back, and `smak clean` failed
+where `make clean` did not. All three were there before the fixes above.
+
+- [x] **`smak -j` never finished when a job failed while a sub-make was on
+  its way.**
+  ```
+  all: a b
+  chk: ; @exit 1
+  a: chk ; $(MAKE) -C $@ all
+  b: ; $(MAKE) -C $@ all
+  ```
+  with any `a/Makefile`, `b/Makefile`. The failure of `chk` stops the build:
+  the job-master clears its queue and `fail_all_child_relays` tells the
+  sub-makes connected at that moment. The one for `b`, forked just before,
+  connects after it and submits its jobs; `dispatch_jobs` returns at once
+  when stopped, nobody answers, and the relay, the smak that forked it and
+  the job-master wait for ever (`queued=1 ... builtin_forks=1` under
+  SMAK_DEBUG). With `@false` as the failing command it did not happen: that
+  is run in-process before anything is forked. Fix: a relay whose
+  `CHILD_DONE` arrives after the stop gets `CHILD_COMPLETE <status>` and its
+  jobs leave the queue. Test `test_fail_while_submake.sh`.
+- [x] **Sequential: a recipe that calls `exit 0` was "Error 1".** Commands
+  run as `{ command; } 2>&1; echo EXIT_STATUS=$?`; `exit` leaves the shell
+  before the echo, and with no status line the code assumed a failure. In
+  the path for commands that follow a recursive make it assumed success
+  instead, so `exit 3` passed. Fix: `marker_missing_status`, the shell's
+  own status. Test `test_recipe_exit.sh`.
+- [x] **Under -j: `exit 1` was run as a program** ("Cannot exec 'exit'",
+  status 127): the worker's list of shell builtins had `cd`, `export`,
+  `source` and no others. Now also `exit`, `:`, `. file`, `eval`, `exec`,
+  `set`, `unset`, `shift`, `read`, `trap`, `umask`, `ulimit`, `wait` and the
+  rest that are not programs as well. Same test.
+- [ ] **Still open: under -j a `$(MAKE)` line is started although an earlier
+  line of the same recipe failed.**
+  `a: ; @false` / `<tab>$(MAKE) -C $@ all` prints the sub-make's command and
+  starts it; the build then fails as it should (it used to hang, see
+  above), but make would not have started the sub-make at all.
+
 ### A phony prerequisite shared by several goals runs once per goal
 
 - [ ] **Symptom (found 2026-11-26, TightVNC):** with several goals on the

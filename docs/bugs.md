@@ -5,6 +5,46 @@ hypothesis. Tick off (replace `- [ ]` with `- [x]`) when fixed.
 
 ## Open
 
+### `FORCE:` with no recipe is dropped in a sub-make under -j: a write-if-changed header is never remade
+
+- [ ] **Symptom (clevo-lx, 2026-11-27):** TightVNC's `hw/vnc/Makefile` has
+  `buildid.h: FORCE`, whose recipe writes the header only when its contents
+  change (the release and the commit), and `FORCE:` with no recipe. GNU make
+  (with or without -j) and sequential smak run that recipe on every build.
+  `smak -jN` (any N, -j1 too) never runs it when hw/vnc is reached as a
+  sub-make (vnc_unixsrc -> Xvnc -> programs -> Xserver -> hw/vnc), so a new
+  commit or a release bump never reaches init.o and xpra.o. Run at the top
+  level, `smak -j` does run it.
+- **Repro** (`value` holds what the header gets):
+  ```
+  # Makefile
+  all:
+  	$(MAKE) -C sub all
+  # sub/Makefile
+  all: prog
+  prog: obj.o
+  	cp obj.o prog
+  obj.o: out.h
+  	cp out.h obj.o
+  out.h: FORCE
+  	@cat ../value > out.h.new; if cmp -s out.h.new out.h; then rm -f out.h.new; else mv -f out.h.new out.h; fi
+  FORCE:
+  ```
+  `echo one > value; smak -j8; echo two > value; smak -j8`: sub/prog still
+  says one (GNU make -j8: two).
+- **Cause (a review agent's reading, matching the code):** Smak.pm:1932,
+  `@deps = grep { -e $_ || !is_empty_explicit_target($_) } @deps;`, drops the
+  missing empty-rule prerequisite in the sub-make's capture; the job master
+  then judges out.h by timestamps alone, finds no prerequisites, and skips it.
+  `.PHONY: FORCE` alone, and `FORCE: ;`, do not help.
+- **Workaround (TightVNC hw/vnc/Makefile, xpra-view/Makefile):** give FORCE a
+  command, `FORCE:` then a tab and `@:`. Then make, make -j8, smak and
+  smak -j8 all remake out.h every time and rebuild obj.o only when it changed.
+- **Fix idea:** a relayed missing empty-rule prerequisite should make its
+  dependent's recipe always run, with that target's own dependents then judged
+  by times. Not the PHONY flag: relayed phony prerequisites count as always
+  newer, so obj.o would be rebuilt on every run.
+
 <!-- Entries below marked "smak-buildtest" were found by building GitHub
      projects in containers (buildtest/README.md), 2026-09-27, Ubuntu 24.04. -->
 
